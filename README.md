@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/logo.png" alt="that-agent" width="180" />
+</p>
+
 # that-agent
 
 An open-source Rust framework for long-lived autonomous agents.
