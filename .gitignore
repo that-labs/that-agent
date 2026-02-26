@@ -21,7 +21,7 @@
 .that/
 
 # Local task tracking (Claude Code session state)
-tasks/
+/tasks/
 
 # Local caches (Docker buildx, etc.)
 .cache/
