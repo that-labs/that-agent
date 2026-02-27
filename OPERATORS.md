@@ -91,32 +91,7 @@ All channel variables are optional. Set the pair for each channel you want to ac
 
 ## Agent Identity
 
-Each agent's identity is defined by a set of workspace files stored in its home directory. Operators can seed these files before the first run or let the agent bootstrap itself.
-
-### Workspace File Model
-
-| File | Role | Edit Frequency |
-|---|---|---|
-| `Soul.md` | Deep identity: character, values, philosophy | Slow — evolves with the agent |
-| `Identity.md` | Shallow: name, vibe, emoji | Bootstrap-created, rarely changes |
-| `Agents.md` | Operating instructions, tool discipline, memory, heartbeat | Agent-editable at any time |
-| `User.md` | Who the user is and how to address them | Grows organically |
-| `Tools.md` | Local env notes: devices, SSH, preferences | Environment-specific |
-| `Boot.md` | Optional startup checklist | Optional |
-| `Bootstrap.md` | First-run ritual — ephemeral, agent deletes it on completion | One-time |
-
-### Bootstrap Flow
-
-On first run, if neither `Soul.md` nor `Identity.md` exists, the agent enters its bootstrap flow. During bootstrap, the agent creates its identity files and then deletes `Bootstrap.md` to signal completion. Subsequent runs skip bootstrap entirely.
-
-### Template Variables
-
-`Agents.md` supports runtime template variables:
-
-- `{max_turns}` — replaced with the configured maximum turn count
-- `{warn_at}` — replaced with the turn number at which the agent receives a warning
-
-These are substituted at preamble build time, so operators can write generic instructions that adapt to different deployment configurations.
+Each agent's identity is defined by a set of workspace files stored in its home directory. Operators can seed these files before the first run or let the agent bootstrap itself on first boot. See [ARCHITECTURE.md § 4](./ARCHITECTURE.md#4-continuity-model) for the workspace file model, bootstrap flow, and template variable reference.
 
 ---
 
@@ -266,17 +241,6 @@ Scenarios are defined as TOML files in `evals/scenarios/`. Each scenario contain
 ### Reports
 
 Reports are stored under `~/.that-agent/evals/<run-id>/`.
-
-### Step Types
-
-| Step | Description |
-|---|---|
-| `prompt` | Send a prompt to the agent |
-| `reset_session` | Clear the session and start fresh |
-| `create_skill` | Plant a skill file for the agent |
-| `run_command` | Execute a shell command |
-| `create_file` | Write a file to the workspace |
-| `assert` | Validate agent output or workspace state |
 
 ### Gate Policy
 

@@ -148,8 +148,6 @@ Each agent maintains a set of named markdown files that define its identity, ins
 
 **Bootstrap detection:** An agent needs bootstrapping when both `Soul.md` and `Identity.md` are absent. The `Bootstrap.md` file drives the first-run ritual and is deleted by the agent upon completion.
 
-**Preamble assembly:** `generate_soul_md()` produces a combined output with Identity sections first (Name, What I Am, Vibe, Emoji) then Soul sections (Character onward). `split_identity_soul()` splits at the `## Character` heading.
-
 ---
 
 ## 5. Safety Model
@@ -288,10 +286,6 @@ Assertions verify postconditions: file existence, command success, content match
 
 After all steps complete, the full transcript and rubric are passed to an LLM judge. The judge scores each rubric criterion and provides rationale. Reports are persisted for regression tracking.
 
-### Design Principle
-
-**Test autonomy, not tool knowledge.** Scenario prompts must read like a human making a natural request. They must never name specific tools, internal skill identifiers, or workflow steps. The agent must decide autonomously how to accomplish the task. Bypassing native workflows (e.g., planting a skill that the agent is supposed to create) gives the judge false signal and inflated scores.
-
 ---
 
 ## 9. Invariants
@@ -310,13 +304,3 @@ These must remain true as the project evolves:
 
 6. **String truncation uses char-based slicing, never byte offsets.** `&str[..n]` panics on multi-byte codepoints. All truncation must use `.chars().take(n)` or `char_indices().nth(n)`.
 
----
-
-## 10. For Operators
-
-Deployment guides, Kubernetes overlays, and operational runbooks are maintained separately. See `OPERATORS.md` for:
-- Docker and Kubernetes deployment configurations
-- Environment variable reference
-- Sandbox mode configuration
-- Channel adapter setup
-- Monitoring and observability
