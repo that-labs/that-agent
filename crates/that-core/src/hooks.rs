@@ -304,8 +304,7 @@ impl LoopHook for ChannelHook {
                 }
             }
             "channel_send_file" => {
-                let args = serde_json::from_str::<serde_json::Value>(args_json)
-                    .unwrap_or_default();
+                let args = serde_json::from_str::<serde_json::Value>(args_json).unwrap_or_default();
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let caption = args
                     .get("caption")
@@ -334,14 +333,10 @@ impl LoopHook for ChannelHook {
                                 caption,
                                 mime_type,
                             };
-                            let cid = target_channel
-                                .as_deref()
-                                .or(self.channel_id.as_deref());
+                            let cid = target_channel.as_deref().or(self.channel_id.as_deref());
                             if let Some(cid) = cid {
-                                let _ = self
-                                    .router
-                                    .send_to(cid, &event, self.target.as_ref())
-                                    .await;
+                                let _ =
+                                    self.router.send_to(cid, &event, self.target.as_ref()).await;
                             } else {
                                 self.router.broadcast(&event).await;
                             }

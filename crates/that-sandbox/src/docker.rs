@@ -278,10 +278,7 @@ impl DockerSandboxClient {
         // Mount the base repository read-only when workspace is a worktree.
         if let Some(ref base_repo) = base_repo_mount {
             args.push("-v".to_string());
-            args.push(format!(
-                "{}:/base-repo:ro",
-                base_repo.display()
-            ));
+            args.push(format!("{}:/base-repo:ro", base_repo.display()));
             args.push("-e".to_string());
             args.push("THAT_WORKTREE_BASE_REPO=/base-repo".to_string());
         }
@@ -436,7 +433,11 @@ impl DockerSandboxClient {
 fn detect_worktree_base(workspace: &Path) -> Option<std::path::PathBuf> {
     // Walk up the path looking for a `.worktrees` component.
     for ancestor in workspace.ancestors() {
-        if ancestor.file_name().map(|n| n == ".worktrees").unwrap_or(false) {
+        if ancestor
+            .file_name()
+            .map(|n| n == ".worktrees")
+            .unwrap_or(false)
+        {
             // The parent of `.worktrees/` is the base repo.
             return ancestor.parent().map(|p| p.to_path_buf());
         }

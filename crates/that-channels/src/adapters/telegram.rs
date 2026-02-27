@@ -329,10 +329,7 @@ impl TelegramAdapter {
     ) -> Result<()> {
         let part = reqwest::multipart::Part::bytes(data.to_vec())
             .file_name(filename.to_string())
-            .mime_str(
-                mime_type_from_filename(filename)
-                    .unwrap_or("application/octet-stream"),
-            )?;
+            .mime_str(mime_type_from_filename(filename).unwrap_or("application/octet-stream"))?;
         let mut form = reqwest::multipart::Form::new()
             .text("chat_id", chat_id.to_string())
             .part("document", part);
@@ -574,14 +571,13 @@ impl Channel for TelegramAdapter {
                 let line = format!("{name}: {args}");
                 let (text, existing_msg_id) = {
                     let mut state = self.state.lock().await;
-                    let tracker = state
-                        .tool_status
-                        .entry(chat_id.clone())
-                        .or_insert_with(|| ToolStatusTracker {
+                    let tracker = state.tool_status.entry(chat_id.clone()).or_insert_with(|| {
+                        ToolStatusTracker {
                             message_id: 0,
                             completed: Vec::new(),
                             current_line: None,
-                        });
+                        }
+                    });
                     // Move previous current tool to completed list.
                     if let Some(prev) = tracker.current_line.take() {
                         let name_only = prev.split(':').next().unwrap_or(&prev).trim().to_string();

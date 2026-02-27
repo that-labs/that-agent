@@ -151,9 +151,7 @@ impl Channel for HttpAdapter {
     }
 
     fn format_instructions(&self) -> Option<String> {
-        Some(
-            "You are responding via HTTP API. Use standard Markdown formatting.".to_string(),
-        )
+        Some("You are responding via HTTP API. Use standard Markdown formatting.".to_string())
     }
 
     async fn on_start(&self) -> Result<()> {
@@ -348,7 +346,11 @@ async fn auth_middleware(
                 (StatusCode::UNAUTHORIZED, "Invalid bearer token").into_response()
             }
         }
-        _ => (StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header").into_response(),
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            "Missing or invalid Authorization header",
+        )
+            .into_response(),
     }
 }
 
@@ -500,10 +502,8 @@ async fn handle_chat_stream(
         match item {
             Ok(event) => {
                 let sse_event = channel_event_to_sse(&req_id, &event);
-                let is_terminal = matches!(
-                    event,
-                    ChannelEvent::Done { .. } | ChannelEvent::Error(_)
-                );
+                let is_terminal =
+                    matches!(event, ChannelEvent::Done { .. } | ChannelEvent::Error(_));
                 if is_terminal {
                     state_ref.active_requests.remove(&req_id);
                 }
@@ -515,9 +515,7 @@ async fn handle_chat_stream(
                 Some(
                     SseEvent::default()
                         .event("error")
-                        .data(
-                            serde_json::json!({ "error": "Stream timed out" }).to_string(),
-                        ),
+                        .data(serde_json::json!({ "error": "Stream timed out" }).to_string()),
                 )
             }
         }
@@ -611,32 +609,28 @@ fn channel_event_to_sse(_request_id: &str, event: &ChannelEvent) -> Option<SseEv
             name,
             args,
         } => Some(
-            SseEvent::default()
-                .event("tool_call")
-                .data(
-                    serde_json::json!({
-                        "call_id": call_id,
-                        "name": name,
-                        "args": args,
-                    })
-                    .to_string(),
-                ),
+            SseEvent::default().event("tool_call").data(
+                serde_json::json!({
+                    "call_id": call_id,
+                    "name": name,
+                    "args": args,
+                })
+                .to_string(),
+            ),
         ),
         ChannelEvent::ToolResult {
             call_id,
             name,
             result,
         } => Some(
-            SseEvent::default()
-                .event("tool_result")
-                .data(
-                    serde_json::json!({
-                        "call_id": call_id,
-                        "name": name,
-                        "result": result,
-                    })
-                    .to_string(),
-                ),
+            SseEvent::default().event("tool_result").data(
+                serde_json::json!({
+                    "call_id": call_id,
+                    "name": name,
+                    "result": result,
+                })
+                .to_string(),
+            ),
         ),
         ChannelEvent::Done {
             text,
@@ -644,16 +638,14 @@ fn channel_event_to_sse(_request_id: &str, event: &ChannelEvent) -> Option<SseEv
             output_tokens,
             ..
         } => Some(
-            SseEvent::default()
-                .event("done")
-                .data(
-                    serde_json::json!({
-                        "text": text,
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                    })
-                    .to_string(),
-                ),
+            SseEvent::default().event("done").data(
+                serde_json::json!({
+                    "text": text,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                })
+                .to_string(),
+            ),
         ),
         ChannelEvent::Error(err) => Some(
             SseEvent::default()
@@ -682,18 +674,16 @@ fn channel_event_to_sse(_request_id: &str, event: &ChannelEvent) -> Option<SseEv
             caption,
             mime_type,
         } => Some(
-            SseEvent::default()
-                .event("attachment")
-                .data(
-                    serde_json::json!({
-                        "filename": filename,
-                        "mime_type": mime_type,
-                        "caption": caption,
-                        "size_bytes": data.len(),
-                        "data_base64": BASE64_STANDARD.encode(data.as_ref()),
-                    })
-                    .to_string(),
-                ),
+            SseEvent::default().event("attachment").data(
+                serde_json::json!({
+                    "filename": filename,
+                    "mime_type": mime_type,
+                    "caption": caption,
+                    "size_bytes": data.len(),
+                    "data_base64": BASE64_STANDARD.encode(data.as_ref()),
+                })
+                .to_string(),
+            ),
         ),
         // Events with no SSE representation.
         ChannelEvent::TypingIndicator

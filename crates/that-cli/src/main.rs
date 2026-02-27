@@ -577,7 +577,9 @@ fn api_key_env_var_for_provider(provider: &str) -> anyhow::Result<&'static str> 
         "openai" => Ok("OPENAI_API_KEY"),
         "anthropic" => Ok("ANTHROPIC_API_KEY"),
         "openrouter" => Ok("OPENROUTER_API_KEY"),
-        other => anyhow::bail!("Unsupported provider '{other}'. Use 'anthropic', 'openai', or 'openrouter'."),
+        other => anyhow::bail!(
+            "Unsupported provider '{other}'. Use 'anthropic', 'openai', or 'openrouter'."
+        ),
     }
 }
 

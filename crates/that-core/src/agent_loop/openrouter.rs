@@ -95,10 +95,8 @@ pub(super) async fn stream_turn(
 
             // Extract usage from the final chunk (enabled via stream_options.include_usage).
             if let Some(u) = val.get("usage").and_then(|u| u.as_object()) {
-                usage.input_tokens = u
-                    .get("prompt_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
+                usage.input_tokens =
+                    u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                 usage.output_tokens = u
                     .get("completion_tokens")
                     .and_then(|v| v.as_u64())
@@ -108,7 +106,9 @@ pub(super) async fn stream_turn(
                     if let Some(cached) = details.get("cached_tokens").and_then(|v| v.as_u64()) {
                         usage.cache_read_tokens = cached as u32;
                     }
-                    if let Some(written) = details.get("cache_write_tokens").and_then(|v| v.as_u64()) {
+                    if let Some(written) =
+                        details.get("cache_write_tokens").and_then(|v| v.as_u64())
+                    {
                         usage.cache_write_tokens = written as u32;
                     }
                 }
@@ -129,9 +129,7 @@ pub(super) async fn stream_turn(
 
             // Some models/providers send `delta` (standard streaming), others may
             // send a complete `message` object. Handle both.
-            let delta = choice
-                .get("delta")
-                .or_else(|| choice.get("message"));
+            let delta = choice.get("delta").or_else(|| choice.get("message"));
 
             if let Some(delta) = delta {
                 // Text content.
@@ -149,10 +147,7 @@ pub(super) async fn stream_turn(
 
                         // A delta with `id` (string) marks the start of a new tool call.
                         // A delta with `id: null` or missing `id` is a continuation.
-                        let is_new = tc
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .is_some();
+                        let is_new = tc.get("id").and_then(|v| v.as_str()).is_some();
 
                         if is_new {
                             let call_id = tc["id"].as_str().unwrap_or("").to_string();
@@ -190,10 +185,7 @@ pub(super) async fn stream_turn(
             // Any finish_reason flushes accumulated tool slots and emits TurnEnd.
             // Different models/providers use different values: "tool_calls" (standard),
             // "function_call" (legacy), "stop" (some send this even with tool calls).
-            if choice
-                .get("finish_reason")
-                .is_some_and(|f| !f.is_null())
-            {
+            if choice.get("finish_reason").is_some_and(|f| !f.is_null()) {
                 // Flush all tool slots as ToolCallComplete events.
                 for (_, (call_id, name, args)) in std::mem::take(&mut tool_slots) {
                     if !name.is_empty() {
@@ -303,7 +295,11 @@ fn tool_to_chat_completions(t: &ToolDef) -> serde_json::Value {
 ///
 /// Prepends a system message, then maps each internal message type to the
 /// corresponding Chat Completions role.
-fn messages_to_chat_completions(system: &str, messages: &[Message], prompt_caching: bool) -> Vec<serde_json::Value> {
+fn messages_to_chat_completions(
+    system: &str,
+    messages: &[Message],
+    prompt_caching: bool,
+) -> Vec<serde_json::Value> {
     let mut out: Vec<serde_json::Value> = Vec::with_capacity(messages.len() + 1);
 
     // System message first — use content array with cache_control when caching is enabled.
@@ -360,9 +356,7 @@ fn messages_to_chat_completions(system: &str, messages: &[Message], prompt_cachi
                 out.push(assistant_msg);
             }
             Message::Tool {
-                call_id,
-                content,
-                ..
+                call_id, content, ..
             } => {
                 out.push(serde_json::json!({
                     "role": "tool",

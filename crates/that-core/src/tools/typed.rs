@@ -1324,10 +1324,9 @@ async fn dispatch_inner(
         "worktree_list" => {
             let args: WorktreeListArgs = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            let worktrees = that_tools::tools::code::worktree::list_worktrees(
-                Path::new(&args.base_repo),
-            )
-            .map_err(|e| ToolError(format!("worktree_list failed: {e}")))?;
+            let worktrees =
+                that_tools::tools::code::worktree::list_worktrees(Path::new(&args.base_repo))
+                    .map_err(|e| ToolError(format!("worktree_list failed: {e}")))?;
             let items: Vec<_> = worktrees
                 .iter()
                 .map(|w| {

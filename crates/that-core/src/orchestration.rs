@@ -382,7 +382,11 @@ fn append_system_reminder(task: &str, session_id: &str, sandbox: bool, agent_nam
 /// Turn 1 of a session writes the system prompt + tools to cache (cache_write > 0)
 /// but reads nothing — correctly producing 0% rather than inflating the rate.
 /// Turn 2+ should read from cache (cache_write ≈ 0), giving an accurate per-eligible hit rate.
-fn cache_hit_rate_percent(input_tokens: u64, cached_input_tokens: u64, cache_write_tokens: u64) -> f64 {
+fn cache_hit_rate_percent(
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    cache_write_tokens: u64,
+) -> f64 {
     let eligible = input_tokens.saturating_sub(cache_write_tokens);
     if eligible == 0 {
         0.0
@@ -498,9 +502,7 @@ fn api_key_for_provider(provider: &str) -> Result<String> {
     match provider {
         "anthropic" => std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set"),
         "openai" => std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set"),
-        "openrouter" => {
-            std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")
-        }
+        "openrouter" => std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set"),
         other => Err(anyhow::anyhow!(
             "Unsupported provider: {other}. Use 'anthropic', 'openai', or 'openrouter'."
         )),
@@ -650,8 +652,9 @@ pub fn resolve_agent_workspace(ws: &WorkspaceConfig, agent: &AgentDef) -> Result
             // No parent specified — fall back to own workspace
             AgentDef::agent_workspace_dir(&agent.name)
         };
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("Failed to create inherited workspace at {}", dir.display()))?;
+        std::fs::create_dir_all(&dir).with_context(|| {
+            format!("Failed to create inherited workspace at {}", dir.display())
+        })?;
         Ok(dir)
     } else if agent.shared_workspace {
         // Use the global workspace (current behavior)
@@ -4906,7 +4909,8 @@ pub async fn build_compact_summary(
 
     match api_key_for_provider(provider) {
         Ok(api_key) => {
-            match agent_loop::complete_once(provider, model, &api_key, &system, &prompt, 500).await {
+            match agent_loop::complete_once(provider, model, &api_key, &system, &prompt, 500).await
+            {
                 Ok(summary) if !summary.trim().is_empty() => summary.trim().to_string(),
                 Ok(_) | Err(_) => fallback_summary(history),
             }
@@ -5107,13 +5111,11 @@ pub async fn run_remote_query(
         request = request.bearer_auth(tok);
     }
 
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        request.send(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("Remote query timed out after {timeout_secs}s"))?
-    .map_err(|e| anyhow::anyhow!("Remote query failed: {e}"))?;
+    let response =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), request.send())
+            .await
+            .map_err(|_| anyhow::anyhow!("Remote query timed out after {timeout_secs}s"))?
+            .map_err(|e| anyhow::anyhow!("Remote query failed: {e}"))?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -5126,10 +5128,7 @@ pub async fn run_remote_query(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to parse remote response: {e}"))?;
 
-    let text = result["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let text = result["text"].as_str().unwrap_or_default().to_string();
 
     println!("{text}");
     Ok(text)

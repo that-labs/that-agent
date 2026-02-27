@@ -186,7 +186,10 @@ impl AgentDef {
             }
         }
         if let Ok(v) = std::env::var("THAT_AGENT_INHERIT_WORKSPACE") {
-            if matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on") {
+            if matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ) {
                 self.inherit_workspace = true;
             }
         }

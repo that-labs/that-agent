@@ -138,10 +138,7 @@ fn validate_git_repo(repo_path: &Path) -> Result<()> {
         .context("failed to execute git rev-parse")?;
 
     if !output.status.success() {
-        bail!(
-            "{} is not a git repository",
-            repo_path.display()
-        );
+        bail!("{} is not a git repository", repo_path.display());
     }
     Ok(())
 }
@@ -201,11 +198,7 @@ fn run_git(repo_path: &Path, args: &[&str]) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        );
+        bail!("git {} failed: {}", args.join(" "), stderr.trim());
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -236,8 +229,7 @@ pub fn create_worktree(
     validate_git_repo(base_repo)?;
 
     let worktrees_dir = base_repo.join(".worktrees");
-    fs::create_dir_all(&worktrees_dir)
-        .context("failed to create .worktrees directory")?;
+    fs::create_dir_all(&worktrees_dir).context("failed to create .worktrees directory")?;
 
     // Acquire the lock before mutating worktree state.
     let lock_path = worktrees_dir.join(".lock");
@@ -272,11 +264,7 @@ pub fn create_worktree(
         base_repo,
         &["worktree", "add", wt_path_str, "-b", &branch_name],
     )
-    .with_context(|| {
-        format!(
-            "git worktree add failed for agent '{agent_name}'"
-        )
-    })?;
+    .with_context(|| format!("git worktree add failed for agent '{agent_name}'"))?;
 
     // Lock is released automatically when `_lock` goes out of scope.
     Ok(WorktreeInfo {
@@ -413,9 +401,8 @@ pub fn remove_worktree(base_repo: &Path, agent_name: &str, force: bool) -> Resul
         args.push("--force");
     }
 
-    run_git(base_repo, &args).with_context(|| {
-        format!("failed to remove worktree for agent '{agent_name}'")
-    })?;
+    run_git(base_repo, &args)
+        .with_context(|| format!("failed to remove worktree for agent '{agent_name}'"))?;
 
     // Delete the branch when force is requested.
     if force {
@@ -533,9 +520,7 @@ pub fn merge_worktree(
         return Ok(MergeResult {
             success: true,
             commits_merged: 0,
-            message: format!(
-                "nothing to merge: '{wt_branch}' has no commits ahead of '{target}'"
-            ),
+            message: format!("nothing to merge: '{wt_branch}' has no commits ahead of '{target}'"),
             conflicts: Vec::new(),
         });
     }
@@ -614,13 +599,11 @@ fn collect_conflict_files(repo_path: &Path) -> Vec<String> {
         .output();
 
     match output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(String::from)
-                .collect()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -734,10 +717,7 @@ mod tests {
             .current_dir(repo.path())
             .output()
             .unwrap();
-        assert!(
-            !check.status.success(),
-            "branch should have been deleted"
-        );
+        assert!(!check.status.success(), "branch should have been deleted");
     }
 
     #[test]
@@ -931,7 +911,10 @@ mod tests {
             assert!(lock_path.exists(), "lock file should exist while held");
         }
         // Lock is dropped -- file should be removed.
-        assert!(!lock_path.exists(), "lock file should be cleaned up on drop");
+        assert!(
+            !lock_path.exists(),
+            "lock file should be cleaned up on drop"
+        );
     }
 
     #[test]

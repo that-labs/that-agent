@@ -171,7 +171,11 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             in_tok = usage.input_tokens,
             out_tok = usage.output_tokens,
             "<<< turn {}/{} calls={} tok={}/{}",
-            turn + 1, config.max_turns, tool_calls.len(), usage.input_tokens, usage.output_tokens
+            turn + 1,
+            config.max_turns,
+            tool_calls.len(),
+            usage.input_tokens,
+            usage.output_tokens
         );
 
         if tool_calls.is_empty() {

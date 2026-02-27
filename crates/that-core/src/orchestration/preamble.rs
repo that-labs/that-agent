@@ -443,7 +443,7 @@ pub fn build_preamble(
              - Query subagents via `that run query --remote <url> --token <token> \"<task>\"`\n\
              - Use worktree tools to coordinate code changes across agents\n\
              - Store orchestration learnings in memory for team evolution\n\n\
-             Use the `agent-orchestrator` skill for the full multi-agent coordination guide.\n\n"
+             Use the `agent-orchestrator` skill for the full multi-agent coordination guide.\n\n",
         );
     }
 
