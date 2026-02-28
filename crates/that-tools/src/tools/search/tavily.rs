@@ -23,6 +23,12 @@ struct TavilyResult {
     score: Option<f64>,
 }
 
+impl Default for TavilyProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TavilyProvider {
     pub fn new() -> Self {
         let api_key = std::env::var("TAVILY_API_KEY")

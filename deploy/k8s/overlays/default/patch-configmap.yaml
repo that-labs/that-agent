@@ -9,5 +9,5 @@ data:
   THAT_AGENT_NAME: "wolfy"
   THAT_AGENT_BOOTSTRAP_PROMPT: "It nevers enough"
   THAT_AGENT_PROVIDER: "openrouter"
-  THAT_AGENT_MODEL: "minimax/minimax-m2.5"
-  THAT_AGENT_MAX_TURNS: "75"
+  THAT_AGENT_MODEL: "anthropic/claude-sonnet-4.6"
+  THAT_AGENT_MAX_TURNS: "150"

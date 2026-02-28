@@ -9,6 +9,7 @@
 //! conversations with tool calls.
 
 use anyhow::Result;
+use base64::Engine as _;
 use tokio::sync::mpsc;
 
 use super::anthropic::TurnEvent;
@@ -18,6 +19,7 @@ use super::types::{Message, ToolCall, ToolDef, Usage};
 ///
 /// Sends `TurnEvent`s to `tx` until the stream is exhausted.
 /// Returns the `Usage` reported by the server.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn stream_turn(
     api_key: &str,
     model: &str,
@@ -321,10 +323,26 @@ fn messages_to_chat_completions(
 
     for msg in messages {
         match msg {
-            Message::User { content } => {
+            Message::User { content, images } => {
+                let msg_content = if images.is_empty() {
+                    serde_json::json!(content)
+                } else {
+                    let mut parts: Vec<serde_json::Value> = images
+                        .iter()
+                        .map(|(data, mime)| {
+                            let b64 = base64::prelude::BASE64_STANDARD.encode(data);
+                            serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": format!("data:{mime};base64,{b64}") }
+                            })
+                        })
+                        .collect();
+                    parts.push(serde_json::json!({ "type": "text", "text": content }));
+                    serde_json::json!(parts)
+                };
                 out.push(serde_json::json!({
                     "role": "user",
-                    "content": content,
+                    "content": msg_content,
                 }));
             }
             Message::Assistant {

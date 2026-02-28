@@ -13,10 +13,6 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[allow(dead_code)]
 pub enum ExecError {
-    #[error("command failed: {0}")]
-    Failed(String),
-    #[error("command timed out after {0}s")]
-    Timeout(u64),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -6,8 +6,8 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{debug, error, info, warn};
 
 use crate::channel::{
-    BotCommand, Channel, ChannelCapabilities, ChannelEvent, InboundMessage, MessageHandle,
-    OutboundTarget,
+    BotCommand, Channel, ChannelCapabilities, ChannelEvent, InboundAttachment, InboundMessage,
+    MessageHandle, OutboundTarget,
 };
 use crate::config::AdapterConfig;
 
@@ -406,6 +406,50 @@ impl TelegramAdapter {
         }
         Ok(resp["result"].as_array().cloned().unwrap_or_default())
     }
+
+    /// Download a file from Telegram by its `file_id`.
+    ///
+    /// Uses `getFile` to resolve the file path, then fetches the bytes from the
+    /// Telegram file API. Returns the raw bytes on success.
+    async fn download_file(&self, file_id: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .http
+            .get(self.api_url("getFile"))
+            .query(&[("file_id", file_id)])
+            .send()
+            .await
+            .context("Telegram getFile request failed")?
+            .json::<serde_json::Value>()
+            .await
+            .context("Telegram getFile JSON parse failed")?;
+
+        if resp["ok"].as_bool() != Some(true) {
+            anyhow::bail!(
+                "Telegram getFile failed: {}",
+                resp["description"].as_str().unwrap_or("unknown error")
+            );
+        }
+
+        let file_path = resp["result"]["file_path"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Telegram getFile: missing file_path"))?;
+
+        let url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            self.token, file_path
+        );
+        let bytes = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .context("Telegram file download failed")?
+            .bytes()
+            .await
+            .context("Telegram file download body read failed")?;
+
+        Ok(bytes.to_vec())
+    }
 }
 
 /// Telegram's per-message character limit.
@@ -430,6 +474,8 @@ impl Channel for TelegramAdapter {
             max_message_len: TELEGRAM_MAX_CHARS,
             message_edit: true,
             attachments: true,
+            inbound_images: true,
+            inbound_audio: true,
         }
     }
 
@@ -900,18 +946,87 @@ impl Channel for TelegramAdapter {
                     continue;
                 }
 
-                let text = match update["message"]["text"].as_str() {
-                    Some(t) => t.to_string(),
-                    None => {
-                        info!(
-                            channel = %self.id,
-                            update_id,
-                            chat_id,
-                            "Dropping update: no text field (photo, sticker, voice, etc.)"
-                        );
-                        continue;
+                // Extract text: prefer caption (for photos/voice), fall back to text.
+                let text = update["message"]["caption"]
+                    .as_str()
+                    .or_else(|| update["message"]["text"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                // Build attachments from photo, voice, and audio fields.
+                let mut attachments = Vec::new();
+
+                // Photo: array of PhotoSize, take the last (largest) entry.
+                if let Some(photos) = update["message"]["photo"].as_array() {
+                    if let Some(largest) = photos.last() {
+                        if let Some(file_id) = largest["file_id"].as_str() {
+                            match self.download_file(file_id).await {
+                                Ok(data) => {
+                                    attachments.push(InboundAttachment::Image {
+                                        data,
+                                        mime_type: "image/jpeg".to_string(),
+                                    });
+                                }
+                                Err(e) => {
+                                    warn!(channel = %self.id, "Failed to download photo: {e:#}");
+                                }
+                            }
+                        }
                     }
-                };
+                }
+
+                // Voice message.
+                if let Some(file_id) = update["message"]["voice"]["file_id"].as_str() {
+                    let duration = update["message"]["voice"]["duration"]
+                        .as_u64()
+                        .map(|d| d as u32);
+                    match self.download_file(file_id).await {
+                        Ok(data) => {
+                            attachments.push(InboundAttachment::Audio {
+                                data,
+                                mime_type: "audio/ogg".to_string(),
+                                duration_secs: duration,
+                            });
+                        }
+                        Err(e) => {
+                            warn!(channel = %self.id, "Failed to download voice: {e:#}");
+                        }
+                    }
+                }
+
+                // Audio file (music, podcasts, etc.).
+                if let Some(file_id) = update["message"]["audio"]["file_id"].as_str() {
+                    let duration = update["message"]["audio"]["duration"]
+                        .as_u64()
+                        .map(|d| d as u32);
+                    let mime = update["message"]["audio"]["mime_type"]
+                        .as_str()
+                        .unwrap_or("audio/mpeg")
+                        .to_string();
+                    match self.download_file(file_id).await {
+                        Ok(data) => {
+                            attachments.push(InboundAttachment::Audio {
+                                data,
+                                mime_type: mime,
+                                duration_secs: duration,
+                            });
+                        }
+                        Err(e) => {
+                            warn!(channel = %self.id, "Failed to download audio: {e:#}");
+                        }
+                    }
+                }
+
+                // Skip if both text and attachments are empty.
+                if text.is_empty() && attachments.is_empty() {
+                    debug!(
+                        channel = %self.id,
+                        update_id,
+                        chat_id,
+                        "Dropping update: no text and no supported attachments"
+                    );
+                    continue;
+                }
 
                 let sender_id = update["message"]["from"]["id"]
                     .as_i64()
@@ -932,9 +1047,15 @@ impl Channel for TelegramAdapter {
                     continue;
                 }
 
-                info!(channel = %self.id, update_id, sender = %sender_id, "Received message: {text:?}");
+                info!(
+                    channel = %self.id,
+                    update_id,
+                    sender = %sender_id,
+                    attachments = attachments.len(),
+                    "Received message: {text:?}"
+                );
 
-                // Check if ask_human is waiting for a reply.
+                // Check if ask_human is waiting for a reply (text-only).
                 let mut state = self.state.lock().await;
                 state.update_offset = offset;
                 let exact_key = ask_key(&chat_id, Some(&sender_id));
@@ -960,6 +1081,8 @@ impl Channel for TelegramAdapter {
                     message_id,
                     conversation_id: Some(chat_id),
                     session_hint: None,
+                    attachments,
+                    callback_url: None,
                 };
                 if tx.send(msg).is_err() {
                     // Receiver dropped — stop listening.

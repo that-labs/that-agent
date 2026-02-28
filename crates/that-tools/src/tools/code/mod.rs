@@ -4,13 +4,17 @@
 //! Agents get *structure* instead of raw text — AST-aware reading,
 //! symbol extraction, and hybrid search.
 
+#[cfg(feature = "code-analysis")]
 pub mod astgrep;
+#[cfg(feature = "code-analysis")]
 pub mod edit;
 pub mod git;
 pub mod grep;
 pub mod inventory;
+#[cfg(feature = "code-analysis")]
 pub mod parse;
 pub mod read;
+#[cfg(feature = "code-analysis")]
 pub mod summary;
 pub mod tree;
 pub mod worktree;

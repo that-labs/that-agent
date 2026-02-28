@@ -19,16 +19,33 @@ pub mod config;
 pub mod factory;
 pub mod hook;
 pub mod inbound;
+pub mod registry;
 pub mod router;
 pub mod tool;
 
+/// Atomic write: serialize `value` as JSON to a tmp file then rename into place.
+pub fn atomic_write_json<T: serde::Serialize + ?Sized>(
+    path: &std::path::Path,
+    value: &T,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(value)?)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+pub use adapters::{DynamicRoute, DynamicRouteRegistry, GatewayChannelAdapter, RouteHandler};
 pub use channel::{
-    BotCommand, Channel, ChannelCapabilities, ChannelEvent, ChannelRef, InboundMessage,
-    MessageHandle, OutboundTarget,
+    BotCommand, Channel, ChannelCapabilities, ChannelEvent, ChannelRef, InboundAttachment,
+    InboundMessage, MessageHandle, OutboundTarget,
 };
 pub use config::{AdapterConfig, AdapterType, ChannelConfig};
 pub use factory::{ChannelBuildMode, ChannelFactoryRegistry};
 pub use hook::ToolLogEvent;
 pub use inbound::InboundRouter;
+pub use registry::{ChannelEntry, DynamicChannelRegistry};
 pub use router::ChannelRouter;
 pub use tool::{ChannelNotifyTool, ChannelToolError};

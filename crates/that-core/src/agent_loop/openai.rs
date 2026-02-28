@@ -9,6 +9,7 @@
 //! item format for message/tool history.
 
 use anyhow::Result;
+use base64::Engine as _;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -35,6 +36,7 @@ pub(super) fn new_ws_session() -> Arc<Mutex<OpenAiWsState>> {
 }
 
 /// Execute one streaming turn against the OpenAI Responses API.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn stream_turn(
     api_key: &str,
     model: &str,
@@ -71,8 +73,7 @@ async fn stream_turn_ws_ephemeral(
 ) -> Result<Usage> {
     let mut ws = connect_ws(api_key).await?;
     let create_payload = build_ws_request(system, messages, tools, model, max_tokens, None);
-    ws.send(WsMessage::Text(create_payload.to_string().into()))
-        .await?;
+    ws.send(WsMessage::Text(create_payload.to_string())).await?;
 
     let turn = read_ws_turn(&mut ws, &tx).await;
     let _ = ws.close(None).await;
@@ -93,6 +94,7 @@ async fn stream_turn_ws_ephemeral(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_turn_ws_persistent(
     api_key: &str,
     model: &str,
@@ -129,10 +131,7 @@ async fn stream_turn_ws_persistent(
 
         let turn = {
             let ws = state.ws.as_mut().expect("websocket state initialized");
-            if let Err(e) = ws
-                .send(WsMessage::Text(create_payload.to_string().into()))
-                .await
-            {
+            if let Err(e) = ws.send(WsMessage::Text(create_payload.to_string())).await {
                 Err(TurnFailure::Transport(e.into()))
             } else {
                 read_ws_turn(ws, &tx).await
@@ -604,15 +603,31 @@ fn tool_to_responses(t: &ToolDef) -> serde_json::Value {
 /// The Responses API separates concerns more cleanly than Chat Completions:
 ///   - `Message::User`      → `{"role":"user","content":"…"}`
 ///   - `Message::Assistant` → optional text item THEN one `function_call` item
-///                            per tool call (separate items, not embedded)
+///     per tool call (separate items, not embedded)
 ///   - `Message::Tool`      → `{"type":"function_call_output","call_id":"…","output":"…"}`
 pub fn messages_to_responses_input(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut items: Vec<serde_json::Value> = Vec::new();
 
     for msg in messages {
         match msg {
-            Message::User { content } => {
-                items.push(serde_json::json!({ "role": "user", "content": content }));
+            Message::User { content, images } => {
+                let msg_content = if images.is_empty() {
+                    serde_json::json!(content)
+                } else {
+                    let mut parts: Vec<serde_json::Value> = images
+                        .iter()
+                        .map(|(data, mime)| {
+                            let b64 = base64::prelude::BASE64_STANDARD.encode(data);
+                            serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": format!("data:{mime};base64,{b64}") }
+                            })
+                        })
+                        .collect();
+                    parts.push(serde_json::json!({ "type": "text", "text": content }));
+                    serde_json::json!(parts)
+                };
+                items.push(serde_json::json!({ "role": "user", "content": msg_content }));
             }
             Message::Assistant {
                 content,

@@ -10,6 +10,8 @@
 //! - Generic multi-channel communication (via `that-channels`)
 
 pub mod agent_loop;
+pub mod agents;
+pub mod audit;
 pub mod config;
 pub mod control;
 pub mod default_skills;
@@ -22,6 +24,8 @@ pub mod session;
 pub mod skills;
 pub mod tasks;
 pub mod tools;
+pub mod transcription;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod workspace;
 

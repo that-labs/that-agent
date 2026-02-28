@@ -10,10 +10,15 @@ repository.workspace = true
 name = "that"
 path = "src/main.rs"
 
+[features]
+default = ["tui", "code-analysis"]
+tui = ["that-core/tui"]
+code-analysis = ["that-tools/code-analysis"]
+
 [dependencies]
 # Workspace crates
-that-tools = { path = "../that-tools" }
-that-core = { path = "../that-core" }
+that-tools = { path = "../that-tools", default-features = false }
+that-core = { path = "../that-core", default-features = false }
 that-plugins = { path = "../that-plugins" }
 
 # Shared workspace dependencies
@@ -29,6 +34,11 @@ uuid = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 chrono = { workspace = true }
+
+# Secrets encryption
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+rand = { workspace = true }
 
 # Env loading
 dotenvy = "0.15"

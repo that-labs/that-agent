@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["tui"]
+tui = ["dep:ratatui", "dep:tui-textarea", "dep:crossterm", "dep:arboard"]
+
 [dependencies]
 # Workspace deps
 serde = { workspace = true }
@@ -36,18 +40,21 @@ futures = "0.3"
 async-trait = "0.1"
 
 # HTTP/WebSocket clients for owned agentic loop providers
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 # Ensure rustls has an explicit process-level crypto provider backend.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
+# Base64 encoding for multimodal image payloads
+base64 = "0.22"
+
 # Env
 dotenvy = "0.15"
 
-# TUI
-ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
-tui-textarea = { version = "0.7", features = ["crossterm"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+# TUI (optional — gated behind the `tui` feature)
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"], optional = true }
+tui-textarea = { version = "0.7", features = ["crossterm"], optional = true }
+crossterm = { version = "0.28", features = ["event-stream"], optional = true }
 
-# Clipboard
-arboard = "3"
+# Clipboard (optional — gated behind the `tui` feature)
+arboard = { version = "3", optional = true }

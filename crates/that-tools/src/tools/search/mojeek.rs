@@ -11,6 +11,12 @@ pub struct MojeekProvider {
     client: reqwest::blocking::Client,
 }
 
+impl Default for MojeekProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MojeekProvider {
     pub fn new() -> Self {
         let client = reqwest::blocking::Client::builder()

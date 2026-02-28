@@ -87,6 +87,42 @@ let clean: String = s.chars().filter(|c| !c.is_control()).take(120).collect();
 
 `.gitignore` excludes `.env` and `.env.*`. Never commit secrets. Rotate immediately if exposed in git history.
 
+## The Living System Philosophy
+
+**Everything hot-reloads. The agent never needs to restart to grow.**
+
+Channels, plugins, and agent identity (soul, memory, config) are live surfaces — not startup fixtures. When something new is registered or updated, the running system picks it up. Cold restarts are an ops smell, not a design pattern.
+
+### Plugins = Reusable Cluster Services
+
+A plugin is a deployed, versioned software service (tool, bridge, API, worker) that any authorized agent can invoke. Plugins are not scripts bundled into the agent binary — they are independent deployables the agent manages as infrastructure.
+
+- Every plugin declares its deploy target (`docker-compose`, `kubernetes`, etc.) in its manifest
+- A plugin deployed by any agent is visible cluster-wide
+- **Policy hierarchy:** the creator sets access policy; the root/main agent always inherits access to plugins created by its sub-agents; sub-agents cannot revoke upward access
+- Plugins are the unit of capability reuse — before building something new, an agent checks if a plugin already provides it
+
+### Channels = Hot-Registered I/O Bridges
+
+Channels follow the async gateway pattern:
+
+- Plugin-deployed bridge services (Slack bot, Discord, WhatsApp, etc.) speak a **standard gateway protocol** — POST inbound message + callback URL, receive async response POST
+- The agent exposes a single gateway inbound surface; bridges register themselves at runtime via a lightweight registration endpoint
+- The agent answers from **one place** — responses are scoped to the originating `channel_id`, never broadcast indiscriminately
+- No channel requires a restart to activate; `channel_id → callback_url` registry is live
+
+### Multi-Agent Cluster Awareness
+
+When a sub-agent is deployed to the cluster:
+- It inherits awareness of all plugins already deployed
+- Any plugin it creates is visible to the main agent automatically
+- The main agent's policy is the ceiling — sub-agents can restrict further but not elevate beyond it
+- Plugin registry is shared state, not per-agent local config
+
+### Code Minimalism — Critical
+
+**As few lines of code as possible.** Every line is a maintenance burden. Prefer composition over duplication, thin abstractions over defensive layering, and deletion over accumulation. If two features can share a path, they must. If something can be expressed in 10 lines instead of 30, it must be. Complexity is a liability, not a feature.
+
 ## Model Preferences
 
 OpenAI runs: `gpt-5.2-codex` or higher. Never `gpt-4.x`.

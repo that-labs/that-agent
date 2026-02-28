@@ -11,6 +11,12 @@ pub struct YahooProvider {
     client: reqwest::blocking::Client,
 }
 
+impl Default for YahooProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl YahooProvider {
     pub fn new() -> Self {
         let client = reqwest::blocking::Client::builder()

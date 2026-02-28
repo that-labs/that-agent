@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
 use crate::channel::{
@@ -29,7 +29,7 @@ use crate::config::AdapterConfig;
 /// router.start_listeners().await?;
 /// ```
 pub struct ChannelRouter {
-    channels: Vec<ChannelRef>,
+    channels: RwLock<Vec<ChannelRef>>,
     /// Preferred primary channel index for `human_ask` interactions.
     /// If that channel lacks `ask_human` capability, the router falls back
     /// to the first capable channel.
@@ -50,7 +50,7 @@ impl ChannelRouter {
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         (
             Self {
-                channels,
+                channels: RwLock::new(channels),
                 primary_idx,
                 inbound_tx,
             },
@@ -59,25 +59,33 @@ impl ChannelRouter {
     }
 
     /// Number of active channels.
-    pub fn channel_count(&self) -> usize {
-        self.channels.len()
+    pub async fn channel_count(&self) -> usize {
+        self.channels.read().await.len()
     }
 
     /// Comma-separated IDs of all active channels.
-    pub fn channel_ids(&self) -> String {
+    pub async fn channel_ids(&self) -> String {
         self.channels
+            .read()
+            .await
             .iter()
-            .map(|c| c.id())
+            .map(|c| c.id().to_string())
             .collect::<Vec<_>>()
             .join(",")
     }
 
     /// ID of the effective primary channel (the first ask_human-capable channel,
     /// defaulting to the first channel if none declare the capability).
-    pub fn primary_id(&self) -> &str {
-        self.find_ask_human_channel(None)
-            .map(|c| c.id())
-            .unwrap_or_else(|| self.channels.first().map(|c| c.id()).unwrap_or("none"))
+    pub async fn primary_id(&self) -> String {
+        let guard = self.channels.read().await;
+        find_ask_human_in(&guard, self.primary_idx, None)
+            .map(|c| c.id().to_string())
+            .unwrap_or_else(|| {
+                guard
+                    .first()
+                    .map(|c| c.id().to_string())
+                    .unwrap_or_else(|| "none".into())
+            })
     }
 
     /// Validate each channel's configuration and establish connections.
@@ -86,8 +94,8 @@ impl ChannelRouter {
     /// warnings but do not abort startup — a misconfigured adapter should not
     /// prevent other channels from working.
     pub async fn initialize(&self) {
-        let futs: Vec<_> = self
-            .channels
+        let channels: Vec<_> = self.channels.read().await.clone();
+        let futs: Vec<_> = channels
             .iter()
             .map(|ch| {
                 let ch = Arc::clone(ch);
@@ -108,8 +116,8 @@ impl ChannelRouter {
     /// Message handles returned by adapters are discarded — use [`Self::send_to`]
     /// when you need the handle.
     pub async fn broadcast(&self, event: &ChannelEvent) {
-        let futs: Vec<_> = self
-            .channels
+        let channels: Vec<_> = self.channels.read().await.clone();
+        let futs: Vec<_> = channels
             .iter()
             .map(|ch| {
                 let ch = Arc::clone(ch);
@@ -134,7 +142,8 @@ impl ChannelRouter {
         event: &ChannelEvent,
         target: Option<&OutboundTarget>,
     ) -> Result<MessageHandle> {
-        if let Some(ch) = self.channels.iter().find(|c| c.id() == channel_id) {
+        let guard = self.channels.read().await;
+        if let Some(ch) = guard.iter().find(|c| c.id() == channel_id) {
             return ch.send_event(event, target).await;
         }
         Ok(MessageHandle::default())
@@ -144,8 +153,8 @@ impl ChannelRouter {
     ///
     /// Used by the `channel_notify` tool for mid-task progress updates.
     pub async fn notify_all(&self, message: &str) {
-        let futs: Vec<_> = self
-            .channels
+        let channels: Vec<_> = self.channels.read().await.clone();
+        let futs: Vec<_> = channels
             .iter()
             .map(|ch| {
                 let ch = Arc::clone(ch);
@@ -167,7 +176,8 @@ impl ChannelRouter {
         message: &str,
         target: Option<&OutboundTarget>,
     ) {
-        if let Some(ch) = self.channels.iter().find(|c| c.id() == channel_id) {
+        let guard = self.channels.read().await;
+        if let Some(ch) = guard.iter().find(|c| c.id() == channel_id) {
             let event = ChannelEvent::Notify(message.to_string());
             if let Err(e) = ch.send_event(&event, target).await {
                 error!(channel = %ch.id(), "Failed to send notification: {e:#}");
@@ -187,8 +197,9 @@ impl ChannelRouter {
         preferred_channel_id: Option<&str>,
         target: Option<&OutboundTarget>,
     ) -> Result<String> {
-        let primary = self
-            .find_ask_human_channel(preferred_channel_id)
+        let guard = self.channels.read().await;
+        let primary = find_ask_human_in(&guard, self.primary_idx, preferred_channel_id)
+            .cloned()
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "No channel supports ask_human. Configure a Telegram or TUI channel \
@@ -197,7 +208,7 @@ impl ChannelRouter {
             })?;
 
         // Notify other channels that we are waiting for input on the primary.
-        for ch in &self.channels {
+        for ch in guard.iter() {
             if ch.id() != primary.id() {
                 let notif = format!(
                     "Waiting for user input on `{}` channel: {}",
@@ -210,6 +221,7 @@ impl ChannelRouter {
                 }
             }
         }
+        drop(guard);
 
         primary.ask_human(message, timeout, target).await
     }
@@ -218,9 +230,10 @@ impl ChannelRouter {
     ///
     /// Each channel's instructions are joined and appended to the agent's
     /// system preamble so the agent knows how to format messages per channel.
-    pub fn combined_format_instructions(&self) -> String {
+    pub async fn combined_format_instructions(&self) -> String {
+        let guard = self.channels.read().await;
         let mut out = String::new();
-        for ch in &self.channels {
+        for ch in guard.iter() {
             if let Some(instructions) = ch.format_instructions() {
                 if !out.is_empty() {
                     out.push('\n');
@@ -235,8 +248,9 @@ impl ChannelRouter {
     ///
     /// Returns an empty string when the channel has no formatting instructions
     /// or when the channel id is unknown.
-    pub fn format_instructions_for(&self, channel_id: &str) -> String {
-        self.channels
+    pub async fn format_instructions_for(&self, channel_id: &str) -> String {
+        let guard = self.channels.read().await;
+        guard
             .iter()
             .find(|c| c.id() == channel_id)
             .and_then(|c| c.format_instructions())
@@ -248,7 +262,8 @@ impl ChannelRouter {
     /// Each listener runs in its own Tokio task, feeding received messages into
     /// a shared inbound channel. Call once at startup, after `initialize()`.
     pub async fn start_listeners(&self) -> Result<()> {
-        for ch in &self.channels {
+        let guard = self.channels.read().await;
+        for ch in guard.iter() {
             if !ch.capabilities().inbound {
                 continue; // skip adapters that don't support inbound
             }
@@ -268,7 +283,8 @@ impl ChannelRouter {
     /// Called once after skill discovery. Channels without command menu support
     /// are silently skipped.
     pub async fn register_commands(&self, commands: &[BotCommand]) {
-        for ch in &self.channels {
+        let guard = self.channels.read().await;
+        for ch in guard.iter() {
             if !ch.capabilities().command_menu {
                 continue;
             }
@@ -285,12 +301,13 @@ impl ChannelRouter {
     /// `on_config_update` is called so it can apply runtime-mutable changes
     /// (e.g. `allowed_senders`) without a full restart.
     pub async fn apply_config_updates(&self, adapter_configs: &[AdapterConfig]) {
+        let guard = self.channels.read().await;
         for cfg in adapter_configs {
             let id = cfg
                 .id
                 .as_deref()
                 .unwrap_or_else(|| cfg.adapter_type.as_str());
-            if let Some(ch) = self.channels.iter().find(|c| c.id() == id) {
+            if let Some(ch) = guard.iter().find(|c| c.id() == id) {
                 ch.on_config_update(cfg).await;
             }
         }
@@ -307,7 +324,8 @@ impl ChannelRouter {
         message_id: i64,
         emoji: &str,
     ) {
-        if let Some(ch) = self.channels.iter().find(|c| c.id() == channel_id) {
+        let guard = self.channels.read().await;
+        if let Some(ch) = guard.iter().find(|c| c.id() == channel_id) {
             if let Err(e) = ch.react(chat_id, message_id, emoji).await {
                 warn!(channel = %channel_id, "react_to_message failed: {e:#}");
             }
@@ -320,7 +338,8 @@ impl ChannelRouter {
     /// if the channel is not found or the handle has no `message_id`.
     pub async fn update_message(&self, handle: &MessageHandle, content: &str) -> Result<()> {
         if let Some(channel_id) = handle.channel_id.as_deref() {
-            if let Some(ch) = self.channels.iter().find(|c| c.id() == channel_id) {
+            let guard = self.channels.read().await;
+            if let Some(ch) = guard.iter().find(|c| c.id() == channel_id) {
                 return ch.update_message(handle, content, None).await;
             }
         }
@@ -332,30 +351,64 @@ impl ChannelRouter {
     /// These inform the agent about which channels are active:
     /// - `THAT_CHANNEL_IDS` — comma-separated list of active channel IDs
     /// - `THAT_CHANNEL_PRIMARY` — ID of the primary (human-ask) channel
-    pub fn env_vars(&self) -> Vec<(String, String)> {
+    pub async fn env_vars(&self) -> Vec<(String, String)> {
         vec![
-            ("THAT_CHANNEL_IDS".into(), self.channel_ids()),
-            ("THAT_CHANNEL_PRIMARY".into(), self.primary_id().to_string()),
+            ("THAT_CHANNEL_IDS".into(), self.channel_ids().await),
+            ("THAT_CHANNEL_PRIMARY".into(), self.primary_id().await),
         ]
     }
 
-    /// Find the first channel that supports `ask_human`, preferring `primary_idx`.
-    fn find_ask_human_channel(&self, preferred_channel_id: Option<&str>) -> Option<&ChannelRef> {
-        // Try an explicit preferred channel first (used for scoped inbound routing).
-        if let Some(preferred) = preferred_channel_id {
-            if let Some(ch) = self.channels.iter().find(|ch| ch.id() == preferred) {
-                if ch.capabilities().ask_human {
-                    return Some(ch);
+    /// Dynamically add a channel at runtime.
+    ///
+    /// Calls `on_start()`, spawns an inbound listener if capable, then appends
+    /// to the channel list.
+    pub async fn add_channel(&self, ch: ChannelRef) {
+        ch.on_start().await.ok();
+        if ch.capabilities().inbound {
+            let tx = self.inbound_tx.clone();
+            let ch2 = Arc::clone(&ch);
+            tokio::spawn(async move {
+                if let Err(e) = ch2.start_listener(tx).await {
+                    error!(channel = %ch2.id(), "listener error: {e:#}");
                 }
-            }
+            });
         }
-        // Check the configured primary first.
-        if let Some(ch) = self.channels.get(self.primary_idx) {
+        self.channels.write().await.push(ch);
+    }
+
+    /// Dynamically remove a channel at runtime by id.
+    ///
+    /// Calls `on_stop()` on the removed channel for graceful cleanup.
+    pub async fn remove_channel(&self, id: &str) {
+        let mut guard = self.channels.write().await;
+        if let Some(pos) = guard.iter().position(|c| c.id() == id) {
+            let ch = guard.remove(pos);
+            drop(guard);
+            ch.on_stop().await;
+        }
+    }
+}
+
+/// Shared helper: find the first ask_human-capable channel in a slice.
+fn find_ask_human_in<'a>(
+    channels: &'a [ChannelRef],
+    primary_idx: usize,
+    preferred_channel_id: Option<&str>,
+) -> Option<&'a ChannelRef> {
+    // Try an explicit preferred channel first (used for scoped inbound routing).
+    if let Some(preferred) = preferred_channel_id {
+        if let Some(ch) = channels.iter().find(|ch| ch.id() == preferred) {
             if ch.capabilities().ask_human {
                 return Some(ch);
             }
         }
-        // Fall back to the first capable channel.
-        self.channels.iter().find(|ch| ch.capabilities().ask_human)
     }
+    // Check the configured primary first.
+    if let Some(ch) = channels.get(primary_idx) {
+        if ch.capabilities().ask_human {
+            return Some(ch);
+        }
+    }
+    // Fall back to the first capable channel.
+    channels.iter().find(|ch| ch.capabilities().ask_human)
 }

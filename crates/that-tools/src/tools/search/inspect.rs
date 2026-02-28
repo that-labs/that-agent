@@ -60,20 +60,11 @@ pub struct IdSummary {
     pub word_count: usize,
 }
 
+#[derive(Default)]
 struct ClassData {
     count: usize,
     sample: String,
     child_sig: String,
-}
-
-impl Default for ClassData {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            sample: String::new(),
-            child_sig: String::new(),
-        }
-    }
 }
 
 /// Inspect raw HTML and return a structural analysis for agent-driven scraping.

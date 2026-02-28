@@ -4,6 +4,7 @@
 //! Handles prompt caching, extended thinking, tool definitions, and SSE parsing.
 
 use anyhow::Result;
+use base64::Engine as _;
 use tokio::sync::mpsc;
 
 use super::types::{Message, ToolCall, ToolDef, Usage};
@@ -25,6 +26,7 @@ pub(super) enum TurnEvent {
 ///
 /// Sends `TurnEvent`s to `tx` until the stream is exhausted.
 /// Returns the `Usage` reported by the server.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn stream_turn(
     api_key: &str,
     model: &str,
@@ -265,8 +267,24 @@ pub fn messages_to_anthropic(messages: &[Message]) -> serde_json::Value {
     let mut i = 0;
     while i < messages.len() {
         match &messages[i] {
-            Message::User { content } => {
-                out.push(serde_json::json!({ "role": "user", "content": content }));
+            Message::User { content, images } => {
+                let msg_content = if images.is_empty() {
+                    serde_json::json!(content)
+                } else {
+                    let mut blocks: Vec<serde_json::Value> = images
+                        .iter()
+                        .map(|(data, mime)| {
+                            let b64 = base64::prelude::BASE64_STANDARD.encode(data);
+                            serde_json::json!({
+                                "type": "image",
+                                "source": { "type": "base64", "media_type": mime, "data": b64 }
+                            })
+                        })
+                        .collect();
+                    blocks.push(serde_json::json!({ "type": "text", "text": content }));
+                    serde_json::json!(blocks)
+                };
+                out.push(serde_json::json!({ "role": "user", "content": msg_content }));
                 i += 1;
             }
             Message::Assistant {

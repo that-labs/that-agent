@@ -10,6 +10,7 @@
 pub mod cli;
 pub mod config;
 pub mod daemon;
+#[cfg(feature = "code-analysis")]
 pub mod index;
 pub mod output;
 pub mod tools;

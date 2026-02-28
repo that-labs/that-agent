@@ -24,9 +24,6 @@ pub enum IndexError {
     Sqlite(#[from] rusqlite::Error),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("index not found at: {0}")]
-    #[allow(dead_code)]
-    NotFound(String),
 }
 
 /// Status of the symbol index.
@@ -38,17 +35,6 @@ pub struct IndexStatus {
     pub total_refs: usize,
     pub stale_files: usize,
     pub schema_version: String,
-}
-
-/// A symbol with its file context, used for query results.
-#[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
-pub struct IndexedSymbol {
-    pub file: String,
-    pub name: String,
-    pub kind: String,
-    pub line_start: usize,
-    pub line_end: usize,
 }
 
 /// A reference result from querying the index.
@@ -375,56 +361,6 @@ impl SymbolIndex {
         Ok(ids)
     }
 
-    /// Query symbols by name pattern.
-    #[allow(dead_code)]
-    pub fn query_symbols(
-        &self,
-        name_filter: Option<&str>,
-    ) -> Result<Vec<IndexedSymbol>, IndexError> {
-        let mut results = Vec::new();
-
-        if let Some(filter) = name_filter {
-            let mut stmt = self.conn.prepare(
-                "SELECT f.path, s.name, s.kind, s.line_start, s.line_end
-                 FROM symbols s JOIN files f ON s.file_id = f.id
-                 WHERE s.name LIKE '%' || ?1 || '%'
-                 ORDER BY f.path, s.line_start",
-            )?;
-            let rows = stmt.query_map([filter], |row| {
-                Ok(IndexedSymbol {
-                    file: row.get(0)?,
-                    name: row.get(1)?,
-                    kind: row.get(2)?,
-                    line_start: row.get::<_, i64>(3)? as usize,
-                    line_end: row.get::<_, i64>(4)? as usize,
-                })
-            })?;
-            for sym in rows.flatten() {
-                results.push(sym);
-            }
-        } else {
-            let mut stmt = self.conn.prepare(
-                "SELECT f.path, s.name, s.kind, s.line_start, s.line_end
-                 FROM symbols s JOIN files f ON s.file_id = f.id
-                 ORDER BY f.path, s.line_start",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok(IndexedSymbol {
-                    file: row.get(0)?,
-                    name: row.get(1)?,
-                    kind: row.get(2)?,
-                    line_start: row.get::<_, i64>(3)? as usize,
-                    line_end: row.get::<_, i64>(4)? as usize,
-                })
-            })?;
-            for sym in rows.flatten() {
-                results.push(sym);
-            }
-        }
-
-        Ok(results)
-    }
-
     /// Query references for a given symbol name.
     pub fn query_references(&self, symbol_name: &str) -> Result<Vec<IndexedReference>, IndexError> {
         let mut stmt = self.conn.prepare(
@@ -740,24 +676,6 @@ impl Config {
         let r2 = index.build(tmp.path()).unwrap();
         assert_eq!(r2.files_indexed, 1, "should re-index only the changed file");
         assert_eq!(r2.files_skipped, 1);
-    }
-
-    #[test]
-    fn test_query_symbols() {
-        let tmp = setup_test_project();
-        let index = SymbolIndex::open_in_memory().unwrap();
-        index.build(tmp.path()).unwrap();
-
-        let all = index.query_symbols(None).unwrap();
-        assert!(!all.is_empty());
-
-        let filtered = index.query_symbols(Some("Config")).unwrap();
-        assert!(
-            !filtered.is_empty(),
-            "should find Config symbol: all = {:?}",
-            all
-        );
-        assert!(filtered.iter().all(|s| s.name.contains("Config")));
     }
 
     #[test]

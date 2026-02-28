@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +9,7 @@ use base64::prelude::*;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Request as AxumRequest, State};
 use axum::http::{header, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -16,15 +17,18 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use dashmap::DashMap;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::adapters::gateway_routes::{execute_shell_handler, DynamicRouteRegistry, RouteHandler};
 use crate::channel::{
-    Channel, ChannelCapabilities, ChannelEvent, InboundMessage, MessageHandle, OutboundTarget,
+    Channel, ChannelCapabilities, ChannelEvent, InboundAttachment, InboundMessage, MessageHandle,
+    OutboundTarget,
 };
 use crate::config::AdapterConfig;
 
@@ -51,6 +55,39 @@ struct RespondRequest {
     response: String,
 }
 
+/// A single base64-encoded attachment in an inbound webhook request.
+#[derive(Debug, Deserialize)]
+struct InboundAttachmentPayload {
+    /// Base64-encoded file bytes.
+    data: String,
+    /// MIME type (e.g. "image/png", "audio/ogg").
+    mime_type: String,
+}
+
+/// POST /v1/inbound request body — external systems push messages to the agent.
+#[derive(Debug, Deserialize)]
+struct InboundRequest {
+    message: String,
+    sender_id: String,
+    channel_id: Option<String>,
+    callback_url: Option<String>,
+    #[serde(default)]
+    attachments: Vec<InboundAttachmentPayload>,
+}
+
+// ─── Pairing ─────────────────────────────────────────────────────────────────
+
+struct PairingState {
+    code: String,
+    token: String,
+    used: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PairRequest {
+    code: String,
+}
+
 // ─── Shared State ────────────────────────────────────────────────────────────
 
 struct HttpState {
@@ -64,10 +101,14 @@ struct HttpState {
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     /// The adapter ID used as channel_id in InboundMessages.
     adapter_id: String,
-    /// Optional bearer token for auth enforcement.
-    auth_token: Option<String>,
+    /// Bearer token for auth enforcement — always `Some` after startup.
+    auth_token: RwLock<Option<String>>,
+    /// Pairing state for first-time token acquisition (None when pre-configured).
+    pairing: Mutex<Option<PairingState>>,
     /// Request timeout in seconds.
     request_timeout_secs: u64,
+    /// Path to the dynamic route registry file, if configured.
+    route_registry_path: Option<PathBuf>,
 }
 
 // ─── HTTP Gateway Adapter ────────────────────────────────────────────────────
@@ -87,6 +128,8 @@ struct HttpState {
 /// | `/v1/chat` | POST | Synchronous chat — blocks until `Done` or `Error` |
 /// | `/v1/chat/stream` | POST | SSE streaming — sends events as they arrive |
 /// | `/v1/chat/respond` | POST | Reply to an `ask_human` prompt |
+/// | `/v1/inbound` | POST | Webhook endpoint for external messages with attachments |
+/// | `/v1/schema` | GET | Returns JSON schema for the `/v1/inbound` endpoint |
 ///
 /// ## Auth
 ///
@@ -113,14 +156,36 @@ impl HttpAdapter {
         auth_token: Option<String>,
         request_timeout_secs: u64,
     ) -> Self {
+        let (resolved_token, pairing) = if let Some(tok) = auth_token {
+            // Pre-configured token — no pairing needed.
+            (Some(tok), None)
+        } else {
+            // Generate pairing code + token; auth enforced after pairing.
+            let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32));
+            let token = Uuid::new_v4().to_string();
+            eprintln!(
+                "⚡ Gateway pairing code: {code}  →  POST /pair {{\"code\":\"{code}\"}} to get your bearer token"
+            );
+            (
+                None,
+                Some(PairingState {
+                    code,
+                    token,
+                    used: false,
+                }),
+            )
+        };
+
         let state = Arc::new(HttpState {
             active_requests: DashMap::new(),
             pending_asks: Mutex::new(HashMap::new()),
             inbound_tx: Mutex::new(None),
             shutdown_tx: Mutex::new(None),
             adapter_id: id.to_string(),
-            auth_token: auth_token.clone(),
+            auth_token: RwLock::new(resolved_token),
+            pairing: Mutex::new(pairing),
             request_timeout_secs,
+            route_registry_path: None,
         });
 
         Self {
@@ -129,6 +194,17 @@ impl HttpAdapter {
             request_timeout_secs,
             state,
         }
+    }
+
+    /// Attach a dynamic route registry to this adapter.
+    ///
+    /// When set, unmatched requests fall back to the registry before returning 404.
+    /// Must be called before the adapter starts (no other Arc clones exist yet).
+    pub fn with_route_registry(mut self, registry: &DynamicRouteRegistry) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("with_route_registry called after Arc was shared")
+            .route_registry_path = Some(registry.path.clone());
+        self
     }
 }
 
@@ -147,6 +223,8 @@ impl Channel for HttpAdapter {
             max_message_len: usize::MAX,
             message_edit: false,
             attachments: true,
+            inbound_images: true,
+            inbound_audio: true,
         }
     }
 
@@ -166,26 +244,26 @@ impl Channel for HttpAdapter {
         let adapter_id = self.id.clone();
 
         // Build the router.
-        // Health endpoint is NOT wrapped with auth middleware.
-        let health_route = Router::new().route("/health", get(handle_health));
+        // Health and pair endpoints are NOT wrapped with auth middleware.
+        let public_routes = Router::new()
+            .route("/health", get(handle_health))
+            .route("/pair", post(handle_pair));
 
-        // Authenticated routes.
+        // Authenticated routes — auth middleware always applied.
         let api_routes = Router::new()
             .route("/v1/chat", post(handle_chat))
             .route("/v1/chat/stream", post(handle_chat_stream))
-            .route("/v1/chat/respond", post(handle_chat_respond));
-
-        let api_routes = if state.auth_token.is_some() {
-            api_routes.layer(middleware::from_fn_with_state(
+            .route("/v1/chat/respond", post(handle_chat_respond))
+            .route("/v1/inbound", post(handle_inbound))
+            .route("/v1/schema", get(handle_schema))
+            .layer(middleware::from_fn_with_state(
                 Arc::clone(&state),
                 auth_middleware,
-            ))
-        } else {
-            api_routes
-        };
+            ));
 
-        let app = health_route
+        let app = public_routes
             .merge(api_routes)
+            .fallback(dynamic_route_handler)
             .with_state(Arc::clone(&state));
 
         let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -327,10 +405,19 @@ async fn auth_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let expected_token = match &state.auth_token {
-        Some(t) => t,
-        None => return next.run(req).await,
+    let guard = state.auth_token.read().await;
+    let expected_token = match guard.as_deref() {
+        Some(t) => t.to_owned(),
+        // Not yet paired — reject all authenticated endpoints until pairing completes.
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "Gateway not yet paired. POST /pair with your pairing code first.",
+            )
+                .into_response();
+        }
     };
+    drop(guard);
 
     let auth_header = req
         .headers()
@@ -340,7 +427,7 @@ async fn auth_middleware(
     match auth_header {
         Some(value) if value.starts_with("Bearer ") => {
             let token = &value[7..];
-            if token == expected_token.as_str() {
+            if token == expected_token {
                 next.run(req).await
             } else {
                 (StatusCode::UNAUTHORIZED, "Invalid bearer token").into_response()
@@ -355,6 +442,52 @@ async fn auth_middleware(
 }
 
 // ─── Route Handlers ──────────────────────────────────────────────────────────
+
+/// POST /pair — exchange a pairing code for a bearer token.
+async fn handle_pair(
+    State(state): State<Arc<HttpState>>,
+    Json(body): Json<PairRequest>,
+) -> Response {
+    let mut pairing = state.pairing.lock().await;
+    let ps = match pairing.as_mut() {
+        Some(ps) => ps,
+        None => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": "already paired" })),
+            )
+                .into_response();
+        }
+    };
+
+    if ps.used {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "already paired" })),
+        )
+            .into_response();
+    }
+
+    if body.code != ps.code {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "invalid code" })),
+        )
+            .into_response();
+    }
+
+    ps.used = true;
+    let token = ps.token.clone();
+
+    // Activate the token so the auth middleware starts accepting it.
+    let mut guard = state.auth_token.write().await;
+    *guard = Some(token.clone());
+    drop(guard);
+
+    info!("Gateway paired successfully");
+
+    (StatusCode::OK, Json(serde_json::json!({ "token": token }))).into_response()
+}
 
 /// GET /health — always returns 200 OK.
 async fn handle_health() -> impl IntoResponse {
@@ -556,6 +689,131 @@ async fn handle_chat_respond(
     }
 }
 
+/// POST /v1/inbound — external webhook endpoint for pushing messages with optional attachments.
+///
+/// Accepts a JSON body with `message`, `sender_id`, optional `channel_id`,
+/// optional `callback_url`, and an optional array of base64-encoded `attachments`.
+/// Returns 202 Accepted immediately after queuing the message.
+async fn handle_inbound(
+    State(state): State<Arc<HttpState>>,
+    Json(body): Json<InboundRequest>,
+) -> Response {
+    // Validate callback_url for SSRF before accepting the request.
+    if let Some(ref url) = body.callback_url {
+        if let Err(e) = super::validate_callback_url(url) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response();
+        }
+    }
+
+    let inbound_tx = state.inbound_tx.lock().await;
+    let tx = match inbound_tx.as_ref() {
+        Some(tx) => tx,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "Inbound listener not yet registered" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Decode base64 attachments into InboundAttachment variants.
+    let mut attachments = Vec::with_capacity(body.attachments.len());
+    for (i, att) in body.attachments.iter().enumerate() {
+        let data = match BASE64_STANDARD.decode(&att.data) {
+            Ok(d) => d,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("Invalid base64 in attachment {i}: {e}")
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        let attachment = if att.mime_type.starts_with("audio/") {
+            InboundAttachment::Audio {
+                data,
+                mime_type: att.mime_type.clone(),
+                duration_secs: None,
+            }
+        } else {
+            InboundAttachment::Image {
+                data,
+                mime_type: att.mime_type.clone(),
+            }
+        };
+        attachments.push(attachment);
+    }
+
+    let channel_id = body
+        .channel_id
+        .as_deref()
+        .unwrap_or(&state.adapter_id)
+        .to_string();
+
+    let msg = InboundMessage {
+        channel_id,
+        sender_id: body.sender_id.clone(),
+        text: body.message.clone(),
+        message_id: None,
+        conversation_id: None,
+        session_hint: None,
+        attachments,
+        callback_url: body.callback_url.clone(),
+    };
+
+    if tx.send(msg).is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "Inbound channel closed" })),
+        )
+            .into_response();
+    }
+
+    info!(
+        adapter = %state.adapter_id,
+        sender = %body.sender_id,
+        attachments = body.attachments.len(),
+        "Dispatched inbound webhook message"
+    );
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "accepted" })),
+    )
+        .into_response()
+}
+
+/// GET /v1/schema — returns the JSON schema for the /v1/inbound endpoint.
+async fn handle_schema() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "endpoint": "/v1/inbound",
+        "method": "POST",
+        "content_type": "application/json",
+        "body": {
+            "message": { "type": "string", "required": true, "description": "The message text" },
+            "sender_id": { "type": "string", "required": true, "description": "Sender identifier" },
+            "channel_id": { "type": "string", "required": false, "description": "Override channel ID (defaults to adapter ID)" },
+            "callback_url": { "type": "string", "required": false, "description": "URL for async response delivery" },
+            "attachments": {
+                "type": "array",
+                "required": false,
+                "description": "Base64-encoded file attachments",
+                "items": {
+                    "data": { "type": "string", "description": "Base64-encoded file bytes" },
+                    "mime_type": { "type": "string", "description": "MIME type (e.g. image/png, audio/ogg)" }
+                }
+            }
+        }
+    }))
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Push an InboundMessage to the agent via the stored inbound_tx.
@@ -578,6 +836,8 @@ async fn push_inbound(
         message_id: None,
         conversation_id: conversation_id.map(|s| s.to_string()),
         session_hint: Some(request_id.to_string()),
+        attachments: vec![],
+        callback_url: None,
     };
 
     tx.send(msg)
@@ -591,6 +851,75 @@ async fn push_inbound(
     );
 
     Ok(())
+}
+
+/// Fallback handler for dynamically registered routes.
+///
+/// Looks up (method, path) in the `DynamicRouteRegistry` and executes the handler.
+/// Falls back to 404 when no matching route is found or no registry is configured.
+async fn dynamic_route_handler(State(state): State<Arc<HttpState>>, req: AxumRequest) -> Response {
+    let registry_path = state.route_registry_path.as_ref().cloned().or_else(|| {
+        std::env::var("THAT_GATEWAY_ROUTES_PATH")
+            .ok()
+            .map(std::path::PathBuf::from)
+    });
+
+    let Some(path) = registry_path else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "not found" })),
+        )
+            .into_response();
+    };
+
+    let registry = DynamicRouteRegistry::new(path);
+    let method = req.method().as_str().to_uppercase();
+    let uri_path = req.uri().path().to_string();
+
+    let route = match registry.lookup(&method, &uri_path) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "not found" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    match route.handler {
+        RouteHandler::Static { body } => (StatusCode::OK, Json(body)).into_response(),
+        RouteHandler::Shell {
+            command,
+            timeout_secs,
+        } => {
+            // Read request body to pass as REQUEST_BODY env var.
+            let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+                .await
+                .ok()
+                .and_then(|b| String::from_utf8(b.to_vec()).ok())
+                .filter(|s| !s.is_empty());
+
+            let (status_code, body_str) =
+                execute_shell_handler(&command, timeout_secs, body_bytes).await;
+
+            let status =
+                StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (
+                status,
+                [(header::CONTENT_TYPE, "application/json")],
+                body_str,
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Convert a `ChannelEvent` to an SSE event.
@@ -655,11 +984,7 @@ fn channel_event_to_sse(_request_id: &str, event: &ChannelEvent) -> Option<SseEv
         ChannelEvent::Notify(msg) => {
             // Special encoding for ask_human events forwarded through Notify.
             if let Some(payload) = msg.strip_prefix("__ask_human__:") {
-                Some(
-                    SseEvent::default()
-                        .event("ask_human")
-                        .data(payload.to_string()),
-                )
+                Some(SseEvent::default().event("ask_human").data(payload))
             } else {
                 Some(
                     SseEvent::default()

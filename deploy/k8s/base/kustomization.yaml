@@ -7,6 +7,7 @@ resources:
   - rolebinding.yaml
   - pvc.yaml
   - configmap.yaml
+  - gateway-service.yaml
   - phoenix-service.yaml
   - phoenix-deployment.yaml
   - deployment.yaml

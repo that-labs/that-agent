@@ -5,7 +5,9 @@
 //! This gives agents *comprehension* instead of raw text.
 
 use crate::output::{self, BudgetedOutput, CompactionStrategy};
-use crate::tools::code::parse::{self, Language, Symbol};
+#[cfg(feature = "code-analysis")]
+use crate::tools::code::parse;
+use crate::tools::path_guard;
 use serde::Serialize;
 use std::path::Path;
 use thiserror::Error;
@@ -14,6 +16,7 @@ use thiserror::Error;
 pub enum ReadError {
     #[error("file not found: {0}")]
     NotFound(String),
+    #[cfg(feature = "code-analysis")]
     #[error("parse error: {0}")]
     Parse(#[from] parse::ParseError),
     #[error("IO error: {0}")]
@@ -24,7 +27,7 @@ pub enum ReadError {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadResult {
     pub path: String,
-    pub language: Option<Language>,
+    pub language: Option<String>,
     pub lines: usize,
     pub symbols: Vec<SymbolSummary>,
     pub content: String,
@@ -60,27 +63,41 @@ pub fn code_read(
         return Err(ReadError::NotFound(path.to_string_lossy().to_string()));
     }
 
+    // Guard: reject paths that escape the workspace via traversal or symlinks
+    let path = &path_guard::guard(path)?;
+
     let source = std::fs::read_to_string(path)?;
     let lines: Vec<&str> = source.lines().collect();
     let total_lines = lines.len();
 
     // Try to parse for symbols, fall back gracefully
-    let (language, symbols) = match parse::parse_file(path) {
-        Ok(parsed) => (Some(parsed.language), parsed.symbols),
-        Err(_) => (None, vec![]),
+    #[cfg(feature = "code-analysis")]
+    let (language, symbol_summaries) = {
+        let (lang, symbols) = match parse::parse_file(path) {
+            Ok(parsed) => (
+                Some(format!("{:?}", parsed.language).to_lowercase()),
+                parsed.symbols,
+            ),
+            Err(_) => (None, vec![]),
+        };
+        let summaries: Vec<SymbolSummary> = if show_symbols {
+            symbols
+                .iter()
+                .map(|s| SymbolSummary {
+                    name: s.name.clone(),
+                    kind: format!("{:?}", s.kind).to_lowercase(),
+                    line: s.line_start,
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+        (lang, summaries)
     };
-
-    let symbol_summaries: Vec<SymbolSummary> = if show_symbols {
-        symbols
-            .iter()
-            .map(|s| SymbolSummary {
-                name: s.name.clone(),
-                kind: format!("{:?}", s.kind).to_lowercase(),
-                line: s.line_start,
-            })
-            .collect()
-    } else {
-        vec![]
+    #[cfg(not(feature = "code-analysis"))]
+    let (language, symbol_summaries): (Option<String>, Vec<SymbolSummary>) = {
+        let _ = show_symbols;
+        (None, vec![])
     };
 
     // Build the content with line numbers
@@ -99,7 +116,7 @@ pub fn code_read(
     let content_budget = if let Some(budget) = max_tokens {
         let envelope = ReadResult {
             path: path.to_string_lossy().to_string(),
-            language,
+            language: language.clone(),
             lines: total_lines,
             symbols: symbol_summaries.clone(),
             content: String::new(),
@@ -187,8 +204,9 @@ fn build_range_content(lines: &[&str], start: usize, end: usize) -> String {
 }
 
 /// Get all symbols from a file without full read.
+#[cfg(feature = "code-analysis")]
 #[allow(dead_code)]
-pub fn get_symbols(path: &Path) -> Result<Vec<Symbol>, ReadError> {
+pub fn get_symbols(path: &Path) -> Result<Vec<parse::Symbol>, ReadError> {
     let parsed = parse::parse_file(path)?;
     Ok(parsed.symbols)
 }
@@ -245,6 +263,7 @@ fn main() {
         assert!(result.content.contains("Config"));
     }
 
+    #[cfg(feature = "code-analysis")]
     #[test]
     fn test_code_read_with_symbols() {
         let tmp = TempDir::new().unwrap();
@@ -301,6 +320,7 @@ fn main() {
         let _: serde_json::Value = serde_json::from_str(&result.content).unwrap();
     }
 
+    #[cfg(feature = "code-analysis")]
     #[test]
     fn test_get_symbols() {
         let tmp = TempDir::new().unwrap();

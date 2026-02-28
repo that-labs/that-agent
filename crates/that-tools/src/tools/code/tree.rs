@@ -5,6 +5,7 @@
 
 use crate::output::{self, BudgetedOutput, CompactionStrategy};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "code-analysis")]
 use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
@@ -59,6 +60,7 @@ pub fn code_tree(
 
     let depth = max_depth.unwrap_or(4);
     let inv = crate::tools::code::inventory::collect_inventory(root, Some(depth))?;
+    #[allow(unused_mut)]
     let mut entries: Vec<TreeEntry> = inv
         .entries
         .iter()
@@ -79,74 +81,77 @@ pub fn code_tree(
 
     // Annotate with PageRank scores and sort when ranked
     if ranked {
-        // Find the actual project root (directory containing .anvil/) instead of
-        // looking at the tree root which may be a subdirectory.
-        let project_root =
-            crate::index::find_tools_root(root).unwrap_or_else(|| root.to_path_buf());
-        let db_path = crate::index::index_db_path(&project_root);
-        if db_path.exists() {
-            if let Ok(index) = crate::index::SymbolIndex::open(&db_path) {
-                // Try to get existing scores; compute if missing
-                let scores = match index.get_pagerank_scores() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("failed to read PageRank scores: {}", e);
-                        HashMap::new()
-                    }
-                };
-                let scores = if scores.is_empty() {
-                    match crate::index::pagerank::compute_pagerank(&index) {
+        #[cfg(feature = "code-analysis")]
+        {
+            // Find the actual project root (directory containing .anvil/) instead of
+            // looking at the tree root which may be a subdirectory.
+            let project_root =
+                crate::index::find_tools_root(root).unwrap_or_else(|| root.to_path_buf());
+            let db_path = crate::index::index_db_path(&project_root);
+            if db_path.exists() {
+                if let Ok(index) = crate::index::SymbolIndex::open(&db_path) {
+                    // Try to get existing scores; compute if missing
+                    let scores = match index.get_pagerank_scores() {
                         Ok(s) => s,
                         Err(e) => {
-                            tracing::warn!("failed to compute PageRank: {}", e);
+                            tracing::warn!("failed to read PageRank scores: {}", e);
                             HashMap::new()
                         }
-                    }
-                } else {
-                    scores
-                };
+                    };
+                    let scores = if scores.is_empty() {
+                        match crate::index::pagerank::compute_pagerank(&index) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!("failed to compute PageRank: {}", e);
+                                HashMap::new()
+                            }
+                        }
+                    } else {
+                        scores
+                    };
 
-                for entry in &mut entries {
-                    if entry.entry_type == "file" {
-                        // Scores use project-root-relative paths, but tree entries
-                        // use tree-root-relative paths. Convert to project-root-relative.
-                        let abs_path = root.join(&entry.path);
-                        let project_rel = abs_path
-                            .strip_prefix(&project_root)
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_else(|_| entry.path.clone());
-                        entry.rank = scores.get(&project_rel).copied();
+                    for entry in &mut entries {
+                        if entry.entry_type == "file" {
+                            // Scores use project-root-relative paths, but tree entries
+                            // use tree-root-relative paths. Convert to project-root-relative.
+                            let abs_path = root.join(&entry.path);
+                            let project_rel = abs_path
+                                .strip_prefix(&project_root)
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_else(|_| entry.path.clone());
+                            entry.rank = scores.get(&project_rel).copied();
+                        }
                     }
-                }
 
-                // Sort files by rank within each depth group, keeping dirs in place.
-                // This preserves the hierarchical tree structure.
-                let mut i = 0;
-                while i < entries.len() {
-                    // Find contiguous runs of files at the same depth
-                    if entries[i].entry_type == "file" {
-                        let depth = entries[i].depth;
-                        let start = i;
-                        while i < entries.len()
-                            && entries[i].entry_type == "file"
-                            && entries[i].depth == depth
-                        {
+                    // Sort files by rank within each depth group, keeping dirs in place.
+                    // This preserves the hierarchical tree structure.
+                    let mut i = 0;
+                    while i < entries.len() {
+                        // Find contiguous runs of files at the same depth
+                        if entries[i].entry_type == "file" {
+                            let depth = entries[i].depth;
+                            let start = i;
+                            while i < entries.len()
+                                && entries[i].entry_type == "file"
+                                && entries[i].depth == depth
+                            {
+                                i += 1;
+                            }
+                            // Sort this slice of files by rank (highest first)
+                            entries[start..i].sort_by(|a, b| {
+                                let rank_a = a.rank.unwrap_or(0.0);
+                                let rank_b = b.rank.unwrap_or(0.0);
+                                rank_b
+                                    .partial_cmp(&rank_a)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        } else {
                             i += 1;
                         }
-                        // Sort this slice of files by rank (highest first)
-                        entries[start..i].sort_by(|a, b| {
-                            let rank_a = a.rank.unwrap_or(0.0);
-                            let rank_b = b.rank.unwrap_or(0.0);
-                            rank_b
-                                .partial_cmp(&rank_a)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                    } else {
-                        i += 1;
                     }
                 }
             }
-        }
+        } // cfg(code-analysis)
     }
 
     if compact {

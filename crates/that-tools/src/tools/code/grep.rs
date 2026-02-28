@@ -20,8 +20,6 @@ pub enum GrepError {
     InvalidPattern(String),
     #[error("path not found: {0}")]
     NotFound(String),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 /// A single grep match with context (legacy flat format).

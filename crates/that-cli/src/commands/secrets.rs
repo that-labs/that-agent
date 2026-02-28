@@ -57,7 +57,10 @@ fn get_or_create_key(agent_home: &Path) -> anyhow::Result<[u8; 32]> {
     if path.exists() {
         let data = std::fs::read(&path)?;
         if data.len() != 32 {
-            anyhow::bail!("Corrupt secret key file (expected 32 bytes, got {})", data.len());
+            anyhow::bail!(
+                "Corrupt secret key file (expected 32 bytes, got {})",
+                data.len()
+            );
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(&data);
@@ -219,7 +222,10 @@ fn remove_secrets_block(content: &str) -> String {
 
 /// Migrate secrets from legacy .bashrc block to encrypted .secrets file.
 /// Returns the migrated secrets (empty if nothing to migrate).
-fn migrate_from_bashrc(agent_home: &Path, key: &[u8; 32]) -> anyhow::Result<BTreeMap<String, String>> {
+fn migrate_from_bashrc(
+    agent_home: &Path,
+    key: &[u8; 32],
+) -> anyhow::Result<BTreeMap<String, String>> {
     let bashrc_path = agent_home.join(".bashrc");
     if !bashrc_path.exists() {
         return Ok(BTreeMap::new());
@@ -303,24 +309,21 @@ pub fn handle_secrets_command(cli: &cli::Cli, command: &SecretsCommands) -> anyh
     let mut secrets = load_encrypted_secrets(&home, &key)?;
 
     match command {
-        SecretsCommands::Add { key: secret_key, value } => {
+        SecretsCommands::Add {
+            key: secret_key,
+            value,
+        } => {
             validate_secret_key(secret_key)?;
             secrets.insert(secret_key.clone(), value.clone());
             save_encrypted_secrets(&home, &key, &secrets)?;
-            println!(
-                "Added secret '{}' for agent '{}'",
-                secret_key, agent_name,
-            );
+            println!("Added secret '{}' for agent '{}'", secret_key, agent_name,);
         }
         SecretsCommands::Delete { key: secret_key } => {
             validate_secret_key(secret_key)?;
             let existed = secrets.remove(secret_key).is_some();
             save_encrypted_secrets(&home, &key, &secrets)?;
             if existed {
-                println!(
-                    "Deleted secret '{}' for agent '{}'",
-                    secret_key, agent_name,
-                );
+                println!("Deleted secret '{}' for agent '{}'", secret_key, agent_name,);
             } else {
                 println!(
                     "Secret '{}' was not set for agent '{}'",

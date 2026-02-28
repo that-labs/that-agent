@@ -30,7 +30,10 @@ pub fn reject_traversal(target: &Path) -> io::Result<()> {
     if target.components().any(|c| c == Component::ParentDir) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("path '{}' contains disallowed '..' traversal", target.display()),
+            format!(
+                "path '{}' contains disallowed '..' traversal",
+                target.display()
+            ),
         ));
     }
     Ok(())
@@ -41,7 +44,11 @@ pub fn reject_traversal(target: &Path) -> io::Result<()> {
 pub fn workspace_root() -> Option<PathBuf> {
     let root = std::env::var("THAT_WORKSPACE_ROOT").ok()?;
     let p = PathBuf::from(root);
-    if p.is_dir() { Some(p) } else { None }
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 /// Convenience: validate target against the workspace boundary.

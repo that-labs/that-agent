@@ -121,14 +121,18 @@ impl ScenarioRunner {
         let shell_ctx =
             ShellContext::new(&agent.name, &workspace, container.clone(), scenario.sandbox);
 
+        let step_ctx = StepContext {
+            scenario,
+            agent: &agent,
+            workspace: &workspace,
+            container: &container,
+            shell_ctx: &shell_ctx,
+        };
+
         // Execute steps
         for (idx, step) in scenario.steps.iter().enumerate() {
             let step_wall = Instant::now();
-            let result = self
-                .execute_step(
-                    idx, step, scenario, &agent, &workspace, &container, &shell_ctx,
-                )
-                .await;
+            let result = self.execute_step(idx, step, &step_ctx).await;
             let duration_ms = step_wall.elapsed().as_millis() as u64;
 
             match result {
@@ -212,12 +216,13 @@ impl ScenarioRunner {
         &mut self,
         idx: usize,
         step: &Step,
-        scenario: &Scenario,
-        agent: &AgentDef,
-        workspace: &PathBuf,
-        container: &Option<String>,
-        shell_ctx: &ShellContext,
+        ctx: &StepContext<'_>,
     ) -> Result<StepResult> {
+        let scenario = ctx.scenario;
+        let agent = ctx.agent;
+        let workspace = ctx.workspace;
+        let container = ctx.container;
+        let shell_ctx = ctx.shell_ctx;
         match step {
             Step::Prompt(p) => {
                 let session_id = self.ensure_session(&p.session)?;
@@ -466,8 +471,10 @@ impl ScenarioRunner {
     }
 
     fn build_agent_def(&self, scenario: &Scenario) -> AgentDef {
-        let mut agent = AgentDef::default();
-        agent.name = scenario.agent_name.clone();
+        let mut agent = AgentDef {
+            name: scenario.agent_name.clone(),
+            ..Default::default()
+        };
         if let Some(p) = &scenario.provider {
             agent.provider = p.clone();
         }
@@ -484,10 +491,12 @@ impl ScenarioRunner {
     }
 
     fn ensure_agent_memory_schema(&self, agent: &AgentDef) {
-        let mut cfg = that_tools::config::MemoryConfig::default();
-        cfg.db_path = that_core::config::AgentDef::agent_memory_db_path(&agent.name)
-            .display()
-            .to_string();
+        let cfg = that_tools::config::MemoryConfig {
+            db_path: that_core::config::AgentDef::agent_memory_db_path(&agent.name)
+                .display()
+                .to_string(),
+            ..Default::default()
+        };
         if let Err(err) = that_tools::tools::memory::ensure_initialized(&cfg) {
             tracing::warn!(
                 agent = %agent.name,
@@ -497,6 +506,17 @@ impl ScenarioRunner {
             );
         }
     }
+}
+
+// ── Step context ──────────────────────────────────────────────────────────────
+
+/// Groups the scenario-level state passed unchanged to every step.
+struct StepContext<'a> {
+    scenario: &'a Scenario,
+    agent: &'a AgentDef,
+    workspace: &'a PathBuf,
+    container: &'a Option<String>,
+    shell_ctx: &'a ShellContext,
 }
 
 // ── Shell command execution ───────────────────────────────────────────────────

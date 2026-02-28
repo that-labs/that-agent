@@ -45,9 +45,9 @@ pub use handlers::{handle_agent_command, handle_session_command, handle_skill_co
 pub use hooks::{AgentHook, EvalHook};
 pub use preamble::build_preamble;
 pub use setup::{install_that_tools_skills_local, prepare_container, resolve_agent_workspace};
-pub use support::{build_compact_summary, compact_session, load_workspace_files, show_status};
 #[cfg(feature = "tui")]
 pub use support::build_palette_commands;
+pub use support::{build_compact_summary, compact_session, load_workspace_files, show_status};
 #[cfg(feature = "tui")]
 pub use tui_session::{execute_agent_run_tui, run_chat_tui};
 

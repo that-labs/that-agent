@@ -26,6 +26,12 @@ struct BraveResult {
     description: Option<String>,
 }
 
+impl Default for BraveProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BraveProvider {
     pub fn new() -> Self {
         let api_key = std::env::var("BRAVE_API_KEY")

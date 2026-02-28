@@ -174,7 +174,7 @@ impl SessionManager {
         let entries: Vec<TranscriptEntry> = content
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| serde_json::from_str(l))
+            .map(serde_json::from_str)
             .collect::<Result<Vec<_>, _>>()
             .context("Failed to parse transcript")?;
         Ok(entries)

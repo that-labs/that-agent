@@ -9,6 +9,7 @@ use serde::Serialize;
 pub enum Message {
     User {
         content: String,
+        images: Vec<(Vec<u8>, String)>, // (data, mime_type)
     },
     Assistant {
         content: String,
@@ -25,6 +26,7 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self::User {
             content: content.into(),
+            images: vec![],
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {

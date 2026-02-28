@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::adapters::{HttpAdapter, TelegramAdapter};
+use crate::adapters::{DynamicRouteRegistry, HttpAdapter, TelegramAdapter};
 use crate::channel::{ChannelRef, InboundMessage};
 use crate::config::{AdapterConfig, AdapterType, ChannelConfig};
 use crate::router::ChannelRouter;
@@ -67,14 +67,19 @@ impl ChannelFactoryRegistry {
     }
 
     /// Build a channel router from config.
+    ///
+    /// `route_registry` is passed to the auto-injected HTTP gateway adapter.
+    /// Pass `None` to leave dynamic routing disabled on that adapter.
     pub fn build_router(
         &self,
         config: &ChannelConfig,
         mode: ChannelBuildMode,
+        route_registry: Option<&DynamicRouteRegistry>,
     ) -> Result<(Arc<ChannelRouter>, mpsc::UnboundedReceiver<InboundMessage>)> {
         let mut channels: Vec<ChannelRef> = Vec::new();
         let mut primary_idx = 0usize;
         let mut id_counts: HashMap<String, usize> = HashMap::new();
+        let mut has_http = false;
         let primary = config
             .primary
             .as_deref()
@@ -82,6 +87,9 @@ impl ChannelFactoryRegistry {
             .filter(|s| !s.is_empty());
 
         for adapter_cfg in config.enabled_adapters() {
+            if adapter_cfg.adapter_type.as_str() == AdapterType::HTTP {
+                has_http = true;
+            }
             if mode == ChannelBuildMode::Headless && adapter_cfg.adapter_type.is_tui() {
                 continue;
             }
@@ -117,6 +125,23 @@ impl ChannelFactoryRegistry {
             }
 
             channels.push(factory(adapter_cfg, &id)?);
+        }
+
+        // Always ensure an HTTP gateway is present for in-cluster communication.
+        // Reads THAT_GATEWAY_ADDR (default 0.0.0.0:8080). Can be disabled by
+        // setting THAT_GATEWAY_ADDR="" if a custom HTTP adapter is already configured.
+        if !has_http {
+            let bind_addr =
+                std::env::var("THAT_GATEWAY_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+            if !bind_addr.is_empty() {
+                let adapter = HttpAdapter::new("gateway", &bind_addr, None, 300);
+                let adapter = if let Some(reg) = route_registry {
+                    adapter.with_route_registry(reg)
+                } else {
+                    adapter
+                };
+                channels.push(Arc::new(adapter));
+            }
         }
 
         if channels.is_empty() {
@@ -188,6 +213,12 @@ mod tests {
 
     use super::*;
 
+    /// Serialize tests that mutate `THAT_GATEWAY_ADDR`.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn base_adapter(ty: &str) -> AdapterConfig {
         AdapterConfig {
             id: None,
@@ -201,8 +232,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn builds_primary_by_id() -> Result<()> {
+    #[tokio::test]
+    async fn builds_primary_by_id() -> Result<()> {
         let mut a1 = base_adapter(AdapterType::TELEGRAM);
         a1.id = Some("main".into());
         a1.bot_token = Some("token-1".into());
@@ -219,47 +250,60 @@ mod tests {
         };
 
         let registry = ChannelFactoryRegistry::with_builtin_adapters();
-        let (router, _) = registry.build_router(&config, ChannelBuildMode::Headless)?;
-        assert_eq!(router.primary_id(), "ops");
+        let (router, _) = registry.build_router(&config, ChannelBuildMode::Headless, None)?;
+        assert_eq!(router.primary_id().await, "ops");
         Ok(())
     }
 
-    #[test]
-    fn auto_suffixes_duplicate_ids() -> Result<()> {
-        let mut a1 = base_adapter(AdapterType::TELEGRAM);
-        a1.bot_token = Some("token-1".into());
-        a1.chat_id = Some("chat-1".into());
+    #[tokio::test]
+    async fn auto_suffixes_duplicate_ids() -> Result<()> {
+        // Disable auto-gateway injection so we only see the configured adapters.
+        let result = {
+            let _lock = env_lock();
+            std::env::set_var("THAT_GATEWAY_ADDR", "");
+            let mut a1 = base_adapter(AdapterType::TELEGRAM);
+            a1.bot_token = Some("token-1".into());
+            a1.chat_id = Some("chat-1".into());
 
-        let mut a2 = base_adapter(AdapterType::TELEGRAM);
-        a2.bot_token = Some("token-2".into());
-        a2.chat_id = Some("chat-2".into());
+            let mut a2 = base_adapter(AdapterType::TELEGRAM);
+            a2.bot_token = Some("token-2".into());
+            a2.chat_id = Some("chat-2".into());
 
-        let config = ChannelConfig {
-            primary: None,
-            adapters: vec![a1, a2],
+            let config = ChannelConfig {
+                primary: None,
+                adapters: vec![a1, a2],
+            };
+
+            let registry = ChannelFactoryRegistry::with_builtin_adapters();
+            let result = registry.build_router(&config, ChannelBuildMode::Headless, None);
+            std::env::remove_var("THAT_GATEWAY_ADDR");
+            result
         };
-
-        let registry = ChannelFactoryRegistry::with_builtin_adapters();
-        let (router, _) = registry.build_router(&config, ChannelBuildMode::Headless)?;
-        assert_eq!(router.channel_ids(), "telegram,telegram-2");
+        let (router, _) = result?;
+        assert_eq!(router.channel_ids().await, "telegram,telegram-2");
         Ok(())
     }
 
     #[test]
     fn headless_skips_tui() {
+        // Disable auto-gateway so only TUI (skipped in Headless mode) is present.
+        let _lock = env_lock();
+        std::env::set_var("THAT_GATEWAY_ADDR", "");
         let config = ChannelConfig {
             primary: Some("tui".into()),
             adapters: vec![base_adapter(AdapterType::TUI)],
         };
         let registry = ChannelFactoryRegistry::with_builtin_adapters();
-        match registry.build_router(&config, ChannelBuildMode::Headless) {
+        let result = registry.build_router(&config, ChannelBuildMode::Headless, None);
+        std::env::remove_var("THAT_GATEWAY_ADDR");
+        match result {
             Ok(_) => panic!("expected headless build to fail when only tui adapters are enabled"),
             Err(err) => assert!(err.to_string().contains("No enabled channels configured")),
         }
     }
 
-    #[test]
-    fn supports_custom_factory_registration() -> Result<()> {
+    #[tokio::test]
+    async fn supports_custom_factory_registration() -> Result<()> {
         struct MockChannel {
             id: String,
         }
@@ -309,12 +353,20 @@ mod tests {
             adapters: vec![adapter],
         };
 
-        let registry = ChannelFactoryRegistry::new().register("mock", |cfg, id| {
-            let id = cfg.id.clone().unwrap_or_else(|| id.to_string());
-            Ok(Arc::new(MockChannel { id }))
-        });
-        let (router, _) = registry.build_router(&config, ChannelBuildMode::All)?;
-        assert_eq!(router.channel_ids(), "mock");
+        // Disable auto-gateway so only the registered mock adapter is present.
+        let result = {
+            let _lock = env_lock();
+            std::env::set_var("THAT_GATEWAY_ADDR", "");
+            let registry = ChannelFactoryRegistry::new().register("mock", |cfg, id| {
+                let id = cfg.id.clone().unwrap_or_else(|| id.to_string());
+                Ok(Arc::new(MockChannel { id }))
+            });
+            let result = registry.build_router(&config, ChannelBuildMode::All, None);
+            std::env::remove_var("THAT_GATEWAY_ADDR");
+            result
+        };
+        let (router, _) = result?;
+        assert_eq!(router.channel_ids().await, "mock");
         Ok(())
     }
 }

@@ -50,6 +50,12 @@ pub struct ToolContext {
     pub config: ThatToolsConfig,
     pub container: Option<String>,
     pub skill_roots: Vec<std::path::PathBuf>,
+    pub cluster_registry: Option<std::sync::Arc<that_plugins::cluster::ClusterRegistry>>,
+    pub channel_registry: Option<std::sync::Arc<that_channels::registry::DynamicChannelRegistry>>,
+    pub router: Option<std::sync::Arc<that_channels::ChannelRouter>>,
+    pub route_registry: Option<std::sync::Arc<that_channels::DynamicRouteRegistry>>,
+    /// Agent state directory for audit logging. When `None`, audit is silently skipped.
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 /// All parameters for a single `run()` invocation.
@@ -74,6 +80,8 @@ pub struct LoopConfig {
     pub debug: bool,
     /// Tool execution context.
     pub tool_ctx: ToolContext,
+    /// Images to attach to the current turn's user message (data, mime_type).
+    pub images: Vec<(Vec<u8>, String)>,
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -84,7 +92,10 @@ pub struct LoopConfig {
 /// Errors on unsupported provider, API failures, or max turns exceeded.
 pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result<(String, Usage)> {
     let mut messages: Vec<Message> = config.history.clone();
-    messages.push(Message::user(task));
+    messages.push(Message::User {
+        content: task.into(),
+        images: config.images.clone(),
+    });
     let mut total_usage = Usage::default();
     let mut pending_edit_verification: HashMap<String, String> = HashMap::new();
     let openai_session: Option<Arc<Mutex<openai::OpenAiWsState>>> =
@@ -212,6 +223,11 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
                 " → {}: {logged_args}", tc.name
             );
 
+            if let Some(ref sd) = config.tool_ctx.state_dir {
+                let args_short: String = tc.args_json.chars().take(120).collect();
+                crate::audit::log_event(sd, "tool_call", &format!("{}: {args_short}", tc.name));
+            }
+
             let tool_span = info_span!(
                 "tool_call",
                 otel.name = %format!("tool:{}", tc.name),
@@ -254,41 +270,24 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
                                 });
                                 edit_verification_guard_result(&edit_path, &previous_call_id)
                             } else {
-                                let dispatched = dispatch_tool(
-                                    &tc.name,
-                                    &tc.args_json,
-                                    &config.tool_ctx.config,
-                                    &config.tool_ctx.container,
-                                    &config.tool_ctx.skill_roots,
-                                )
-                                .instrument(tool_span.clone())
-                                .await;
+                                let dispatched =
+                                    dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
+                                        .instrument(tool_span.clone())
+                                        .await;
                                 if !is_tool_error_result(&dispatched) {
                                     pending_edit_verification.insert(edit_path, tc.call_id.clone());
                                 }
                                 dispatched
                             }
                         } else {
-                            dispatch_tool(
-                                &tc.name,
-                                &tc.args_json,
-                                &config.tool_ctx.config,
-                                &config.tool_ctx.container,
-                                &config.tool_ctx.skill_roots,
-                            )
-                            .instrument(tool_span.clone())
-                            .await
+                            dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
+                                .instrument(tool_span.clone())
+                                .await
                         }
                     } else {
-                        let dispatched = dispatch_tool(
-                            &tc.name,
-                            &tc.args_json,
-                            &config.tool_ctx.config,
-                            &config.tool_ctx.container,
-                            &config.tool_ctx.skill_roots,
-                        )
-                        .instrument(tool_span.clone())
-                        .await;
+                        let dispatched = dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
+                            .instrument(tool_span.clone())
+                            .await;
                         if tc.name == "code_read" && !is_tool_error_result(&dispatched) {
                             if let Some(read_path) = tool_arg_path(&tc.args_json) {
                                 pending_edit_verification.remove(&read_path);
@@ -628,7 +627,7 @@ fn messages_to_trace(messages: &[Message]) -> Vec<serde_json::Value> {
     let mut out = Vec::with_capacity(messages.len());
     for msg in messages {
         match msg {
-            Message::User { content } => out.push(serde_json::json!({
+            Message::User { content, .. } => out.push(serde_json::json!({
                 "role": "user",
                 "content": content,
             })),

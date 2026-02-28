@@ -148,10 +148,7 @@ async fn main() -> Result<()> {
                 println!("No scenario files found in {}.", dir.display());
             } else {
                 println!("{} scenario(s) in {}:\n", files.len(), dir.display());
-                println!(
-                    "{:<30} {:<12} {:<8} {}",
-                    "Name", "Tags", "Steps", "Run with"
-                );
+                println!("{:<30} {:<12} {:<8} Run with", "Name", "Tags", "Steps");
                 println!("{}", "─".repeat(80));
                 for path in &files {
                     match Scenario::from_file(path) {

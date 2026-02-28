@@ -32,6 +32,8 @@ pub struct SkillMeta {
     #[allow(dead_code)]
     pub path: String,
     pub metadata: SkillMetadata,
+    /// Pre-stripped body for `always: true` skills — avoids a file re-read in preamble building.
+    pub body: Option<String>,
 }
 
 /// Return the skills directory path inside the sandbox container for the given agent.
@@ -120,11 +122,15 @@ pub fn discover_skills_local(dir: &Path) -> Vec<SkillMeta> {
                     debug!(skill = %name, reason = %reason, "Skill ineligible — skipping");
                 }
                 Ok(()) => {
+                    let body = metadata
+                        .always
+                        .then(|| strip_frontmatter(&content).to_string());
                     skills.push(SkillMeta {
                         name,
                         description,
                         path: skill_file.display().to_string(),
                         metadata,
+                        body,
                     });
                 }
             }
@@ -200,6 +206,7 @@ pub fn check_eligibility(metadata: &SkillMetadata) -> Result<(), String> {
 }
 
 /// Returns `true` if `name` is an executable file in any directory listed in `$PATH`.
+#[cfg(unix)]
 fn binary_exists(name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::env::var_os("PATH")
@@ -213,6 +220,24 @@ fn binary_exists(name: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn binary_exists(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| {
+            std::env::split_paths(&p).any(|dir| {
+                ["", ".exe", ".bat", ".cmd"]
+                    .iter()
+                    .any(|ext| dir.join(format!("{name}{ext}")).is_file())
+            })
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn binary_exists(_name: &str) -> bool {
+    false
 }
 
 /// Extract the environment variable name from a spec string.
@@ -414,12 +439,10 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
     // Inject always-skills inline as named sections.
     for skill in &always_skills {
         out.push_str(&format!("### {}\n", skill.name));
-        if let Ok(content) = std::fs::read_to_string(&skill.path) {
-            let body = strip_frontmatter(&content);
-            out.push_str(body);
-            if !body.ends_with('\n') {
-                out.push('\n');
-            }
+        let body = skill.body.as_deref().unwrap_or_default();
+        out.push_str(body);
+        if !body.ends_with('\n') {
+            out.push('\n');
         }
         out.push_str("\n---\n\n");
     }
@@ -665,6 +688,7 @@ metadata:
             description: "Says hello".into(),
             path: "/skills/greet/SKILL.md".into(),
             metadata: SkillMetadata::default(),
+            body: None,
         }];
         let out = format_skill_preamble(&skills, "/skills");
         assert!(out.contains("**greet**"));
@@ -693,6 +717,7 @@ metadata:
                 always: true,
                 ..Default::default()
             },
+            body: Some("This body should appear.\n".into()),
         }];
 
         let out = format_skill_preamble(&skills, dir.to_str().unwrap());
@@ -729,12 +754,14 @@ metadata:
                     always: true,
                     ..Default::default()
                 },
+                body: Some("Inline body.\n".into()),
             },
             SkillMeta {
                 name: "catalog-skill".into(),
                 description: "On demand".into(),
                 path: "/nonexistent/catalog-skill/SKILL.md".into(),
                 metadata: SkillMetadata::default(),
+                body: None,
             },
         ];
 

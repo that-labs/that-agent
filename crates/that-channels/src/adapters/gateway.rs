@@ -48,8 +48,7 @@ impl Channel for GatewayChannelAdapter {
         _target: Option<&OutboundTarget>,
     ) -> Result<MessageHandle> {
         // SSRF protection: validate callback URL before every outbound POST.
-        validate_callback_url(&self.entry.callback_url)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        validate_callback_url(&self.entry.callback_url).map_err(|e| anyhow::anyhow!("{e}"))?;
 
         match event {
             ChannelEvent::Done {

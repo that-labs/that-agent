@@ -38,12 +38,3 @@ pub fn confirm_terminal(message: &str) -> Result<bool, Box<dyn std::error::Error
         .interact()?;
     Ok(result)
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_module_compiles() {
-        // Terminal prompts require interactive TTY — tested via integration tests
-        assert!(true);
-    }
-}

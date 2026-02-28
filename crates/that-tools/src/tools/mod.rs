@@ -9,6 +9,7 @@ pub mod exec;
 pub mod fs;
 pub mod human;
 pub mod memory;
+pub mod path_guard;
 pub mod search;
 pub mod session;
 pub mod skills;

@@ -241,6 +241,58 @@ pub fn save_memory_sandbox(container: &str, agent_name: &str, content: &str) -> 
     write_sandbox(container, agent_name, "Memory.md", content)
 }
 
+// ── Generic workspace file save ───────────────────────────────────────────────
+
+const WRITABLE_WORKSPACE_FILES: &[&str] = &[
+    "Soul.md",
+    "Identity.md",
+    "Agents.md",
+    "User.md",
+    "Tools.md",
+    "Memory.md",
+    "Heartbeat.md",
+    "Boot.md",
+    "Tasks.md",
+];
+
+/// Resolve a short name like "agents" to its filename "Agents.md".
+fn resolve_filename(file: &str) -> Option<&'static str> {
+    let normalized = file.trim().to_lowercase();
+    WRITABLE_WORKSPACE_FILES.iter().copied().find(|f| {
+        f.to_lowercase() == normalized || f.trim_end_matches(".md").to_lowercase() == normalized
+    })
+}
+
+/// Write any permitted workspace file to the local filesystem.
+///
+/// `file` may be the bare name ("Agents.md") or short-form without extension ("agents").
+pub fn save_workspace_file_local(
+    agent_name: &str,
+    file: &str,
+    content: &str,
+) -> Result<(), String> {
+    let filename = resolve_filename(file)
+        .ok_or_else(|| format!("Unknown workspace file '{file}'. Allowed: Soul.md, Identity.md, Agents.md, User.md, Tools.md, Memory.md, Heartbeat.md, Boot.md, Tasks.md"))?;
+    let path = agent_file_local(agent_name, filename)
+        .ok_or_else(|| "Cannot determine home directory".to_string())?;
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, content).map_err(|e| e.to_string())
+}
+
+/// Write any permitted workspace file into a sandbox container.
+pub fn save_workspace_file_sandbox(
+    container: &str,
+    agent_name: &str,
+    file: &str,
+    content: &str,
+) -> Result<(), String> {
+    let filename =
+        resolve_filename(file).ok_or_else(|| format!("Unknown workspace file '{file}'"))?;
+    write_sandbox(container, agent_name, filename, content)
+}
+
 // ── Public path helpers ───────────────────────────────────────────────────────
 
 /// Return the `Soul.md` path for a local agent (`~/.that-agent/agents/<name>/Soul.md`).

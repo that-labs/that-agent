@@ -223,9 +223,20 @@ impl DockerSandboxClient {
             format!("{}:/workspace", workspace.display()),
             "-v".to_string(),
             format!("{}:/home/agent/.that-agent", host_home.display()),
-            "--memory=2g".to_string(),
-            "--cpus=2".to_string(),
-            "--shm-size=1g".to_string(),
+            format!(
+                "--memory={}",
+                std::env::var("THAT_SANDBOX_MEMORY").unwrap_or_else(|_| "2g".into())
+            ),
+            format!(
+                "--cpus={}",
+                std::env::var("THAT_SANDBOX_CPU").unwrap_or_else(|_| "2".into())
+            ),
+            format!(
+                "--shm-size={}",
+                std::env::var("THAT_SANDBOX_SHM").unwrap_or_else(|_| "1g".into())
+            ),
+            "--pids-limit".to_string(),
+            std::env::var("THAT_SANDBOX_PIDS").unwrap_or_else(|_| "256".into()),
             "--network=bridge".to_string(),
             "-e".to_string(),
             "SHELL=/bin/bash".to_string(),

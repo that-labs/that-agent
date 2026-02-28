@@ -6,6 +6,20 @@ use tokio::sync::mpsc;
 
 use crate::config::AdapterConfig;
 
+/// An attachment received alongside an inbound user message.
+#[derive(Debug, Clone)]
+pub enum InboundAttachment {
+    Image {
+        data: Vec<u8>,
+        mime_type: String,
+    },
+    Audio {
+        data: Vec<u8>,
+        mime_type: String,
+        duration_secs: Option<u32>,
+    },
+}
+
 /// Events emitted by the agent during a run, broadcast to all active channels.
 #[derive(Debug, Clone)]
 pub enum ChannelEvent {
@@ -103,6 +117,10 @@ pub struct ChannelCapabilities {
     /// When `false`, the router will fall back to sending a plain-text notification
     /// describing the file instead of delivering the bytes.
     pub attachments: bool,
+    /// Adapter can receive inbound image attachments.
+    pub inbound_images: bool,
+    /// Adapter can receive inbound audio attachments.
+    pub inbound_audio: bool,
 }
 
 impl Default for ChannelCapabilities {
@@ -115,6 +133,8 @@ impl Default for ChannelCapabilities {
             max_message_len: 4096,
             message_edit: false,
             attachments: false,
+            inbound_images: false,
+            inbound_audio: false,
         }
     }
 }
@@ -140,6 +160,10 @@ pub struct InboundMessage {
     pub conversation_id: Option<String>,
     /// Optional routing hint for mapping to an existing session.
     pub session_hint: Option<String>,
+    /// Callback URL for async response delivery (set by inbound webhook callers).
+    pub callback_url: Option<String>,
+    /// Attachments received alongside the message (images, audio, etc.).
+    pub attachments: Vec<InboundAttachment>,
 }
 
 /// Optional outbound routing metadata for channel replies.

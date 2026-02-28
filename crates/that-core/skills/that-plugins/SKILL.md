@@ -144,6 +144,7 @@ When deploying plugin workloads to Kubernetes:
 - Always label resources consistently (for example `app.kubernetes.io/name=<plugin-id>`), then use those labels for rollout checks and cleanup.
 - If rollout fails, debug first (`kubectl describe`, `kubectl logs`, `kubectl get events`) and only re-apply after fixing the cause.
 - Remove stale failed/evicted pods for the plugin label after successful recovery so the namespace stays clean.
+- **Always expose port 80** as the Service's external port (`port: 80`, `targetPort: <container-port>`). This gives every plugin service a clean URL with no port suffix — required for Tailscale-exposed services, HTTP callbacks, and any tooling that assumes standard HTTP. The container may bind any internal port; the Service always fronts it on 80.
 
 ## Enable / Disable
 

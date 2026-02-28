@@ -335,67 +335,85 @@ pub fn execute_tool(
             }
         }
         ToolRequest::CodeSymbols { path, kind, name } => {
-            use crate::tools::code::parse;
-            let p = std::path::Path::new(path);
-            let symbols_result = if p.is_file() {
-                parse::parse_file(p).map(|parsed| parsed.symbols)
-            } else {
-                let mut all = Vec::new();
-                let walker = ignore::WalkBuilder::new(p)
-                    .hidden(true)
-                    .git_ignore(true)
-                    .build();
-                for entry in walker.flatten() {
-                    if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                        continue;
-                    }
-                    if parse::Language::from_path(entry.path()).is_some() {
-                        if let Ok(parsed) = parse::parse_file(entry.path()) {
-                            for mut sym in parsed.symbols {
-                                let rel = entry
-                                    .path()
-                                    .strip_prefix(p)
-                                    .unwrap_or(entry.path())
-                                    .to_string_lossy();
-                                sym.name = format!("{}:{}", rel, sym.name);
-                                all.push(sym);
+            #[cfg(feature = "code-analysis")]
+            {
+                use crate::tools::code::parse;
+                let p = std::path::Path::new(path);
+                let symbols_result = if p.is_file() {
+                    parse::parse_file(p).map(|parsed| parsed.symbols)
+                } else {
+                    let mut all = Vec::new();
+                    let walker = ignore::WalkBuilder::new(p)
+                        .hidden(true)
+                        .git_ignore(true)
+                        .build();
+                    for entry in walker.flatten() {
+                        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                            continue;
+                        }
+                        if parse::Language::from_path(entry.path()).is_some() {
+                            if let Ok(parsed) = parse::parse_file(entry.path()) {
+                                for mut sym in parsed.symbols {
+                                    let rel = entry
+                                        .path()
+                                        .strip_prefix(p)
+                                        .unwrap_or(entry.path())
+                                        .to_string_lossy();
+                                    sym.name = format!("{}:{}", rel, sym.name);
+                                    all.push(sym);
+                                }
                             }
                         }
                     }
-                }
-                Ok(all)
-            };
+                    Ok(all)
+                };
 
-            match symbols_result {
-                Ok(symbols) => {
-                    let filtered: Vec<_> = symbols
-                        .into_iter()
-                        .filter(|s| {
-                            if let Some(k) = kind.as_deref() {
-                                let kind_str = format!("{:?}", s.kind).to_lowercase();
-                                if !kind_str.contains(&k.to_lowercase()) {
-                                    return false;
+                match symbols_result {
+                    Ok(symbols) => {
+                        let filtered: Vec<_> = symbols
+                            .into_iter()
+                            .filter(|s| {
+                                if let Some(k) = kind.as_deref() {
+                                    let kind_str = format!("{:?}", s.kind).to_lowercase();
+                                    if !kind_str.contains(&k.to_lowercase()) {
+                                        return false;
+                                    }
                                 }
-                            }
-                            if let Some(n) = name.as_deref() {
-                                if !s.name.to_lowercase().contains(&n.to_lowercase()) {
-                                    return false;
+                                if let Some(n) = name.as_deref() {
+                                    if !s.name.to_lowercase().contains(&n.to_lowercase()) {
+                                        return false;
+                                    }
                                 }
-                            }
-                            true
-                        })
-                        .collect();
-                    let result = output::emit_json(&filtered, max_tokens);
-                    ToolResponse::from_budgeted(&result)
+                                true
+                            })
+                            .collect();
+                        let result = output::emit_json(&filtered, max_tokens);
+                        ToolResponse::from_budgeted(&result)
+                    }
+                    Err(e) => ToolResponse::error(&e.to_string()),
                 }
-                Err(e) => ToolResponse::error(&e.to_string()),
+            }
+            #[cfg(not(feature = "code-analysis"))]
+            {
+                let _ = (path, kind, name);
+                ToolResponse::error("code-analysis feature is not enabled")
             }
         }
         ToolRequest::CodeSummary { path } => {
-            match crate::tools::code::summary::code_summary(std::path::Path::new(path), max_tokens)
+            #[cfg(feature = "code-analysis")]
             {
-                Ok(result) => ToolResponse::from_budgeted(&result),
-                Err(e) => ToolResponse::error(&e.to_string()),
+                match crate::tools::code::summary::code_summary(
+                    std::path::Path::new(path),
+                    max_tokens,
+                ) {
+                    Ok(result) => ToolResponse::from_budgeted(&result),
+                    Err(e) => ToolResponse::error(&e.to_string()),
+                }
+            }
+            #[cfg(not(feature = "code-analysis"))]
+            {
+                let _ = path;
+                ToolResponse::error("code-analysis feature is not enabled")
             }
         }
         ToolRequest::CodeEdit {
@@ -407,28 +425,36 @@ pub fn execute_tool(
             all,
             dry_run,
         } => {
-            use crate::tools::code::edit;
+            #[cfg(feature = "code-analysis")]
+            {
+                use crate::tools::code::edit;
 
-            let format = if let (Some(s), Some(r)) = (search.as_ref(), replace.as_ref()) {
-                edit::EditFormat::SearchReplace {
-                    search: s.clone(),
-                    replace: r.clone(),
-                    all: *all,
-                }
-            } else if let (Some(name), Some(body)) = (target_fn.as_ref(), new_body.as_ref()) {
-                edit::EditFormat::AstNode {
-                    symbol_name: name.clone(),
-                    new_body: body.clone(),
-                }
-            } else {
-                return ToolResponse::error(
-                    "invalid code_edit args: specify search+replace or target_fn+new_body",
-                );
-            };
+                let format = if let (Some(s), Some(r)) = (search.as_ref(), replace.as_ref()) {
+                    edit::EditFormat::SearchReplace {
+                        search: s.clone(),
+                        replace: r.clone(),
+                        all: *all,
+                    }
+                } else if let (Some(name), Some(body)) = (target_fn.as_ref(), new_body.as_ref()) {
+                    edit::EditFormat::AstNode {
+                        symbol_name: name.clone(),
+                        new_body: body.clone(),
+                    }
+                } else {
+                    return ToolResponse::error(
+                        "invalid code_edit args: specify search+replace or target_fn+new_body",
+                    );
+                };
 
-            match edit::code_edit(std::path::Path::new(path), &format, *dry_run, max_tokens) {
-                Ok(result) => ToolResponse::from_budgeted(&result),
-                Err(e) => ToolResponse::error(&e.to_string()),
+                match edit::code_edit(std::path::Path::new(path), &format, *dry_run, max_tokens) {
+                    Ok(result) => ToolResponse::from_budgeted(&result),
+                    Err(e) => ToolResponse::error(&e.to_string()),
+                }
+            }
+            #[cfg(not(feature = "code-analysis"))]
+            {
+                let _ = (path, search, replace, target_fn, new_body, all, dry_run);
+                ToolResponse::error("code-analysis feature is not enabled")
             }
         }
         ToolRequest::MemAdd {
@@ -639,6 +665,7 @@ mod tests {
         assert_eq!(resp.output["error"], "test error");
     }
 
+    #[cfg(feature = "code-analysis")]
     #[test]
     fn test_dispatch_code_summary() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -657,6 +684,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "code-analysis")]
     #[test]
     fn test_dispatch_code_summary_not_found() {
         let config = ThatToolsConfig::default();
@@ -746,6 +774,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "code-analysis")]
     #[test]
     fn test_dispatch_code_summary_with_budget() {
         let tmp = tempfile::TempDir::new().unwrap();

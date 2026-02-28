@@ -22,6 +22,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
 use crate::agent_loop::types::ToolDef;
+use crate::agent_loop::ToolContext;
 
 const TRUSTED_LOCAL_SANDBOX_ENV: &str = "THAT_TRUSTED_LOCAL_SANDBOX";
 const SANDBOX_MODE_ENV: &str = "THAT_SANDBOX_MODE";
@@ -871,6 +872,218 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                 "required": ["base_repo", "agent_name"]
             }),
         },
+        // ── Cluster plugin management tools ────────────────────────────────
+        ToolDef {
+            name: "plugin_list".into(),
+            description: "List all plugins registered in the cluster. \
+                Optionally filter by owning agent name.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_name": { "type": "string", "description": "Filter to plugins owned by this agent" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "plugin_install".into(),
+            description: "Install a plugin from a manifest file into the cluster registry. \
+                Deploys the plugin if it declares a deploy target.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "manifest_path": { "type": "string", "description": "Path to the plugin manifest TOML file" },
+                    "owner_agent": { "type": "string", "description": "Name of the agent that owns this plugin" }
+                },
+                "required": ["manifest_path", "owner_agent"]
+            }),
+        },
+        ToolDef {
+            name: "plugin_uninstall".into(),
+            description: "Remove a plugin from the cluster registry. \
+                Only the owner agent or the main agent can uninstall.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plugin_id": { "type": "string", "description": "ID of the plugin to uninstall" },
+                    "requestor_agent": { "type": "string", "description": "Name of the agent requesting uninstall" }
+                },
+                "required": ["plugin_id", "requestor_agent"]
+            }),
+        },
+        ToolDef {
+            name: "plugin_status".into(),
+            description: "Check the deploy status of a plugin (running, stopped, failed, etc.).".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plugin_id": { "type": "string", "description": "ID of the plugin to check" }
+                },
+                "required": ["plugin_id"]
+            }),
+        },
+        ToolDef {
+            name: "plugin_set_policy".into(),
+            description: "Set the access policy for a plugin. \
+                Controls which agents are allowed to use the plugin.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plugin_id": { "type": "string", "description": "ID of the plugin" },
+                    "allow": { "type": "array", "items": { "type": "string" }, "description": "List of agent names allowed access, or [\"*\"] for all" },
+                    "requestor_agent": { "type": "string", "description": "Name of the agent requesting the policy change" }
+                },
+                "required": ["plugin_id", "allow", "requestor_agent"]
+            }),
+        },
+        // ── Dynamic channel management tools ────────────────────────────────
+        ToolDef {
+            name: "channel_list".into(),
+            description: "List all dynamically registered channel adapters.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
+            name: "channel_register".into(),
+            description: "Register a new gateway channel adapter at runtime. \
+                The adapter will POST agent responses to the given callback URL.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Unique identifier for the channel" },
+                    "callback_url": { "type": "string", "description": "URL to POST agent responses to" },
+                    "capabilities": { "type": "array", "items": { "type": "string" }, "description": "Capability tags for the channel" }
+                },
+                "required": ["id", "callback_url"]
+            }),
+        },
+        ToolDef {
+            name: "channel_unregister".into(),
+            description: "Remove a dynamically registered channel adapter.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "ID of the channel to unregister" }
+                },
+                "required": ["id"]
+            }),
+        },
+        // ── Dynamic gateway route tools ──────────────────────────────────────
+        ToolDef {
+            name: "gateway_route_register".into(),
+            description: "Register a custom HTTP route on the agent's gateway at runtime. \
+                Use handler_type=\"static\" with a JSON body to return a fixed response. \
+                Use handler_type=\"shell\" with a shell command whose stdout becomes the response body. \
+                The request body (if any) is available as the REQUEST_BODY env var for shell handlers.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "method": { "type": "string", "description": "HTTP method (e.g. GET, POST)" },
+                    "path": { "type": "string", "description": "URL path (e.g. /v1/admin/plugins)" },
+                    "handler_type": { "type": "string", "enum": ["static", "shell"], "description": "Handler type" },
+                    "body": { "description": "JSON body to return (for static handler)" },
+                    "command": { "type": "string", "description": "Shell command to execute (for shell handler)" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout for shell handler (default: 30)" }
+                },
+                "required": ["method", "path", "handler_type"]
+            }),
+        },
+        ToolDef {
+            name: "gateway_route_unregister".into(),
+            description: "Remove a previously registered custom gateway route.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "method": { "type": "string", "description": "HTTP method" },
+                    "path": { "type": "string", "description": "URL path of the route to remove" }
+                },
+                "required": ["method", "path"]
+            }),
+        },
+        ToolDef {
+            name: "gateway_route_list".into(),
+            description: "List all custom routes currently registered on the agent's HTTP gateway.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        // ── Identity / workspace file tools ──────────────────────────────────
+        ToolDef {
+            name: "identity_update".into(),
+            description: "Overwrite a permitted workspace file (Agents.md, User.md, Tools.md, Heartbeat.md, \
+                Tasks.md, Soul.md, etc.). Use to update operating instructions, user profile, \
+                heartbeat schedule, or task list. Read the file first if you need to preserve existing content.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file": { "type": "string", "description": "Workspace file to write (e.g. \"Agents.md\", \"Heartbeat.md\")" },
+                    "content": { "type": "string", "description": "Full new content for the file" }
+                },
+                "required": ["file", "content"]
+            }),
+        },
+        // ── HTTP request tool ─────────────────────────────────────────────────
+        ToolDef {
+            name: "http_request".into(),
+            description: "Make an HTTP request to an external URL. Returns status code and response body. \
+                Useful for calling APIs or webhooks without spawning a shell process.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "method": { "type": "string", "description": "HTTP method (GET, POST, PUT, PATCH, DELETE)" },
+                    "url": { "type": "string", "description": "Full URL to request" },
+                    "headers": {
+                        "type": "object",
+                        "description": "Optional key-value request headers",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "body": { "type": "string", "description": "Optional request body" },
+                    "timeout_secs": { "type": "integer", "description": "Request timeout (default: 30)" }
+                },
+                "required": ["method", "url"]
+            }),
+        },
+        // ── Multi-agent lifecycle tools ───────────────────────────────────────
+        ToolDef {
+            name: "spawn_agent".into(),
+            description: "Spawn a named sub-agent process in the background. The child agent runs \
+                independently and registers itself in the cluster. Returns the PID and gateway URL.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Unique name for the sub-agent" },
+                    "role": { "type": "string", "description": "Optional role description" },
+                    "gateway_port": { "type": "integer", "description": "Port for the child agent's HTTP gateway" },
+                    "model": { "type": "string", "description": "Optional model override for the child agent" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDef {
+            name: "agent_list".into(),
+            description: "List all registered agents in the cluster with their role, gateway URL, \
+                and liveness status.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
+            name: "agent_query".into(),
+            description: "Send a message to a named peer agent and return its response. \
+                The target agent must have a gateway URL registered in the cluster.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the target agent" },
+                    "message": { "type": "string", "description": "Message to send" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 60)" }
+                },
+                "required": ["name", "message"]
+            }),
+        },
     ]
 }
 
@@ -880,14 +1093,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
 ///
 /// Returns a JSON string suitable for injection into the LLM conversation as a
 /// tool result. Errors are formatted as `{"error": "..."}`.
-pub async fn dispatch(
-    name: &str,
-    args_json: &str,
-    config: &ThatToolsConfig,
-    container: &Option<String>,
-    skill_roots: &[PathBuf],
-) -> String {
-    let result = dispatch_inner(name, args_json, config, container, skill_roots).await;
+pub async fn dispatch(name: &str, args_json: &str, ctx: &ToolContext) -> String {
+    let result = dispatch_inner(name, args_json, ctx).await;
     match result {
         Ok(v) => v.to_string(),
         Err(e) => serde_json::json!({ "error": e.0 }).to_string(),
@@ -897,10 +1104,15 @@ pub async fn dispatch(
 async fn dispatch_inner(
     name: &str,
     args_json: &str,
-    config: &ThatToolsConfig,
-    container: &Option<String>,
-    skill_roots: &[PathBuf],
+    ctx: &ToolContext,
 ) -> Result<serde_json::Value, ToolError> {
+    let config = &ctx.config;
+    let container = &ctx.container;
+    let skill_roots = ctx.skill_roots.as_slice();
+    let cluster_registry = ctx.cluster_registry.as_deref();
+    let channel_registry = ctx.channel_registry.as_deref();
+    let router = ctx.router.clone();
+    let route_registry = ctx.route_registry.clone();
     match name {
         "fs_ls" => {
             let args: FsLsArgs = serde_json::from_str(args_json)
@@ -1389,6 +1601,385 @@ async fn dispatch_inner(
             .map_err(|e| ToolError(format!("worktree_discard failed: {e}")))?;
             Ok(serde_json::json!({ "status": "removed" }))
         }
+        // ── Cluster plugin tools ──────────────────────────────────────────
+        "plugin_list" => {
+            #[derive(Deserialize)]
+            struct Args {
+                agent_name: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json).unwrap_or(Args { agent_name: None });
+            let reg =
+                cluster_registry.ok_or_else(|| ToolError("cluster registry unavailable".into()))?;
+            let plugins = reg.list().map_err(|e| ToolError(e.to_string()))?;
+            let filtered: Vec<_> = plugins
+                .iter()
+                .filter(|p| args.agent_name.as_ref().is_none_or(|a| &p.owner_agent == a))
+                .map(|p| {
+                    serde_json::json!({
+                        "id": p.id,
+                        "version": p.version,
+                        "owner_agent": p.owner_agent,
+                        "policy": p.policy.allow,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({ "plugins": filtered }))
+        }
+        "plugin_install" => {
+            #[derive(Deserialize)]
+            struct Args {
+                manifest_path: String,
+                owner_agent: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let manifest_str = tokio::fs::read_to_string(&args.manifest_path)
+                .await
+                .map_err(|e| ToolError(format!("read manifest: {e}")))?;
+            let manifest: that_plugins::PluginManifest = toml::from_str(&manifest_str)
+                .map_err(|e| ToolError(format!("parse manifest: {e}")))?;
+            let manifest = manifest
+                .validate(&args.manifest_path)
+                .map_err(|e| ToolError(e.to_string()))?;
+            let plugin_dir = PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".that-agent")
+                .join("plugins");
+            let deployed = if let Some(deploy) = &manifest.deploy {
+                let backend = that_plugins::deploy::backend_for(deploy, &plugin_dir);
+                backend
+                    .deploy(&manifest)
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))?;
+                true
+            } else {
+                false
+            };
+            let reg =
+                cluster_registry.ok_or_else(|| ToolError("cluster registry unavailable".into()))?;
+            let plugin = reg
+                .install(manifest, &args.owner_agent)
+                .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({
+                "id": plugin.id,
+                "version": plugin.version,
+                "owner_agent": plugin.owner_agent,
+                "deployed": deployed,
+            }))
+        }
+        "plugin_uninstall" => {
+            #[derive(Deserialize)]
+            struct Args {
+                plugin_id: String,
+                requestor_agent: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let reg =
+                cluster_registry.ok_or_else(|| ToolError("cluster registry unavailable".into()))?;
+            reg.uninstall(&args.plugin_id, &args.requestor_agent)
+                .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        "plugin_status" => {
+            #[derive(Deserialize)]
+            struct Args {
+                plugin_id: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let reg =
+                cluster_registry.ok_or_else(|| ToolError("cluster registry unavailable".into()))?;
+            let plugins = reg.list().map_err(|e| ToolError(e.to_string()))?;
+            let plugin = plugins
+                .iter()
+                .find(|p| p.id == args.plugin_id)
+                .ok_or_else(|| ToolError(format!("plugin '{}' not found", args.plugin_id)))?;
+            let plugin_dir = PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                .join(".that-agent")
+                .join("plugins");
+            if let Some(deploy) = &plugin.manifest.deploy {
+                let backend = that_plugins::deploy::backend_for(deploy, &plugin_dir);
+                let status = backend
+                    .status(&args.plugin_id)
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))?;
+                let (s, msg) = match status {
+                    that_plugins::deploy::DeployStatus::Running => ("running", None),
+                    that_plugins::deploy::DeployStatus::Stopped => ("stopped", None),
+                    that_plugins::deploy::DeployStatus::Failed(m) => ("failed", Some(m)),
+                    that_plugins::deploy::DeployStatus::Pending => ("pending", None),
+                    that_plugins::deploy::DeployStatus::Deploying => ("deploying", None),
+                    that_plugins::deploy::DeployStatus::Degraded => ("degraded", None),
+                };
+                Ok(serde_json::json!({ "id": args.plugin_id, "status": s, "message": msg }))
+            } else {
+                Ok(serde_json::json!({ "id": args.plugin_id, "status": "unknown" }))
+            }
+        }
+        "plugin_set_policy" => {
+            #[derive(Deserialize)]
+            struct Args {
+                plugin_id: String,
+                allow: Vec<String>,
+                requestor_agent: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let reg =
+                cluster_registry.ok_or_else(|| ToolError("cluster registry unavailable".into()))?;
+            reg.set_policy(&args.plugin_id, args.allow.clone(), &args.requestor_agent)
+                .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "id": args.plugin_id, "policy": { "allow": args.allow } }))
+        }
+        // ── Dynamic channel tools ──────────────────────────────────────────
+        "channel_list" => {
+            let reg =
+                channel_registry.ok_or_else(|| ToolError("channel registry unavailable".into()))?;
+            let channels = reg.list().map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "channels": channels }))
+        }
+        "channel_register" => {
+            #[derive(Deserialize)]
+            struct Args {
+                id: String,
+                callback_url: String,
+                capabilities: Vec<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let reg =
+                channel_registry.ok_or_else(|| ToolError("channel registry unavailable".into()))?;
+            let registered_at = chrono::Utc::now().to_rfc3339();
+            let entry = that_channels::registry::ChannelEntry {
+                id: args.id.clone(),
+                callback_url: args.callback_url,
+                capabilities: args.capabilities,
+                registered_at: registered_at.clone(),
+            };
+            reg.register(entry.clone())
+                .map_err(|e| ToolError(e.to_string()))?;
+            if let Some(r) = router.as_ref() {
+                let adapter = that_channels::adapters::GatewayChannelAdapter::new(entry);
+                r.add_channel(std::sync::Arc::new(adapter)).await;
+            }
+            Ok(serde_json::json!({ "id": args.id, "registered_at": registered_at }))
+        }
+        "channel_unregister" => {
+            #[derive(Deserialize)]
+            struct Args {
+                id: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let reg =
+                channel_registry.ok_or_else(|| ToolError("channel registry unavailable".into()))?;
+            reg.unregister(&args.id)
+                .map_err(|e| ToolError(e.to_string()))?;
+            if let Some(r) = router.as_ref() {
+                r.remove_channel(&args.id).await;
+            }
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        // ── Dynamic gateway route tools ──────────────────────────────────────
+        "gateway_route_register" => {
+            #[derive(Deserialize)]
+            struct Args {
+                method: String,
+                path: String,
+                handler_type: String,
+                body: Option<serde_json::Value>,
+                command: Option<String>,
+                timeout_secs: Option<u64>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let reg = route_registry
+                .as_deref()
+                .ok_or_else(|| ToolError("route registry unavailable".into()))?;
+            let handler = match args.handler_type.as_str() {
+                "static" => that_channels::RouteHandler::Static {
+                    body: args
+                        .body
+                        .ok_or_else(|| ToolError("body required for static handler".into()))?,
+                },
+                "shell" => that_channels::RouteHandler::Shell {
+                    command: args
+                        .command
+                        .ok_or_else(|| ToolError("command required for shell handler".into()))?,
+                    timeout_secs: args.timeout_secs.unwrap_or(30),
+                },
+                other => return Err(ToolError(format!("unknown handler_type: {other}"))),
+            };
+            let route = that_channels::DynamicRoute {
+                method: args.method.to_uppercase(),
+                path: args.path.clone(),
+                handler,
+                registered_at: chrono::Utc::now().to_rfc3339(),
+            };
+            reg.register(route).map_err(|e| ToolError(e.to_string()))?;
+            Ok(
+                serde_json::json!({ "status": "ok", "path": args.path, "method": args.method.to_uppercase() }),
+            )
+        }
+        "gateway_route_unregister" => {
+            #[derive(Deserialize)]
+            struct Args {
+                method: String,
+                path: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let reg = route_registry
+                .as_deref()
+                .ok_or_else(|| ToolError("route registry unavailable".into()))?;
+            reg.unregister(&args.method.to_uppercase(), &args.path)
+                .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        "gateway_route_list" => {
+            let reg = route_registry
+                .as_deref()
+                .ok_or_else(|| ToolError("route registry unavailable".into()))?;
+            let routes = reg.list().map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "routes": routes }))
+        }
+        // ── Identity / workspace file tools ──────────────────────────────────
+        "identity_update" => {
+            #[derive(Deserialize)]
+            struct Args {
+                file: String,
+                content: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let agent_name = resolve_agent_name(config, skill_roots, None)
+                .ok_or_else(|| ToolError("Cannot resolve agent name".into()))?;
+            match container.as_deref() {
+                Some(c) => crate::workspace::save_workspace_file_sandbox(
+                    c,
+                    &agent_name,
+                    &args.file,
+                    &args.content,
+                ),
+                None => crate::workspace::save_workspace_file_local(
+                    &agent_name,
+                    &args.file,
+                    &args.content,
+                ),
+            }
+            .map_err(ToolError)?;
+            Ok(serde_json::json!({ "status": "ok", "file": args.file }))
+        }
+        // ── HTTP request tool ─────────────────────────────────────────────────
+        "http_request" => {
+            #[derive(Deserialize)]
+            struct Args {
+                method: String,
+                url: String,
+                headers: Option<std::collections::HashMap<String, String>>,
+                body: Option<String>,
+                timeout_secs: Option<u64>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let method: reqwest::Method = args
+                .method
+                .parse()
+                .map_err(|_| ToolError(format!("invalid HTTP method: {}", args.method)))?;
+            let mut req = reqwest::Client::new()
+                .request(method, &args.url)
+                .timeout(Duration::from_secs(args.timeout_secs.unwrap_or(30)));
+            for (k, v) in args.headers.unwrap_or_default() {
+                req = req.header(k, v);
+            }
+            if let Some(body) = args.body {
+                req = req.body(body);
+            }
+            let resp = req.send().await.map_err(|e| ToolError(e.to_string()))?;
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            Ok(serde_json::json!({ "status": status, "body": body }))
+        }
+        // ── Multi-agent lifecycle tools ───────────────────────────────────────
+        "spawn_agent" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                role: Option<String>,
+                gateway_port: Option<u16>,
+                model: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+            let parent = resolve_agent_name(config, skill_roots, None);
+            let entry = crate::agents::spawn_agent(
+                &args.name,
+                args.role.as_deref(),
+                parent.as_deref(),
+                args.gateway_port,
+                args.model.as_deref(),
+                &reg,
+            )
+            .await
+            .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({
+                "name": entry.name,
+                "pid": entry.pid,
+                "gateway_url": entry.gateway_url,
+                "started_at": entry.started_at,
+            }))
+        }
+        "agent_list" => {
+            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+            let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
+            let agents: Vec<serde_json::Value> = entries
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "name": e.name,
+                        "role": e.role,
+                        "parent": e.parent,
+                        "pid": e.pid,
+                        "gateway_url": e.gateway_url,
+                        "started_at": e.started_at,
+                        "alive": crate::agents::AgentRegistry::is_alive(e.pid),
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({ "agents": agents }))
+        }
+        "agent_query" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                message: String,
+                timeout_secs: Option<u64>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+            let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
+            let entry = entries
+                .iter()
+                .find(|e| e.name == args.name)
+                .ok_or_else(|| ToolError(format!("agent '{}' not found in registry", args.name)))?;
+            let gw = entry
+                .gateway_url
+                .as_deref()
+                .ok_or_else(|| ToolError(format!("agent '{}' has no gateway URL", args.name)))?;
+            let resp =
+                crate::agents::query_agent(gw, &args.message, args.timeout_secs.unwrap_or(60))
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "agent": args.name, "response": resp }))
+        }
         other => Err(ToolError(format!("unknown tool: {other}"))),
     }
 }
@@ -1512,6 +2103,7 @@ async fn dispatch_shell_exec(
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use std::fs;
@@ -1561,21 +2153,32 @@ mod tests {
         ))
     }
 
+    fn test_ctx(config: ThatToolsConfig, container: Option<String>) -> ToolContext {
+        ToolContext {
+            config,
+            container,
+            skill_roots: vec![],
+            cluster_registry: None,
+            channel_registry: None,
+            router: None,
+            route_registry: None,
+            state_dir: None,
+        }
+    }
+
     #[tokio::test]
     async fn fs_cat_still_works_on_host_without_container() {
         let _lock = env_lock();
         let _trusted = EnvVarGuard::set(TRUSTED_LOCAL_SANDBOX_ENV, Some("0"));
         let _mode = EnvVarGuard::set(SANDBOX_MODE_ENV, Some("docker"));
-        let config = ThatToolsConfig::default();
         let path = unique_tmp_path("host-fs-read.txt");
         let path_str = path.to_string_lossy().to_string();
         fs::write(&path, "host-read-only").expect("setup should create test file");
+        let ctx = test_ctx(ThatToolsConfig::default(), None);
         let result = dispatch(
             "fs_cat",
             &serde_json::json!({"path": path_str}).to_string(),
-            &config,
-            &None,
-            &[],
+            &ctx,
         )
         .await;
         assert!(
@@ -1590,12 +2193,11 @@ mod tests {
         let _lock = env_lock();
         let _trusted = EnvVarGuard::set(TRUSTED_LOCAL_SANDBOX_ENV, Some("0"));
         let _mode = EnvVarGuard::set(SANDBOX_MODE_ENV, Some("docker"));
+        let ctx = test_ctx(ThatToolsConfig::default(), None);
         let result = dispatch(
             "fs_write",
             &serde_json::json!({"path": "tmp/test.txt", "content": "x"}).to_string(),
-            &ThatToolsConfig::default(),
-            &None,
-            &[],
+            &ctx,
         )
         .await;
         assert!(
@@ -1609,7 +2211,8 @@ mod tests {
         let _lock = env_lock();
         let _trusted = EnvVarGuard::set(TRUSTED_LOCAL_SANDBOX_ENV, Some("0"));
         let _mode = EnvVarGuard::set(SANDBOX_MODE_ENV, Some("docker"));
-        let result = dispatch("fs_rm", &serde_json::json!({"path": unique_tmp_path("policy-deny").to_string_lossy().to_string()}).to_string(), &ThatToolsConfig::default(), &None, &[]).await;
+        let ctx = test_ctx(ThatToolsConfig::default(), None);
+        let result = dispatch("fs_rm", &serde_json::json!({"path": unique_tmp_path("policy-deny").to_string_lossy().to_string()}).to_string(), &ctx).await;
         assert!(result.contains("sandbox required"));
     }
 
@@ -1618,12 +2221,11 @@ mod tests {
         let _lock = env_lock();
         let _trusted = EnvVarGuard::set(TRUSTED_LOCAL_SANDBOX_ENV, Some("0"));
         let _mode = EnvVarGuard::set(SANDBOX_MODE_ENV, Some("docker"));
+        let ctx = test_ctx(ThatToolsConfig::default(), None);
         let result = dispatch(
             "shell_exec",
             &serde_json::json!({"command": "printf host-shell"}).to_string(),
-            &ThatToolsConfig::default(),
-            &None,
-            &[],
+            &ctx,
         )
         .await;
         assert!(result.contains("sandbox required"));
@@ -1634,12 +2236,14 @@ mod tests {
         let _lock = env_lock();
         let _trusted = EnvVarGuard::set(TRUSTED_LOCAL_SANDBOX_ENV, Some("0"));
         let _mode = EnvVarGuard::set(SANDBOX_MODE_ENV, Some("docker"));
+        let ctx = test_ctx(
+            ThatToolsConfig::default(),
+            Some("that-core-missing-container".to_string()),
+        );
         let result = dispatch(
             "fs_write",
             &serde_json::json!({"path": "tmp/test.txt", "content": "x"}).to_string(),
-            &ThatToolsConfig::default(),
-            &Some("that-core-missing-container".to_string()),
-            &[],
+            &ctx,
         )
         .await;
         assert!(
@@ -1655,12 +2259,11 @@ mod tests {
         let _mode = EnvVarGuard::set(SANDBOX_MODE_ENV, Some("kubernetes"));
         let target = unique_tmp_path("trusted-local-write.txt");
         let target_str = target.to_string_lossy().to_string();
+        let ctx = test_ctx(permissive_config(), None);
         let result = dispatch(
             "fs_write",
             &serde_json::json!({"path": target_str, "content": "trusted"}).to_string(),
-            &permissive_config(),
-            &None,
-            &[],
+            &ctx,
         )
         .await;
         assert!(
@@ -1672,9 +2275,7 @@ mod tests {
         let result = dispatch(
             "shell_exec",
             &serde_json::json!({"command": "printf trusted-local-shell"}).to_string(),
-            &permissive_config(),
-            &None,
-            &[],
+            &ctx,
         )
         .await;
         assert!(result.contains("trusted-local-shell"));

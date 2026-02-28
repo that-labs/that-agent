@@ -5,6 +5,7 @@
 //! `anvil fs cat` returns budget-limited file content.
 
 use crate::output::{self, BudgetedOutput, CompactionStrategy};
+use crate::tools::path_guard;
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -65,12 +66,16 @@ pub fn ls(
         return Err(FsError::NotFound(path.to_path_buf()));
     }
 
+    // Guard: reject paths that escape the workspace
+    let path = &path_guard::guard(path)?;
+
     let depth = max_depth.unwrap_or(2);
     let mut entries = Vec::new();
 
     let walker = WalkBuilder::new(path)
         .max_depth(Some(depth))
         .hidden(true)
+        .follow_links(false)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
@@ -114,6 +119,9 @@ pub fn cat(path: &Path, max_tokens: Option<usize>) -> Result<BudgetedOutput, FsE
     if !path.exists() {
         return Err(FsError::NotFound(path.to_path_buf()));
     }
+
+    // Guard: reject paths that escape the workspace
+    let path = &path_guard::guard(path)?;
 
     let content = std::fs::read_to_string(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
@@ -179,6 +187,18 @@ pub fn write(
     backup: bool,
     max_tokens: Option<usize>,
 ) -> Result<BudgetedOutput, FsError> {
+    // Guard: reject traversal (file may not exist yet, so use component check)
+    path_guard::reject_traversal(path)?;
+    if path.exists() {
+        let _ = path_guard::guard(path)?;
+    } else if let Some(root) = path_guard::workspace_root() {
+        if let Some(parent) = path.parent() {
+            if parent.exists() {
+                let _ = path_guard::safe_path(&root, parent)?;
+            }
+        }
+    }
+
     let created = !path.exists();
     let mut backup_path = None;
 
@@ -220,6 +240,16 @@ pub fn mkdir(
     parents: bool,
     max_tokens: Option<usize>,
 ) -> Result<BudgetedOutput, FsError> {
+    // Guard: reject traversal (dir doesn't exist yet)
+    path_guard::reject_traversal(path)?;
+    if let Some(root) = path_guard::workspace_root() {
+        if let Some(parent) = path.parent() {
+            if parent.exists() {
+                let _ = path_guard::safe_path(&root, parent)?;
+            }
+        }
+    }
+
     if path.exists() {
         return Err(FsError::AlreadyExists(path.to_path_buf()));
     }
@@ -251,6 +281,9 @@ pub fn rm(
     if !path.exists() {
         return Err(FsError::NotFound(path.to_path_buf()));
     }
+
+    // Guard: reject paths that escape the workspace
+    let path = &path_guard::guard(path)?;
 
     let was_dir = path.is_dir();
 

@@ -4,7 +4,6 @@
 /// `bootstrap: true` in their frontmatter are written to `~/.that-agent/skills/`
 /// on every agent startup, ensuring the installed versions always match the
 /// current binary.
-
 struct DefaultSkill {
     /// Directory name under `~/.that-agent/skills/`
     name: &'static str,

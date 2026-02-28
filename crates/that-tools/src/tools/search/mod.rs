@@ -28,8 +28,6 @@ use thiserror::Error;
 pub enum SearchError {
     #[error("HTTP request failed: {0}")]
     Http(String),
-    #[error("provider unavailable: {0}")]
-    ProviderUnavailable(String),
     #[error("rate limited by {provider}, retry after {retry_after:?}")]
     RateLimited {
         provider: String,
@@ -41,12 +39,8 @@ pub enum SearchError {
     NoApiKey(String),
     #[error("all providers failed")]
     AllProvidersFailed,
-    #[error("cache error: {0}")]
-    Cache(String),
     #[error("fetch error: {0}")]
     Fetch(String),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 /// Execute a federated search.
@@ -105,7 +99,6 @@ mod tests {
             retry_after: None,
         };
         let _ = SearchError::AllProvidersFailed;
-        let _ = SearchError::Cache("db error".into());
         let _ = SearchError::Fetch("connection refused".into());
     }
 }

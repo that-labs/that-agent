@@ -36,6 +36,9 @@ anyhow = "1"
 # Unique IDs
 uuid = { version = "1", features = ["v4"] }
 
+# Random
+rand = "0.8"
+
 # Config
 toml = "0.8"
 dirs = "6"

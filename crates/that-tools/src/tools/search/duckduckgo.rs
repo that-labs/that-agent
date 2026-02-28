@@ -12,6 +12,12 @@ pub struct DuckDuckGoProvider {
     client: reqwest::blocking::Client,
 }
 
+impl Default for DuckDuckGoProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DuckDuckGoProvider {
     pub fn new() -> Self {
         let client = reqwest::blocking::Client::builder()

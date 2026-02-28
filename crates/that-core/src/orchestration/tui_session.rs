@@ -1214,7 +1214,8 @@ pub async fn execute_agent_run_tui(
                 channel_registry: None,
                 route_registry: None,
                 router: None,
-                state_dir: dirs::home_dir().map(|h| h.join(".that-agent").join("agents").join(&agent.name)),
+                state_dir: dirs::home_dir()
+                    .map(|h| h.join(".that-agent").join("agents").join(&agent.name)),
             },
             images: vec![],
         };
