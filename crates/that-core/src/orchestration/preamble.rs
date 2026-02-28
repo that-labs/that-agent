@@ -90,6 +90,7 @@ fn interpolate(template: &str, vars: &[(&str, &str)]) -> String {
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_preamble(
     workspace_path: &Path,
     agent: &AgentDef,
@@ -350,15 +351,13 @@ pub fn build_preamble(
             "Pre-installed: Rust, Go, Python 3, Node/TypeScript (pytest, requests available).\n\
              Install extras: `sudo apt-get install -y <pkg>` or `pip3 install <pkg>`.\n\n",
         );
-    } else {
-        if trusted_local {
-            preamble.push_str(
-                "## Execution Mode: Trusted Local Sandbox\n\
-                 You are running directly inside a trusted Kubernetes pod-local sandbox. \
-                 Filesystem writes/deletes and `shell_exec` are enabled without nested Docker. \
-                 Treat this pod as your execution boundary and verify behavior with real runtime checks.\n\n",
-            );
-        }
+    } else if trusted_local {
+        preamble.push_str(
+            "## Execution Mode: Trusted Local Sandbox\n\
+             You are running directly inside a trusted Kubernetes pod-local sandbox. \
+             Filesystem writes/deletes and `shell_exec` are enabled without nested Docker. \
+             Treat this pod as your execution boundary and verify behavior with real runtime checks.\n\n",
+        );
     }
 
     // ── 8. Workspace path — compiled ─────────────────────────────────────────
