@@ -26,8 +26,10 @@
 # Local caches (Docker buildx, etc.)
 .cache/
 
-# Kubernetes overlay secrets (populated per-deployment, never committed)
+# Kubernetes overlays — only the example template is committed.
+# User-created overlays and all secret files are excluded.
 deploy/k8s/overlays/*/secret.yaml
+!deploy/k8s/overlays/example/
 
 # Logs
 *.log
