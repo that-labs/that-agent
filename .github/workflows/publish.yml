@@ -1,0 +1,51 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish crates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Publish in dependency order (leaf crates first)
+      - name: Publish that-tools
+        run: cargo publish -p that-tools --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish that-sandbox
+        run: cargo publish -p that-sandbox --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish that-channels
+        run: cargo publish -p that-channels --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish that-plugins
+        run: cargo publish -p that-plugins --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish that-core
+        run: cargo publish -p that-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      - name: Publish that-eval
+        run: cargo publish -p that-eval --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish that-cli
+        run: cargo publish -p that-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

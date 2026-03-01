@@ -33,6 +33,8 @@ pub(super) struct HotState {
     pub agent_def_fp: u64,
     /// Current agent definition — updated when the config file changes.
     pub agent: AgentDef,
+    /// Pre-resolved skill roots for tool dispatch.
+    pub skill_roots: Vec<std::path::PathBuf>,
 }
 
 type ChannelSessions =
@@ -110,10 +112,11 @@ pub async fn run_listen(
     let container = prepare_container(agent, &agent_workspace, sandbox).await?;
     let ws_files = load_workspace_files(agent, sandbox);
 
-    // Initial skill discovery + preamble.
-    let found_skills = discover_skills(agent, sandbox);
-    let plugin_commands = discover_plugin_commands(agent);
-    let plugin_activations = discover_plugin_activations(agent);
+    // Initial skill discovery + preamble — load plugin registry once.
+    let plugin_registry = that_plugins::PluginRegistry::load(&agent.name);
+    let found_skills = discover_skills_with_registry(agent, &plugin_registry);
+    let plugin_commands = plugin_registry.enabled_commands();
+    let plugin_activations = plugin_registry.enabled_activations();
     let bot_commands = build_bot_commands_list(&found_skills, &plugin_commands);
     let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
     let preamble = build_preamble(
@@ -125,8 +128,11 @@ pub async fn run_listen(
         0,
         "listen",
         &session_summaries,
+        Some(&plugin_registry),
+        None,
     );
-    let skills_fp = skills_fingerprint(agent);
+    let skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
+    let skills_fp = skills_fingerprint_with_registry(agent, &plugin_registry);
 
     // Compute initial fingerprint for the agent config file.
     // Must match the resolution order in WorkspaceConfig::load_agent():
@@ -156,6 +162,7 @@ pub async fn run_listen(
         skills_fp,
         agent_def_fp,
         agent: agent.clone(),
+        skill_roots,
     }));
 
     // Per-sender state: key = "channel_id:sender_id" → (session_id, history).
@@ -224,8 +231,9 @@ pub async fn run_listen(
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
-                // ── Skills hot-reload ─────────────────────────────────────
-                let new_skills_fp = skills_fingerprint(&agent_hot);
+                // ── Skills hot-reload — load registry once per cycle ─────
+                let reload_registry = that_plugins::PluginRegistry::load(&agent_hot.name);
+                let new_skills_fp = skills_fingerprint_with_registry(&agent_hot, &reload_registry);
                 let skills_changed = new_skills_fp != hot.read().await.skills_fp;
 
                 // ── Agent config hot-reload ───────────────────────────────
@@ -246,9 +254,9 @@ pub async fn run_listen(
                 }
 
                 if skills_changed || config_changed {
-                    let new_skills = discover_skills(&agent_hot, sandbox);
-                    let new_plugin_commands = discover_plugin_commands(&agent_hot);
-                    let new_plugin_activations = discover_plugin_activations(&agent_hot);
+                    let new_skills = discover_skills_with_registry(&agent_hot, &reload_registry);
+                    let new_plugin_commands = reload_registry.enabled_commands();
+                    let new_plugin_activations = reload_registry.enabled_activations();
                     let new_commands = build_bot_commands_list(&new_skills, &new_plugin_commands);
                     let summaries = session_mgr.session_summaries(5).unwrap_or_default();
                     // Re-read workspace files on hot-reload — agent may have edited them.
@@ -262,10 +270,14 @@ pub async fn run_listen(
                         0,
                         "listen",
                         &summaries,
+                        Some(&reload_registry),
+                        None,
                     );
                     if skills_changed {
                         info!(count = new_skills.len(), "Hot-reloading skills");
                     }
+                    let new_skill_roots =
+                        resolved_skill_roots_with_registry(&agent_hot, &reload_registry);
                     router.register_commands(&new_commands).await;
                     let mut state = hot.write().await;
                     state.found_skills = new_skills;
@@ -276,6 +288,7 @@ pub async fn run_listen(
                     state.skills_fp = new_skills_fp;
                     state.agent_def_fp = new_cfg_fp;
                     state.agent = agent_hot.clone();
+                    state.skill_roots = new_skill_roots;
                 }
             }
         });
@@ -298,18 +311,36 @@ pub async fn run_listen(
         let route_registry_hb = Arc::clone(&route_registry);
         let interval_secs = agent.heartbeat_interval.unwrap_or(10).max(1);
 
+        let plugin_dir_hb = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join(".that-agent")
+            .join("plugins");
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+            let mut last_reconcile = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(120))
+                .unwrap_or_else(std::time::Instant::now);
             loop {
                 ticker.tick().await;
 
                 // Touch liveness file so K8s knows the event loop is alive.
                 let _ = tokio::fs::File::create("/tmp/that-agent-alive").await;
 
-                // Snapshot current preamble and agent from hot state.
-                let (preamble_hb, current_agent) = {
+                // Reconcile plugin deploy status every 60s.
+                if last_reconcile.elapsed() >= std::time::Duration::from_secs(60) {
+                    if let Err(e) = cluster_registry_hb.reconcile_status(&plugin_dir_hb).await {
+                        tracing::warn!(error = %e, "Plugin status reconciliation failed");
+                    }
+                    last_reconcile = std::time::Instant::now();
+                }
+
+                // Snapshot current preamble, agent, and skill roots from hot state.
+                let (preamble_hb, current_agent, skill_roots_hb) = {
                     let state = hot.read().await;
-                    (state.preamble.clone(), state.agent.clone())
+                    (
+                        state.preamble.clone(),
+                        state.agent.clone(),
+                        state.skill_roots.clone(),
+                    )
                 };
 
                 // Ensure Heartbeat.md exists, then load entries.
@@ -509,6 +540,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&cluster_registry_hb)),
                         Some(Arc::clone(&channel_registry_hb)),
                         Some(Arc::clone(&route_registry_hb)),
+                        skill_roots_hb.clone(),
                     )
                     .await;
                 }
@@ -562,6 +594,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&cluster_registry_hb)),
                         Some(Arc::clone(&channel_registry_hb)),
                         Some(Arc::clone(&route_registry_hb)),
+                        skill_roots_hb.clone(),
                     )
                     .await;
                 }
@@ -647,6 +680,7 @@ pub async fn run_listen(
                         plugin_commands,
                         plugin_activations,
                         agent,
+                        skill_roots,
                     ) = {
                         let state = hot.read().await;
                         (
@@ -656,6 +690,7 @@ pub async fn run_listen(
                             state.plugin_commands.clone(),
                             state.plugin_activations.clone(),
                             state.agent.clone(),
+                            state.skill_roots.clone(),
                         )
                     };
 
@@ -858,6 +893,7 @@ pub async fn run_listen(
                                         Some(Arc::clone(&cluster_registry)),
                                         Some(Arc::clone(&channel_registry)),
                                         Some(Arc::clone(&route_registry)),
+                                        skill_roots,
                                     )
                                     .await;
                                     return;
@@ -890,6 +926,7 @@ pub async fn run_listen(
                                         Some(Arc::clone(&cluster_registry)),
                                         Some(Arc::clone(&channel_registry)),
                                         Some(Arc::clone(&route_registry)),
+                                        skill_roots,
                                     )
                                     .await;
                                     return;
@@ -929,6 +966,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&cluster_registry)),
                         Some(Arc::clone(&channel_registry)),
                         Some(Arc::clone(&route_registry)),
+                        skill_roots,
                     )
                     .await;
                 })
@@ -965,6 +1003,7 @@ async fn run_agent_for_sender_tracked(
     cluster_registry: Option<Arc<that_plugins::cluster::ClusterRegistry>>,
     channel_registry: Option<Arc<that_channels::registry::DynamicChannelRegistry>>,
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
+    skill_roots: Vec<std::path::PathBuf>,
 ) {
     let active_run_id = run_seq.fetch_add(1, Ordering::Relaxed);
     let sender_key_for_task = sender_key.clone();
@@ -990,6 +1029,7 @@ async fn run_agent_for_sender_tracked(
             cluster_registry,
             channel_registry,
             route_registry,
+            skill_roots,
         )
         .await;
     });
@@ -1038,6 +1078,7 @@ async fn run_agent_for_sender(
     cluster_registry: Option<Arc<that_plugins::cluster::ClusterRegistry>>,
     channel_registry: Option<Arc<that_channels::registry::DynamicChannelRegistry>>,
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
+    skill_roots: Vec<std::path::PathBuf>,
 ) {
     struct TypingTaskGuard(Option<tokio::task::JoinHandle<()>>);
     impl TypingTaskGuard {
@@ -1236,6 +1277,7 @@ async fn run_agent_for_sender(
         cluster_registry,
         channel_registry,
         route_registry,
+        skill_roots,
     )
     .await;
 

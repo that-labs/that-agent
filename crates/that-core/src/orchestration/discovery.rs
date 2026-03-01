@@ -229,16 +229,24 @@ pub fn build_bot_commands_list(
 /// Compute a fingerprint over all effective skill/plugin assets for an agent.
 /// Used to detect when skills/plugins are added, removed, enabled, disabled, or modified.
 pub fn skills_fingerprint(agent: &AgentDef) -> u64 {
+    let plugin_registry = that_plugins::PluginRegistry::load(&agent.name);
+    skills_fingerprint_with_registry(agent, &plugin_registry)
+}
+
+/// Compute a fingerprint using a pre-loaded plugin registry.
+pub fn skills_fingerprint_with_registry(
+    agent: &AgentDef,
+    plugin_registry: &that_plugins::PluginRegistry,
+) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
     let mut hasher = DefaultHasher::new();
-    let plugin_registry = that_plugins::PluginRegistry::load(&agent.name);
     plugin_registry.fingerprint.hash(&mut hasher);
     for err in &plugin_registry.load_errors {
         err.hash(&mut hasher);
     }
-    let skill_roots = skill_roots_for_agent(agent, &plugin_registry);
+    let skill_roots = skill_roots_for_agent(agent, plugin_registry);
     let mut files: Vec<(String, u128)> = skill_roots
         .iter()
         .flat_map(|dir| {
@@ -296,7 +304,14 @@ pub fn skill_roots_for_agent(
 
 pub fn resolved_skill_roots(agent: &AgentDef) -> Vec<std::path::PathBuf> {
     let plugin_registry = that_plugins::PluginRegistry::load(&agent.name);
-    let mut roots = skill_roots_for_agent(agent, &plugin_registry);
+    resolved_skill_roots_with_registry(agent, &plugin_registry)
+}
+
+pub fn resolved_skill_roots_with_registry(
+    agent: &AgentDef,
+    registry: &that_plugins::PluginRegistry,
+) -> Vec<std::path::PathBuf> {
+    let mut roots = skill_roots_for_agent(agent, registry);
     if roots.is_empty() {
         roots.push(std::path::PathBuf::from(".that-agent/skills"));
     }
@@ -304,19 +319,34 @@ pub fn resolved_skill_roots(agent: &AgentDef) -> Vec<std::path::PathBuf> {
 }
 
 pub fn discover_plugin_commands(agent: &AgentDef) -> Vec<that_plugins::ResolvedPluginCommand> {
-    let plugin_registry = that_plugins::PluginRegistry::load(&agent.name);
-    plugin_registry.enabled_commands()
+    that_plugins::PluginRegistry::load(&agent.name).enabled_commands()
 }
 
 pub fn discover_plugin_activations(
     agent: &AgentDef,
 ) -> Vec<that_plugins::ResolvedPluginActivation> {
-    let plugin_registry = that_plugins::PluginRegistry::load(&agent.name);
-    plugin_registry.enabled_activations()
+    that_plugins::PluginRegistry::load(&agent.name).enabled_activations()
 }
 
 pub fn format_plugin_preamble(agent: &AgentDef, sandbox: bool) -> String {
     let registry = that_plugins::PluginRegistry::load(&agent.name);
+    format_plugin_preamble_with_registry(agent, sandbox, &registry)
+}
+
+pub fn format_plugin_preamble_with_registry(
+    agent: &AgentDef,
+    sandbox: bool,
+    registry: &that_plugins::PluginRegistry,
+) -> String {
+    format_plugin_preamble_full(agent, sandbox, registry, None)
+}
+
+pub fn format_plugin_preamble_full(
+    agent: &AgentDef,
+    sandbox: bool,
+    registry: &that_plugins::PluginRegistry,
+    cluster: Option<&that_plugins::cluster::ClusterRegistry>,
+) -> String {
     let summaries = registry.summaries();
     if summaries.is_empty() {
         return String::new();
@@ -410,6 +440,9 @@ pub fn format_plugin_preamble(agent: &AgentDef, sandbox: bool) -> String {
          Plugins can add commands, skills, routines, activations, and emoji packs.  \n\
          Changes are hot-reloaded automatically.\n\n"
     ));
+    // Pre-load cluster plugin statuses if available.
+    let cluster_plugins = cluster.and_then(|c| c.list().ok()).unwrap_or_default();
+
     for plugin in registry.enabled_plugins() {
         let desc = plugin
             .manifest
@@ -427,8 +460,14 @@ pub fn format_plugin_preamble(agent: &AgentDef, sandbox: bool) -> String {
                 .collect();
             format!("  Skills: {}\n", names.join(", "))
         };
+        let status_line = cluster_plugins
+            .iter()
+            .find(|cp| cp.id == plugin.manifest.id)
+            .and_then(|cp| cp.deploy_status.as_deref())
+            .map(|s| format!(" | deploy: **{s}**"))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "- **{}** (`{}` v{}): {}. Commands: {}, Routines: {}, Activations: {}, Emojis: {}\n{skill_line}",
+            "- **{}** (`{}` v{}): {}.{status_line} Commands: {}, Routines: {}, Activations: {}, Emojis: {}\n{skill_line}",
             plugin.manifest.display_name(),
             plugin.manifest.id,
             plugin.manifest.version,
@@ -468,15 +507,19 @@ pub fn file_mtime_hash(path: &std::path::Path) -> u64 {
 
 /// Discover skills for the current mode (sandbox or local).
 pub fn discover_skills(agent: &AgentDef, _sandbox: bool) -> Vec<skills::SkillMeta> {
-    // Always read from the host. In sandbox mode the host ~/.that-agent is
-    // bind-mounted into the container, so the two directories are the same
-    // filesystem — reading locally is both faster and available before the
-    // container is started.
     let plugin_registry = that_plugins::PluginRegistry::load(&agent.name);
-    for err in &plugin_registry.load_errors {
+    discover_skills_with_registry(agent, &plugin_registry)
+}
+
+/// Discover skills using a pre-loaded plugin registry, avoiding redundant I/O.
+pub fn discover_skills_with_registry(
+    agent: &AgentDef,
+    registry: &that_plugins::PluginRegistry,
+) -> Vec<skills::SkillMeta> {
+    for err in &registry.load_errors {
         tracing::warn!(agent = %agent.name, error = %err, "Plugin load warning");
     }
-    let roots = skill_roots_for_agent(agent, &plugin_registry);
+    let roots = skill_roots_for_agent(agent, registry);
     let mut skills_found = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for root in roots {

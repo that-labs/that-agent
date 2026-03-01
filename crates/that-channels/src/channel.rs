@@ -95,7 +95,7 @@ pub struct MessageHandle {
 
 /// Declared capabilities of a channel adapter.
 ///
-/// Used by [`ChannelRouter`] to make capability-aware routing decisions —
+/// Used by the channel router to make capability-aware routing decisions —
 /// e.g. only route `human_ask` to channels that can respond, only start
 /// inbound listeners for channels that support them, etc.
 #[derive(Debug, Clone)]
@@ -214,7 +214,7 @@ pub trait Channel: Send + Sync {
 
     /// Validate configuration and establish any persistent connections.
     ///
-    /// Called once at startup by [`ChannelRouter::initialize()`] before listeners
+    /// Called once at startup by the channel router before listeners
     /// are started. Use this to verify API tokens, test connectivity, etc.
     /// Errors are logged as warnings but do not abort startup.
     async fn on_start(&self) -> Result<()> {

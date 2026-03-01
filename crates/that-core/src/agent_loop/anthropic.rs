@@ -42,19 +42,29 @@ pub(super) async fn stream_turn(
     // Build request body.
     let body = build_request(system, messages, tools, model, max_tokens, prompt_caching);
 
+    let is_oauth = is_oauth_token(api_key);
+
     let client = reqwest::Client::new();
-    let response = client
+    let mut req = client
         .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
-        .header(
+        .header("content-type", "application/json");
+
+    if is_oauth {
+        req = req
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header(
+                "anthropic-beta",
+                "prompt-caching-2024-07-31,interleaved-thinking-2025-05-14,oauth-2025-04-20",
+            );
+    } else {
+        req = req.header("x-api-key", api_key).header(
             "anthropic-beta",
             "prompt-caching-2024-07-31,interleaved-thinking-2025-05-14",
-        )
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await?;
+        );
+    }
+
+    let response = req.body(body).send().await?;
 
     let status = response.status();
     if !status.is_success() {
@@ -312,8 +322,8 @@ pub fn messages_to_anthropic(messages: &[Message], prompt_caching: bool) -> serd
                     content_blocks.push(serde_json::json!({ "type": "text", "text": content }));
                 }
                 for tc in tool_calls {
-                    let input: serde_json::Value =
-                        serde_json::from_str(&tc.args_json).unwrap_or(serde_json::Value::Null);
+                    let input: serde_json::Value = serde_json::from_str(&tc.args_json)
+                        .unwrap_or_else(|_| serde_json::json!({}));
                     content_blocks.push(serde_json::json!({
                         "type": "tool_use",
                         "id": tc.call_id,
@@ -373,4 +383,10 @@ pub fn messages_to_anthropic(messages: &[Message], prompt_caching: bool) -> serd
     }
 
     serde_json::Value::Array(out)
+}
+
+/// Returns `true` when the credential is an Anthropic OAuth token
+/// (prefix `sk-ant-oat01-`) rather than a regular API key.
+fn is_oauth_token(token: &str) -> bool {
+    token.starts_with("sk-ant-oat01-")
 }

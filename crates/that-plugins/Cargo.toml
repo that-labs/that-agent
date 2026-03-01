@@ -5,6 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 serde = { workspace = true }
@@ -15,4 +23,4 @@ dirs = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
 async-trait = "0.1"
-that-sandbox = { path = "../that-sandbox" }
+that-sandbox = { path = "../that-sandbox", version = "0.1.0" }

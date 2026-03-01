@@ -7,6 +7,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/that-labs/that-agent"
+homepage = "https://github.com/that-labs/that-agent"
+keywords = ["agent", "llm", "autonomous", "orchestration", "sandbox"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.91"
 
 [workspace.dependencies]
 # CLI
@@ -45,6 +49,9 @@ dirs = "6"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+
+[workspace.metadata.docs.rs]
+all-features = true
 
 [profile.release]
 opt-level = "z"

@@ -1,7 +1,13 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use tracing::{debug, warn};
+
+thread_local! {
+    static BIN_CACHE: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+}
 
 /// Metadata declared in a skill's YAML frontmatter under the `metadata:` key.
 #[derive(Debug, Clone, Default)]
@@ -206,8 +212,20 @@ pub fn check_eligibility(metadata: &SkillMetadata) -> Result<(), String> {
 }
 
 /// Returns `true` if `name` is an executable file in any directory listed in `$PATH`.
-#[cfg(unix)]
+/// Results are cached per-thread for the lifetime of the process.
 fn binary_exists(name: &str) -> bool {
+    BIN_CACHE.with(|cache| {
+        if let Some(&result) = cache.borrow().get(name) {
+            return result;
+        }
+        let found = binary_exists_uncached(name);
+        cache.borrow_mut().insert(name.to_string(), found);
+        found
+    })
+}
+
+#[cfg(unix)]
+fn binary_exists_uncached(name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::env::var_os("PATH")
         .map(|p| {
@@ -223,7 +241,7 @@ fn binary_exists(name: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn binary_exists(name: &str) -> bool {
+fn binary_exists_uncached(name: &str) -> bool {
     std::env::var_os("PATH")
         .map(|p| {
             std::env::split_paths(&p).any(|dir| {
@@ -236,7 +254,7 @@ fn binary_exists(name: &str) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn binary_exists(_name: &str) -> bool {
+fn binary_exists_uncached(_name: &str) -> bool {
     false
 }
 

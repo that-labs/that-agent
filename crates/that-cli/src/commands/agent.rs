@@ -3,7 +3,14 @@ use crate::cli::{self, PluginCommands};
 fn api_key_env_var_for_provider(provider: &str) -> anyhow::Result<&'static str> {
     match provider {
         "openai" => Ok("OPENAI_API_KEY"),
-        "anthropic" => Ok("ANTHROPIC_API_KEY"),
+        "anthropic" => {
+            // Prefer OAuth token when available.
+            if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok() {
+                Ok("CLAUDE_CODE_OAUTH_TOKEN")
+            } else {
+                Ok("ANTHROPIC_API_KEY")
+            }
+        }
         "openrouter" => Ok("OPENROUTER_API_KEY"),
         other => anyhow::bail!(
             "Unsupported provider '{other}'. Use 'anthropic', 'openai', or 'openrouter'."

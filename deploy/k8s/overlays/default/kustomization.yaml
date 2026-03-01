@@ -10,8 +10,8 @@ resources:
 
 images:
   - name: that-agent
-    newName: myregistry.localhost:12345/that-agent
-    newTag: v1.0
+    newName: ghcr.io/that-labs/that-agent
+    newTag: latest
 
 patches:
   - path: patch-configmap.yaml

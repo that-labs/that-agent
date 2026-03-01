@@ -29,7 +29,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_sandbox: bool,
 
-    /// Agent name (loads from agents/<name>.toml)
+    /// Agent name (loads from `agents/<name>.toml`)
     #[arg(long, global = true)]
     pub agent: Option<String>,
 

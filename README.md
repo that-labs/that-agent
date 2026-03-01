@@ -74,9 +74,7 @@ The agent diffs the current and previous deployments, reads rollout status, insp
 
 The agent runs with a persistent volume mounted at `/workspace`. Sub-agents are spawned with a scoped view of the same volume — the parent writes, children read and extend. Work survives restarts, spans multiple agents, and never leaves your cluster. A parent orchestrating a fleet of specialists shares context with all of them through the workspace.
 
-## Deploy
-
-`that-agent` runs on whatever you already have. Start on a single VPS for a few dollars a month. When your business grows, the same Kubernetes manifests that run on a single node run unchanged across multiple regions — the agent's plugin registry and channel routing are cluster-aware from day one. No re-architecture. No migration. Just a bigger cluster.
+## Get Started
 
 ### Fresh VPS — one command
 
@@ -86,15 +84,65 @@ curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/i
 
 Installs k3s, prompts for agent name and API credentials, deploys the agent. The description you provide is interpreted by the LLM at first boot to generate the agent's identity.
 
-### Existing Kubernetes cluster
+### Docker
+
+```bash
+docker run -it --rm \
+  -e ANTHROPIC_API_KEY \
+  -e THAT_AGENT_NAME=my-agent \
+  -v that-agent-home:/home/agent/.that-agent \
+  -v that-workspace:/workspace \
+  ghcr.io/that-labs/that-agent:latest \
+  -c "that chat --agent my-agent --no-sandbox"
+```
+
+Two image variants are published to `ghcr.io/that-labs/that-agent`:
+
+| Tag | Contents |
+|---|---|
+| `latest` / `v*` | Slim — Python, Git, curl, ripgrep, kubectl, Docker CLI |
+| `latest-full` / `v*-full` | Full — adds Rust, Go, Node.js, TypeScript, Python dev packages |
+
+### Kubernetes
 
 ```bash
 cp -r deploy/k8s/overlays/example deploy/k8s/overlays/my-agent
-# edit namespace, configmap, secret, and image reference
+# edit namespace, configmap, secret
 kubectl apply -k deploy/k8s/overlays/my-agent
 ```
 
-Same manifests. Any cluster size. Any region count. See [OPERATORS.md](./OPERATORS.md) for full configuration, environment variables, overlay examples, and observability setup.
+The default overlay pulls `ghcr.io/that-labs/that-agent:latest`. Same manifests work on a single node or across multiple regions. See [OPERATORS.md](./OPERATORS.md) for full configuration, environment variables, and observability setup.
+
+### Pre-built binary
+
+Download from [GitHub Releases](https://github.com/that-labs/that-agent/releases/latest):
+
+```bash
+# macOS (Apple Silicon)
+curl -fsSL https://github.com/that-labs/that-agent/releases/latest/download/that-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv that /usr/local/bin/
+
+# macOS (Intel)
+curl -fsSL https://github.com/that-labs/that-agent/releases/latest/download/that-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv that /usr/local/bin/
+
+# Linux (x86_64)
+curl -fsSL https://github.com/that-labs/that-agent/releases/latest/download/that-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv that /usr/local/bin/
+```
+
+### From crates.io
+
+```bash
+cargo install that-cli
+```
+
+### From source
+
+```bash
+cargo build --release
+# binary: ./target/release/that
+```
 
 ## What You Get
 

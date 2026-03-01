@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::format_plugin_preamble;
+use super::discovery::{format_plugin_preamble, format_plugin_preamble_full};
 use crate::config::AgentDef;
 use crate::session::SessionSummary;
 use crate::skills;
@@ -100,6 +100,8 @@ pub fn build_preamble(
     _history_len: usize,
     _session_id: &str,
     _session_summaries: &[SessionSummary],
+    plugin_registry: Option<&that_plugins::PluginRegistry>,
+    cluster_registry: Option<&that_plugins::cluster::ClusterRegistry>,
 ) -> String {
     let mut preamble = String::new();
     let trusted_local = !sandbox && trusted_local_sandbox_enabled();
@@ -399,7 +401,16 @@ pub fn build_preamble(
 
     // ── 11. Plugins — compiled (from agent config) ────────────────────────────
 
-    preamble.push_str(&format_plugin_preamble(agent, sandbox));
+    if let Some(reg) = plugin_registry {
+        preamble.push_str(&format_plugin_preamble_full(
+            agent,
+            sandbox,
+            reg,
+            cluster_registry,
+        ));
+    } else {
+        preamble.push_str(&format_plugin_preamble(agent, sandbox));
+    }
 
     // ── 11.5. Orchestration — multi-agent coordination tools ──────────────────
     //

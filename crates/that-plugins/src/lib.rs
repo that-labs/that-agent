@@ -1,3 +1,5 @@
+//! that-plugins — Agent-scoped plugin registry with commands, activations, and routines.
+
 pub mod cluster;
 pub mod deploy;
 

@@ -329,6 +329,14 @@ pub struct MemCompactArgs {
     pub session_id: Option<String>,
 }
 #[derive(Debug, Deserialize)]
+pub struct MemRemoveArgs {
+    pub id: String,
+}
+#[derive(Debug, Deserialize)]
+pub struct MemUnpinArgs {
+    pub id: String,
+}
+#[derive(Debug, Deserialize)]
 pub struct SearchQueryArgs {
     pub query: String,
     pub engine: Option<String>,
@@ -693,6 +701,30 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "mem_remove".into(),
+            description: "Remove a specific memory entry by its ID. Use after mem_search or \
+                mem_recall to identify the entry to delete.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Memory entry ID to remove" }
+                },
+                "required": ["id"]
+            }),
+        },
+        ToolDef {
+            name: "mem_unpin".into(),
+            description: "Demote a pinned memory entry back to unpinned so it becomes eligible \
+                for automatic pruning. The entry is retained; use mem_remove to delete it.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Memory entry ID to unpin" }
+                },
+                "required": ["id"]
+            }),
+        },
+        ToolDef {
             name: "search_query".into(),
             description: "Search the web and return ranked results with titles, URLs, and snippets.".into(),
             parameters: serde_json::json!({
@@ -887,12 +919,14 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "plugin_install".into(),
             description: "Install a plugin from a manifest file into the cluster registry. \
-                Deploys the plugin if it declares a deploy target.".into(),
+                Deploys the plugin if it declares a deploy target. \
+                Use skip_deploy=true to register without deploying.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "manifest_path": { "type": "string", "description": "Path to the plugin manifest TOML file" },
-                    "owner_agent": { "type": "string", "description": "Name of the agent that owns this plugin" }
+                    "owner_agent": { "type": "string", "description": "Name of the agent that owns this plugin" },
+                    "skip_deploy": { "type": "boolean", "description": "Register plugin without deploying (default: false)", "default": false }
                 },
                 "required": ["manifest_path", "owner_agent"]
             }),
@@ -900,12 +934,14 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "plugin_uninstall".into(),
             description: "Remove a plugin from the cluster registry. \
+                When undeploy is true (default), also tears down the running deployment. \
                 Only the owner agent or the main agent can uninstall.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "plugin_id": { "type": "string", "description": "ID of the plugin to uninstall" },
-                    "requestor_agent": { "type": "string", "description": "Name of the agent requesting uninstall" }
+                    "requestor_agent": { "type": "string", "description": "Name of the agent requesting uninstall" },
+                    "undeploy": { "type": "boolean", "description": "Also tear down the running deployment (default: true)", "default": true }
                 },
                 "required": ["plugin_id", "requestor_agent"]
             }),
@@ -1442,6 +1478,16 @@ async fn dispatch_inner(
             )
             .await
         }
+        "mem_remove" => {
+            let args: MemRemoveArgs = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            run_on_host(config.clone(), ToolRequest::MemRemove { id: args.id }).await
+        }
+        "mem_unpin" => {
+            let args: MemUnpinArgs = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            run_on_host(config.clone(), ToolRequest::MemUnpin { id: args.id }).await
+        }
         "search_query" => {
             let args: SearchQueryArgs = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
@@ -1630,6 +1676,8 @@ async fn dispatch_inner(
             struct Args {
                 manifest_path: String,
                 owner_agent: String,
+                #[serde(default)]
+                skip_deploy: bool,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
@@ -1644,13 +1692,17 @@ async fn dispatch_inner(
             let plugin_dir = PathBuf::from(std::env::var("HOME").unwrap_or_default())
                 .join(".that-agent")
                 .join("plugins");
-            let deployed = if let Some(deploy) = &manifest.deploy {
-                let backend = that_plugins::deploy::backend_for(deploy, &plugin_dir);
-                backend
-                    .deploy(&manifest)
-                    .await
-                    .map_err(|e| ToolError(e.to_string()))?;
-                true
+            let deployed = if !args.skip_deploy {
+                if let Some(deploy) = &manifest.deploy {
+                    let backend = that_plugins::deploy::backend_for(deploy, &plugin_dir);
+                    backend
+                        .deploy(&manifest)
+                        .await
+                        .map_err(|e| ToolError(e.to_string()))?;
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             };
@@ -1671,14 +1723,38 @@ async fn dispatch_inner(
             struct Args {
                 plugin_id: String,
                 requestor_agent: String,
+                #[serde(default = "default_true")]
+                undeploy: bool,
+            }
+            fn default_true() -> bool {
+                true
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             let reg =
                 cluster_registry.ok_or_else(|| ToolError("cluster registry unavailable".into()))?;
+            let mut undeployed = false;
+            if args.undeploy {
+                if let Some(plugin) = reg
+                    .find(&args.plugin_id)
+                    .map_err(|e| ToolError(e.to_string()))?
+                {
+                    if let Some(deploy) = &plugin.manifest.deploy {
+                        let plugin_dir = PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                            .join(".that-agent")
+                            .join("plugins");
+                        let backend = that_plugins::deploy::backend_for(deploy, &plugin_dir);
+                        backend
+                            .undeploy(&args.plugin_id)
+                            .await
+                            .map_err(|e| ToolError(format!("undeploy failed: {e}")))?;
+                        undeployed = true;
+                    }
+                }
+            }
             reg.uninstall(&args.plugin_id, &args.requestor_agent)
                 .map_err(|e| ToolError(e.to_string()))?;
-            Ok(serde_json::json!({ "status": "ok" }))
+            Ok(serde_json::json!({ "status": "ok", "undeployed": undeployed }))
         }
         "plugin_status" => {
             #[derive(Deserialize)]

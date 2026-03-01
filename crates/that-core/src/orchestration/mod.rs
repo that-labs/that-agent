@@ -31,14 +31,16 @@ pub use config::{
 };
 pub use discovery::{
     activation_matches_message, build_bot_commands_list, build_help_text,
-    discover_plugin_activations, discover_plugin_commands, discover_skills, file_mtime_hash,
-    find_plugin_command, find_skill_by_command, format_plugin_preamble, parse_slash_command,
-    render_activation_task, render_plugin_command_task, resolved_skill_roots,
-    skill_roots_for_agent, skill_to_command, skills_fingerprint,
+    discover_plugin_activations, discover_plugin_commands, discover_skills,
+    discover_skills_with_registry, file_mtime_hash, find_plugin_command, find_skill_by_command,
+    format_plugin_preamble, format_plugin_preamble_full, format_plugin_preamble_with_registry,
+    parse_slash_command, render_activation_task, render_plugin_command_task, resolved_skill_roots,
+    resolved_skill_roots_with_registry, skill_roots_for_agent, skill_to_command,
+    skills_fingerprint, skills_fingerprint_with_registry,
 };
 pub use execution::{
-    execute_agent_run_channel, execute_agent_run_eval, execute_agent_run_streaming,
-    is_retryable_error,
+    api_key_for_provider, execute_agent_run_channel, execute_agent_run_eval,
+    execute_agent_run_streaming, is_retryable_error,
 };
 pub use generation::{generate_soul_md, init_workspace};
 pub use handlers::{handle_agent_command, handle_session_command, handle_skill_command};
@@ -99,11 +101,14 @@ pub async fn run_task(
     // Ensure container is ready (sandbox) or skip (local)
     let container = prepare_container(agent, &agent_workspace, sandbox).await?;
 
-    let found_skills = discover_skills(agent, sandbox);
+    let plugin_registry = that_plugins::PluginRegistry::load(&agent.name);
+    let found_skills = discover_skills_with_registry(agent, &plugin_registry);
     info!(count = found_skills.len(), "Discovered skills");
 
     let ws = load_workspace_files(agent, sandbox);
     let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
+
+    let skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
 
     let preamble = build_preamble(
         &agent_workspace,
@@ -114,12 +119,21 @@ pub async fn run_task(
         0,
         &session_id,
         &session_summaries,
+        Some(&plugin_registry),
+        None,
     );
     let task_for_model = append_system_reminder(task, &session_id, sandbox, &agent.name);
 
-    let response =
-        execute_agent_run_streaming(agent, container, &preamble, &task_for_model, debug, None)
-            .await;
+    let response = execute_agent_run_streaming(
+        agent,
+        container,
+        &preamble,
+        &task_for_model,
+        debug,
+        None,
+        skill_roots,
+    )
+    .await;
 
     // Record the result
     match response {
@@ -218,11 +232,14 @@ pub async fn run_chat(
 
     let container = prepare_container(agent, &agent_workspace, sandbox).await?;
 
-    let found_skills = discover_skills(agent, sandbox);
+    let plugin_registry = that_plugins::PluginRegistry::load(&agent.name);
+    let found_skills = discover_skills_with_registry(agent, &plugin_registry);
     info!(count = found_skills.len(), "Discovered skills");
 
     let ws = load_workspace_files(agent, sandbox);
     let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
+
+    let skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
 
     let preamble = build_preamble(
         &agent_workspace,
@@ -233,6 +250,8 @@ pub async fn run_chat(
         0,
         &session_id,
         &session_summaries,
+        Some(&plugin_registry),
+        None,
     );
 
     let stdin = io::stdin();
@@ -282,6 +301,7 @@ pub async fn run_chat(
             &task_for_model,
             debug,
             Some(history.clone()),
+            skill_roots.clone(),
         )
         .await
         {

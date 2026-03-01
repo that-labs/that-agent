@@ -136,6 +136,28 @@ Use explicit CLI scope:
 - `validate_plugin` can verify manifest integrity and missing env vars.
 - Deploy is not Kubernetes-only: in Docker mode, deploy can mean creating/running Docker containers or compose stacks via socket access.
 
+## Deploy Lifecycle
+
+Plugin deploy status is reconciled automatically. The preamble shows the current status of each deployed plugin (running, stopped, pending, degraded, failed). Use this information to make informed decisions before modifying or removing plugins.
+
+### Install / Uninstall Flags
+
+- `plugin_install` deploys by default when the manifest declares a deploy target. Use `skip_deploy: true` to register a plugin without deploying — useful when you want to prepare the manifest/skills first and deploy later.
+- `plugin_uninstall` tears down the running deployment by default before removing from the registry. Use `undeploy: false` to deregister while keeping the workload running — useful for registry cleanup without disrupting live services.
+
+### Pre-flight Checks
+
+- Before uninstalling, check `plugin_status` to see if a workload is live.
+- After uninstall with `undeploy: true`, verify no orphaned resources remain in the target namespace.
+- When re-installing after a deregister-only uninstall (`undeploy: false`), use `skip_deploy: true` to avoid deploying over a still-running workload.
+
+### Keeping Plugin Skills Current
+
+Plugin skills describe how to interact with the deployed software. When the underlying service changes (new endpoints, updated CLI flags, different configuration), the plugin's skills must be updated to reflect the current state. After any significant change to the plugin's software or deployment:
+1. Review the plugin's skills under its skills directory.
+2. Update skill content to match the current software capabilities, endpoints, and usage patterns.
+3. Deploy status is reflected in the preamble automatically — skills should focus on usage guidance, not deployment state.
+
 ## Kubernetes Hygiene (Required)
 
 When deploying plugin workloads to Kubernetes:

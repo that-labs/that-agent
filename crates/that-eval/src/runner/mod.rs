@@ -11,7 +11,7 @@ use that_core::agent_loop::Message;
 use that_core::config::AgentDef;
 use that_core::orchestration::{
     build_preamble, discover_skills, execute_agent_run_eval, load_workspace_files,
-    prepare_container, resolve_agent_workspace,
+    prepare_container, resolve_agent_workspace, resolved_skill_roots,
 };
 use that_core::session::{new_run_id, RunStatus, SessionManager, TranscriptEntry, TranscriptEvent};
 use that_core::skills::{self, parse_frontmatter};
@@ -251,6 +251,7 @@ impl ScenarioRunner {
                 let found_skills = discover_skills(agent, scenario.sandbox);
                 let ws = load_workspace_files(agent, scenario.sandbox);
                 let session_summaries = self.session_mgr.session_summaries(5).unwrap_or_default();
+                let skill_roots = resolved_skill_roots(agent);
                 let preamble = build_preamble(
                     workspace,
                     agent,
@@ -260,6 +261,8 @@ impl ScenarioRunner {
                     self.histories.get(&p.session).map(|h| h.len()).unwrap_or(0),
                     &session_id,
                     &session_summaries,
+                    None,
+                    None,
                 );
 
                 let history = self.histories.get(&p.session).cloned();
@@ -274,6 +277,7 @@ impl ScenarioRunner {
                         false,
                         history,
                         Some(&session_id),
+                        skill_roots,
                     ),
                 )
                 .await

@@ -110,6 +110,9 @@ pub enum ToolRequest {
     MemUnpin {
         id: String,
     },
+    MemRemove {
+        id: String,
+    },
     // Search
     SearchQuery {
         query: String,
@@ -190,7 +193,8 @@ fn policy_name_for(request: &ToolRequest) -> &'static str {
         ToolRequest::MemAdd { .. }
         | ToolRequest::MemRecall { .. }
         | ToolRequest::MemSearch { .. }
-        | ToolRequest::MemUnpin { .. } => "memory",
+        | ToolRequest::MemUnpin { .. }
+        | ToolRequest::MemRemove { .. } => "memory",
         ToolRequest::MemCompact { .. } => "mem_compact",
         ToolRequest::SearchQuery { .. } | ToolRequest::SearchFetch { .. } => "search",
         ToolRequest::HumanAsk { .. } => "memory", // HITL uses default policy
@@ -548,6 +552,13 @@ pub fn execute_tool(
             }
         }
         ToolRequest::MemUnpin { id } => match crate::tools::memory::unpin(id, &config.memory) {
+            Ok(result) => {
+                let budgeted = output::emit_json(&result, max_tokens);
+                ToolResponse::from_budgeted(&budgeted)
+            }
+            Err(e) => ToolResponse::error(&e.to_string()),
+        },
+        ToolRequest::MemRemove { id } => match crate::tools::memory::remove(id, &config.memory) {
             Ok(result) => {
                 let budgeted = output::emit_json(&result, max_tokens);
                 ToolResponse::from_budgeted(&budgeted)

@@ -62,8 +62,10 @@ pub async fn run_chat_tui(
     // Ensure container is ready (sandbox) or skip (local)
     let container = prepare_container(agent, &agent_workspace, sandbox).await?;
 
-    let mut found_skills = discover_skills(agent, sandbox);
-    let mut plugin_commands = discover_plugin_commands(agent);
+    let plugin_registry = that_plugins::PluginRegistry::load(&agent.name);
+    let mut found_skills = discover_skills_with_registry(agent, &plugin_registry);
+    let mut plugin_commands = plugin_registry.enabled_commands();
+    let mut skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
     let mut ws = load_workspace_files(agent, sandbox);
     let needs_onboarding = ws.needs_bootstrap();
     let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
@@ -76,6 +78,8 @@ pub async fn run_chat_tui(
         0,
         &session_id,
         &session_summaries,
+        Some(&plugin_registry),
+        None,
     );
 
     // Setup TUI terminal
@@ -469,6 +473,7 @@ pub async fn run_chat_tui(
                                                 let cont = container.clone();
                                                 let session_id_for_trace = session_id.clone();
                                                 let run_id_for_trace = run_id.clone();
+                                                let sr = skill_roots.clone();
 
                                                 history.push(Message::user(&task_for_model));
 
@@ -486,6 +491,7 @@ pub async fn run_chat_tui(
                                                                 tx,
                                                                 Some(&session_id_for_trace),
                                                                 Some(&run_id_for_trace),
+                                                                sr,
                                                             ),
                                                         )
                                                         .catch_unwind()
@@ -544,6 +550,7 @@ pub async fn run_chat_tui(
                                                         let cont = container.clone();
                                                         let session_id_for_trace = session_id.clone();
                                                         let run_id_for_trace = run_id.clone();
+                                                        let sr = skill_roots.clone();
 
                                                         history.push(Message::user(&task_for_model));
 
@@ -561,6 +568,7 @@ pub async fn run_chat_tui(
                                                                         tx,
                                                                         Some(&session_id_for_trace),
                                                                         Some(&run_id_for_trace),
+                                                                        sr,
                                                                     ),
                                                                 )
                                                                 .catch_unwind()
@@ -639,6 +647,7 @@ pub async fn run_chat_tui(
                                     let cont = container.clone();
                                     let session_id_for_trace = session_id.clone();
                                     let run_id_for_trace = run_id.clone();
+                                    let sr = skill_roots.clone();
 
                                     history.push(Message::user(&task_text));
 
@@ -656,6 +665,7 @@ pub async fn run_chat_tui(
                                                     tx,
                                                     Some(&session_id_for_trace),
                                                     Some(&run_id_for_trace),
+                                                    sr,
                                                 ),
                                             )
                                             .catch_unwind()
@@ -762,7 +772,9 @@ pub async fn run_chat_tui(
                                                     "Deleted skill: {}", detail
                                                 ));
                                                 // Re-discover skills and update palette
-                                                found_skills = discover_skills(&agent, sandbox);
+                                                let reg = that_plugins::PluginRegistry::load(&agent.name);
+                                                found_skills = discover_skills_with_registry(&agent, &reg);
+                                                plugin_commands = reg.enabled_commands();
                                                 app.set_available_commands(build_palette_commands(&found_skills, &plugin_commands));
                                                 // Re-open skills list so the user sees the updated state
                                                 if found_skills.is_empty() {
@@ -992,6 +1004,8 @@ pub async fn run_chat_tui(
                                 history.len(),
                                 &session_id,
                                 &session_mgr.session_summaries(5).unwrap_or_default(),
+                                None,
+                                None,
                             );
                         }
                     }
@@ -1000,8 +1014,10 @@ pub async fn run_chat_tui(
                         // Re-discover skills and plugins after each turn — the agent may have changed them.
                         let prev_skill_count = found_skills.len();
                         let prev_plugin_count = plugin_commands.len();
-                        found_skills = discover_skills(&agent, sandbox);
-                        plugin_commands = discover_plugin_commands(&agent);
+                        let reg = that_plugins::PluginRegistry::load(&agent.name);
+                        found_skills = discover_skills_with_registry(&agent, &reg);
+                        plugin_commands = reg.enabled_commands();
+                        skill_roots = resolved_skill_roots_with_registry(&agent, &reg);
                         app.set_available_commands(build_palette_commands(&found_skills, &plugin_commands));
                         if found_skills.len() != prev_skill_count {
                             let names: Vec<&str> = found_skills.iter().map(|s| s.name.as_str()).collect();
@@ -1161,6 +1177,7 @@ pub async fn execute_agent_run_tui(
     tui_tx: mpsc::UnboundedSender<tui::TuiEvent>,
     session_id_for_trace: Option<&str>,
     run_id_for_trace: Option<&str>,
+    skill_roots: Vec<std::path::PathBuf>,
 ) -> Result<String> {
     if let Some(sid) = session_id_for_trace {
         tracing::Span::current().record("session.id", sid);
@@ -1191,7 +1208,7 @@ pub async fn execute_agent_run_tui(
                 return Err(e);
             }
         };
-        let skill_roots = resolved_skill_roots(agent);
+        let skill_roots = skill_roots.clone();
         let tools_config = load_agent_config(&container, agent);
         let hook = tui::TuiHook::new(tui_tx.clone());
         let config = LoopConfig {

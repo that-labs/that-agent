@@ -56,6 +56,7 @@ At least one LLM provider key is required.
 | Variable | Description |
 |---|---|
 | `ANTHROPIC_API_KEY` | Anthropic API key |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Anthropic OAuth token (`sk-ant-oat01-…`); checked before `ANTHROPIC_API_KEY` |
 | `OPENAI_API_KEY` | OpenAI API key |
 | `OPENROUTER_API_KEY` | OpenRouter API key (provides access to models from multiple providers via a single endpoint) |
 

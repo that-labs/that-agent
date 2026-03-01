@@ -48,12 +48,19 @@ const DEFAULT_SKILLS: &[DefaultSkill] = &[
 /// Install all bundled default skills into the agent's skills directory.
 ///
 /// Only skills whose frontmatter contains `bootstrap: true` are written.
-/// Files are always overwritten so updates ship with the binary.
+/// A version marker (`.installed-version`) is checked first — if it matches
+/// the current binary version, the install is skipped entirely.
 pub fn install_default_skills(agent_name: &str) {
     let Some(skills_dir) = crate::skills::skills_dir_local(agent_name) else {
         tracing::warn!("Could not resolve home directory — skipping default skill install");
         return;
     };
+
+    let version = env!("CARGO_PKG_VERSION");
+    let marker = skills_dir.join(".installed-version");
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(version) {
+        return;
+    }
 
     for skill in DEFAULT_SKILLS {
         if !has_bootstrap_flag(skill.content) {
@@ -73,6 +80,10 @@ pub fn install_default_skills(agent_name: &str) {
             tracing::debug!(skill = skill.name, "Default skill installed");
         }
     }
+
+    // Write version marker after successful install.
+    let _ = std::fs::create_dir_all(&skills_dir);
+    let _ = std::fs::write(&marker, version);
 }
 
 /// Return true if the SKILL.md frontmatter contains `bootstrap: true` under `metadata:`.

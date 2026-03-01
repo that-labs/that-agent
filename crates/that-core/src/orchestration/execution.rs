@@ -9,7 +9,6 @@ use crate::hooks::{channel_notify_tool_def, channel_send_file_tool_def, ChannelH
 use crate::tools::all_tool_defs;
 
 use super::config::*;
-use super::discovery::resolved_skill_roots;
 use super::hooks::{AgentHook, EvalHook};
 
 fn agent_state_dir(agent: &AgentDef) -> Option<std::path::PathBuf> {
@@ -17,9 +16,14 @@ fn agent_state_dir(agent: &AgentDef) -> Option<std::path::PathBuf> {
 }
 
 /// Resolve the provider API key from environment variables.
+///
+/// For Anthropic, checks `CLAUDE_CODE_OAUTH_TOKEN` first (OAuth flow),
+/// then falls back to `ANTHROPIC_API_KEY`.
 pub fn api_key_for_provider(provider: &str) -> Result<String> {
     match provider {
-        "anthropic" => std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set"),
+        "anthropic" => std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+            .context("Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY"),
         "openai" => std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set"),
         "openrouter" => std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set"),
         other => Err(anyhow::anyhow!(
@@ -77,12 +81,12 @@ pub async fn execute_agent_run_streaming(
     task: &str,
     debug: bool,
     history: Option<Vec<Message>>,
+    skill_roots: Vec<std::path::PathBuf>,
 ) -> Result<String> {
     let preview = task_preview(task, 200);
     tracing::Span::current().record("input.value", preview.as_str());
     tracing::Span::current().record("gen_ai.prompt", preview.as_str());
     let tools_config = load_agent_config(&container, agent);
-    let skill_roots = resolved_skill_roots(agent);
     let history_len = history.as_ref().map(std::vec::Vec::len).unwrap_or(0);
     let task_for_model = append_memory_bootstrap_reminder(task, history_len);
     let mut attempt = 0u32;
@@ -172,6 +176,7 @@ pub async fn execute_agent_run_streaming(
     output.value = tracing::field::Empty,
     output.mime_type = "text/plain",
 ))]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_agent_run_eval(
     agent: &AgentDef,
     container: Option<String>,
@@ -180,6 +185,7 @@ pub async fn execute_agent_run_eval(
     _debug: bool,
     history: Option<Vec<Message>>,
     session_id_for_trace: Option<&str>,
+    skill_roots: Vec<std::path::PathBuf>,
 ) -> Result<(String, Vec<String>)> {
     if let Some(sid) = session_id_for_trace {
         tracing::Span::current().record("session.id", sid);
@@ -202,7 +208,6 @@ pub async fn execute_agent_run_eval(
             p.git_commit = PolicyLevel::Allow;
         }
     }
-    let skill_roots = resolved_skill_roots(agent);
     let history_len = history.as_ref().map(std::vec::Vec::len).unwrap_or(0);
     let task_for_model = append_memory_bootstrap_reminder(task, history_len);
     let mut attempt = 0u32;
@@ -341,6 +346,7 @@ pub async fn execute_agent_run_channel(
     cluster_registry: Option<std::sync::Arc<that_plugins::cluster::ClusterRegistry>>,
     channel_registry: Option<std::sync::Arc<that_channels::registry::DynamicChannelRegistry>>,
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
+    skill_roots: Vec<std::path::PathBuf>,
 ) -> Result<(String, Vec<that_channels::ToolLogEvent>)> {
     if let Some(sid) = session_id_for_trace {
         tracing::Span::current().record("session.id", sid);
@@ -489,7 +495,6 @@ pub async fn execute_agent_run_channel(
         } else {
             ChannelHook::new(std::sync::Arc::clone(&router), Some(log_tx))
         };
-        let skill_roots = resolved_skill_roots(agent);
         let tools_config = load_agent_config(&container, agent);
 
         // Add channel-specific tools: ChannelHook intercepts calls and routes them
@@ -535,7 +540,7 @@ pub async fn execute_agent_run_channel(
             tool_ctx: ToolContext {
                 config: tools_config,
                 container: container.clone(),
-                skill_roots,
+                skill_roots: skill_roots.clone(),
                 cluster_registry: cluster_registry.clone(),
                 channel_registry: channel_registry.clone(),
                 route_registry: route_registry.clone(),

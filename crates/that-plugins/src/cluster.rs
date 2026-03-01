@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 use super::PluginManifest;
+use crate::deploy;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginPolicy {
@@ -25,6 +26,12 @@ pub struct ClusterPlugin {
     pub owner_agent: String,
     pub policy: PluginPolicy,
     pub manifest: PluginManifest,
+    /// Cached deploy status from last reconciliation.
+    #[serde(default)]
+    pub deploy_status: Option<String>,
+    /// Unix timestamp of last status check.
+    #[serde(default)]
+    pub status_checked_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -52,6 +59,8 @@ impl ClusterRegistry {
             version: manifest.version.clone(),
             owner_agent: owner.to_string(),
             policy: PluginPolicy::default(),
+            deploy_status: None,
+            status_checked_at: None,
             manifest,
         };
         if let Some(existing) = state.plugins.iter_mut().find(|p| p.id == plugin.id) {
@@ -96,6 +105,38 @@ impl ClusterRegistry {
             bail!("only the owner or main agent can change policy for '{id}'");
         }
         plugin.policy = PluginPolicy { allow };
+        self.save(&state)
+    }
+
+    /// Look up a single plugin by ID.
+    pub fn find(&self, id: &str) -> Result<Option<ClusterPlugin>> {
+        Ok(self.load()?.plugins.into_iter().find(|p| p.id == id))
+    }
+
+    /// Reconcile deploy status for all plugins that declare a deploy target.
+    /// Updates cached status and timestamp in the registry. Call periodically (e.g. every 60s).
+    pub async fn reconcile_status(&self, plugin_dir: &Path) -> Result<()> {
+        let mut state = self.load()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for plugin in &mut state.plugins {
+            if let Some(dep) = &plugin.manifest.deploy {
+                let backend = deploy::backend_for(dep, plugin_dir);
+                let status = backend.status(&plugin.id).await;
+                plugin.deploy_status = Some(match &status {
+                    Ok(deploy::DeployStatus::Running) => "running".into(),
+                    Ok(deploy::DeployStatus::Stopped) => "stopped".into(),
+                    Ok(deploy::DeployStatus::Pending) => "pending".into(),
+                    Ok(deploy::DeployStatus::Deploying) => "deploying".into(),
+                    Ok(deploy::DeployStatus::Degraded) => "degraded".into(),
+                    Ok(deploy::DeployStatus::Failed(m)) => format!("failed: {m}"),
+                    Err(e) => format!("error: {e}"),
+                });
+                plugin.status_checked_at = Some(now);
+            }
+        }
         self.save(&state)
     }
 

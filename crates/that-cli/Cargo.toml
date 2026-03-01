@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
 
 [[bin]]
 name = "that"
@@ -17,9 +22,9 @@ code-analysis = ["that-tools/code-analysis"]
 
 [dependencies]
 # Workspace crates
-that-tools = { path = "../that-tools", default-features = false }
-that-core = { path = "../that-core", default-features = false }
-that-plugins = { path = "../that-plugins" }
+that-tools = { path = "../that-tools", version = "0.1.0", default-features = false }
+that-core = { path = "../that-core", version = "0.1.0", default-features = false }
+that-plugins = { path = "../that-plugins", version = "0.1.0" }
 
 # Shared workspace dependencies
 clap = { workspace = true }

@@ -503,7 +503,7 @@ pub enum SkillsCommands {
     },
     /// Install skills as SKILL.md files for agent auto-discovery.
     ///
-    /// Creates <path>/that-tools-<name>/SKILL.md for each skill.
+    /// Creates `<path>/that-tools-<name>/SKILL.md` for each skill.
     /// Defaults to ~/.claude/skills/ (Claude Code convention).
     Install {
         /// Specific skill to install (omit to install all).

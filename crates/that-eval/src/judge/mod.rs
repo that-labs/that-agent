@@ -183,11 +183,7 @@ impl LlmJudge {
     }
 
     async fn call_llm(&self, system: &str, user: &str) -> Result<String> {
-        let api_key = match self.provider.as_str() {
-            "anthropic" => std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set"),
-            "openai" => std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set"),
-            other => anyhow::bail!("Unsupported judge provider: {other}"),
-        }?;
+        let api_key = that_core::orchestration::api_key_for_provider(&self.provider)?;
         agent_loop::complete_once(&self.provider, &self.model, &api_key, system, user, 2048)
             .await
             .context("Judge LLM call failed")

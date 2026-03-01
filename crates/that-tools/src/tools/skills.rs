@@ -6,9 +6,9 @@
 //!   skills/install.md          — setup/install guide (separate skill)
 //!
 //! On disk after `that-tools skills install`:
-//!   <dest>/that-tools/SKILL.md
-//!   <dest>/that-tools/references/code.md  (and fs, search, memory, exec, human, index)
-//!   <dest>/that-tools-install/SKILL.md
+//!   `<dest>/that-tools/SKILL.md`
+//!   `<dest>/that-tools/references/code.md`  (and fs, search, memory, exec, human, index)
+//!   `<dest>/that-tools-install/SKILL.md`
 
 use std::path::{Path, PathBuf};
 

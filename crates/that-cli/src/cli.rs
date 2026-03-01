@@ -33,7 +33,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub max_tokens: Option<usize>,
 
-    /// Agent name (loads from agents/<name>.toml).
+    /// Agent name (loads from `agents/<name>.toml`).
     #[arg(long, global = true)]
     pub agent: Option<String>,
 

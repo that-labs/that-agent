@@ -39,18 +39,6 @@ fn agent_file_sandbox(agent_name: &str, filename: &str) -> String {
     format!("/home/agent/.that-agent/agents/{}/{}", agent_name, filename)
 }
 
-fn read_local(agent_name: &str, filename: &str) -> Option<String> {
-    let path = agent_file_local(agent_name, filename)?;
-    match std::fs::read_to_string(&path) {
-        Ok(c) => Some(c),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "Failed to read workspace file");
-            None
-        }
-    }
-}
-
 fn read_sandbox(container: &str, agent_name: &str, filename: &str) -> Option<String> {
     let path = agent_file_sandbox(agent_name, filename);
     let output = std::process::Command::new("docker")
@@ -151,16 +139,44 @@ impl WorkspaceFiles {
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 /// Load all workspace files from the local filesystem for the given agent.
+///
+/// Reads the agent directory once and populates known files from the listing,
+/// avoiding redundant path-resolve + stat for each file.
 pub fn load_all_local(agent_name: &str) -> WorkspaceFiles {
+    let Some(dir) = agent_dir_local(agent_name) else {
+        return WorkspaceFiles::default();
+    };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return WorkspaceFiles::default(),
+    };
+    let mut files = std::collections::HashMap::new();
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            match name {
+                "Soul.md" | "Identity.md" | "Agents.md" | "User.md" | "Tools.md" | "Memory.md"
+                | "Boot.md" | "Bootstrap.md" => match std::fs::read_to_string(entry.path()) {
+                    Ok(c) => {
+                        files.insert(name.to_string(), c);
+                    }
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        warn!(path = %entry.path().display(), error = %e, "Failed to read workspace file");
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
     WorkspaceFiles {
-        soul: read_local(agent_name, "Soul.md"),
-        identity: read_local(agent_name, "Identity.md"),
-        agents: read_local(agent_name, "Agents.md"),
-        user: read_local(agent_name, "User.md"),
-        tools: read_local(agent_name, "Tools.md"),
-        memory: read_local(agent_name, "Memory.md"),
-        boot: read_local(agent_name, "Boot.md"),
-        bootstrap: read_local(agent_name, "Bootstrap.md"),
+        soul: files.remove("Soul.md"),
+        identity: files.remove("Identity.md"),
+        agents: files.remove("Agents.md"),
+        user: files.remove("User.md"),
+        tools: files.remove("Tools.md"),
+        memory: files.remove("Memory.md"),
+        boot: files.remove("Boot.md"),
+        bootstrap: files.remove("Bootstrap.md"),
     }
 }
 

@@ -5,6 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = ["tui"]
@@ -30,10 +38,10 @@ chrono = { workspace = true }
 clap = { workspace = true }
 
 # Local deps
-that-tools = { path = "../that-tools" }
-that-channels = { path = "../that-channels" }
-that-plugins = { path = "../that-plugins" }
-that-sandbox = { path = "../that-sandbox" }
+that-tools = { path = "../that-tools", version = "0.1.0" }
+that-channels = { path = "../that-channels", version = "0.1.0" }
+that-plugins = { path = "../that-plugins", version = "0.1.0" }
+that-sandbox = { path = "../that-sandbox", version = "0.1.0" }
 
 # Async utilities
 futures = "0.3"

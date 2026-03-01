@@ -29,6 +29,14 @@ pub struct DockerComposeBackend {
 
 pub struct KubernetesBackend {
     pub namespace: String,
+    pub kustomize_dir: Option<String>,
+}
+
+/// Resolve the K8s namespace from env: `POD_NAMESPACE` → `THAT_SANDBOX_K8S_NAMESPACE` → `"default"`.
+pub fn resolve_k8s_namespace() -> String {
+    std::env::var("POD_NAMESPACE")
+        .or_else(|_| std::env::var("THAT_SANDBOX_K8S_NAMESPACE"))
+        .unwrap_or_else(|_| "default".into())
 }
 
 pub struct LocalBackend;
@@ -39,10 +47,8 @@ pub fn backend_for(deploy: &PluginDeploy, plugin_dir: &Path) -> Box<dyn DeployBa
             plugin_dir: plugin_dir.to_path_buf(),
         }),
         "kubernetes" => Box::new(KubernetesBackend {
-            namespace: deploy
-                .kustomize_dir
-                .clone()
-                .unwrap_or_else(|| "default".into()),
+            namespace: resolve_k8s_namespace(),
+            kustomize_dir: deploy.kustomize_dir.clone(),
         }),
         _ => Box::new(LocalBackend),
     }
@@ -116,7 +122,7 @@ impl DeployBackend for KubernetesBackend {
             .and_then(|d| d.kustomize_dir.as_deref())
             .unwrap_or(".");
         let out = Command::new("kubectl")
-            .args(["apply", "-k", dir])
+            .args(["apply", "-k", dir, "-n", &self.namespace])
             .output()
             .await?;
         if !out.status.success() {
@@ -129,10 +135,24 @@ impl DeployBackend for KubernetesBackend {
     }
 
     async fn undeploy(&self, id: &str) -> Result<()> {
-        let out = Command::new("kubectl")
-            .args(["delete", "-k", id])
-            .output()
-            .await?;
+        let out = if let Some(dir) = &self.kustomize_dir {
+            Command::new("kubectl")
+                .args(["delete", "-k", dir, "-n", &self.namespace])
+                .output()
+                .await?
+        } else {
+            Command::new("kubectl")
+                .args([
+                    "delete",
+                    "all",
+                    "-l",
+                    &format!("app={id}"),
+                    "-n",
+                    &self.namespace,
+                ])
+                .output()
+                .await?
+        };
         if !out.status.success() {
             bail!(
                 "kubectl delete failed: {}",

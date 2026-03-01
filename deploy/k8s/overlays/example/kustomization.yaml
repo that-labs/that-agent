@@ -13,5 +13,5 @@ patches:
 
 images:
   - name: that-agent
-    newName: your-registry.example.com/that-agent
+    newName: ghcr.io/that-labs/that-agent
     newTag: latest
