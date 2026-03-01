@@ -35,6 +35,7 @@ uuid = { workspace = true }
 toml = { workspace = true }
 dirs = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 clap = { workspace = true }
 
 # Local deps

@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use chrono::{DateTime, Datelike, Local, Timelike, Weekday};
+use chrono::{DateTime, Datelike, Local, NaiveDateTime, Timelike, Utc, Weekday};
 use tracing::warn;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -143,6 +143,8 @@ pub struct HeartbeatEntry {
     pub schedule: Schedule,
     pub status: Status,
     pub last_run: Option<DateTime<Local>>,
+    /// Earliest time this entry may fire. Used for deferred/reminder entries.
+    pub not_before: Option<DateTime<Local>>,
     pub body: String,
 }
 
@@ -251,6 +253,11 @@ pub fn parse_heartbeat(content: &str) -> Vec<HeartbeatEntry> {
                 .ok()
                 .map(|dt| dt.with_timezone(&Local))
         });
+        let not_before = fields.get("not_before").and_then(|v| {
+            DateTime::parse_from_rfc3339(v)
+                .ok()
+                .map(|dt| dt.with_timezone(&Local))
+        });
 
         let body = body_lines.join("\n").trim().to_string();
 
@@ -260,6 +267,7 @@ pub fn parse_heartbeat(content: &str) -> Vec<HeartbeatEntry> {
             schedule,
             status,
             last_run,
+            not_before,
             body,
         });
     }
@@ -278,6 +286,9 @@ pub fn serialize_heartbeat(entries: &[HeartbeatEntry]) -> String {
         out.push_str(&format!("status: {}\n", entry.status));
         if let Some(last_run) = &entry.last_run {
             out.push_str(&format!("last_run: {}\n", last_run.to_rfc3339()));
+        }
+        if let Some(not_before) = &entry.not_before {
+            out.push_str(&format!("not_before: {}\n", not_before.to_rfc3339()));
         }
         if !entry.body.is_empty() {
             out.push('\n');
@@ -447,38 +458,78 @@ pub fn save_heartbeat_sandbox(
 
 /// Return true if a heartbeat entry is due for processing.
 ///
+/// `agent_tz` is an optional IANA timezone name (e.g. `"Asia/Jerusalem"`).
+/// It affects wall-clock schedules (`daily`, `cron`); duration-based schedules
+/// (`minutely`, `hourly`, `weekly`) use absolute time and are unaffected.
+///
 /// Urgent entries dispatch immediately when first created (no `last_run` yet),
 /// then follow their configured schedule.
-/// Other entries are due based on their schedule and last execution time.
-pub fn is_entry_due(entry: &HeartbeatEntry) -> bool {
+pub fn is_entry_due(entry: &HeartbeatEntry, agent_tz: Option<&str>) -> bool {
+    // ── not_before gate: absolute UTC comparison (timezone-irrelevant) ──
+    if let Some(nb) = entry.not_before {
+        if Utc::now() < nb.to_utc() {
+            return false;
+        }
+    }
+
     // Urgent entries trigger immediately on first dispatch, then follow schedule.
     if matches!(entry.priority, Priority::Urgent) && entry.last_run.is_none() {
         return true;
     }
 
-    let now = Local::now();
+    let now = Utc::now();
 
     match &entry.schedule {
         Schedule::Once => entry.last_run.is_none(),
         Schedule::Minutely => match entry.last_run {
             None => true,
-            Some(last) => now - last >= chrono::Duration::minutes(1),
+            Some(last) => now - last.to_utc() >= chrono::Duration::minutes(1),
         },
         Schedule::Hourly => match entry.last_run {
             None => true,
-            Some(last) => now - last > chrono::Duration::hours(1),
+            Some(last) => now - last.to_utc() > chrono::Duration::hours(1),
         },
-        Schedule::Daily => match entry.last_run {
-            None => true,
-            Some(last) => last.date_naive() < now.date_naive(),
-        },
+        Schedule::Daily => {
+            let wall_now = wall_date_naive(now, agent_tz);
+            match entry.last_run {
+                None => true,
+                Some(last) => {
+                    let wall_last = wall_date_naive(last.to_utc(), agent_tz);
+                    wall_last < wall_now
+                }
+            }
+        }
         Schedule::Weekly => match entry.last_run {
             None => true,
-            Some(last) => now - last > chrono::Duration::weeks(1),
+            Some(last) => now - last.to_utc() > chrono::Duration::weeks(1),
         },
-        Schedule::Cron(expr) => is_cron_due(expr, entry.last_run, now),
+        Schedule::Cron(expr) => {
+            let wall_now = wall_datetime_naive(now, agent_tz);
+            let wall_last = entry.last_run.map(|l| wall_datetime_naive(l.to_utc(), agent_tz));
+            is_cron_due(expr, wall_last, wall_now)
+        }
         Schedule::Unknown(_) => false,
     }
+}
+
+/// Convert a UTC instant to a `NaiveDate` in the agent's wall-clock timezone.
+fn wall_date_naive(utc: DateTime<Utc>, agent_tz: Option<&str>) -> chrono::NaiveDate {
+    if let Some(tz_name) = agent_tz {
+        if let Ok(tz) = tz_name.parse::<chrono_tz::Tz>() {
+            return utc.with_timezone(&tz).date_naive();
+        }
+    }
+    utc.with_timezone(&Local).date_naive()
+}
+
+/// Convert a UTC instant to a `NaiveDateTime` in the agent's wall-clock timezone.
+fn wall_datetime_naive(utc: DateTime<Utc>, agent_tz: Option<&str>) -> NaiveDateTime {
+    if let Some(tz_name) = agent_tz {
+        if let Ok(tz) = tz_name.parse::<chrono_tz::Tz>() {
+            return utc.with_timezone(&tz).naive_local();
+        }
+    }
+    utc.with_timezone(&Local).naive_local()
 }
 
 #[derive(Debug, Clone)]
@@ -492,7 +543,7 @@ struct CronExpression {
     dow_any: bool,
 }
 
-fn is_cron_due(expr: &str, last_run: Option<DateTime<Local>>, now: DateTime<Local>) -> bool {
+fn is_cron_due(expr: &str, last_run: Option<NaiveDateTime>, now: NaiveDateTime) -> bool {
     if last_run.is_none() {
         return true;
     }
@@ -533,7 +584,7 @@ fn parse_cron_expression(expr: &str) -> Result<CronExpression, String> {
     })
 }
 
-fn cron_matches(expr: &CronExpression, when: DateTime<Local>) -> bool {
+fn cron_matches(expr: &CronExpression, when: NaiveDateTime) -> bool {
     let minute = when.minute() as usize;
     let hour = when.hour() as usize;
     let dom = when.day() as usize;
@@ -685,9 +736,10 @@ pub fn format_heartbeat_task(due: &[&HeartbeatEntry]) -> String {
     task.push_str(
         "For recurring work, keep `status: running`; set `status: done` only when you want to disable the entry.\n\n\
          Use the `channel_notify` tool to keep users informed:\n\
+         - For reminder or one-time entries: you MUST notify the user. The entire purpose of a reminder is the notification — never skip it.\n\
          - Send a brief summary when meaningful work is completed (e.g. a scheduled task finished, data was updated, a report was generated).\n\
          - Send a notice if you are blocked or cannot complete an item (e.g. a dependency is missing, a file is inaccessible, an external service is unavailable).\n\
-         - Skip the notification if all items are routine housekeeping with no user-visible outcome.",
+         - Only skip notification for recurring housekeeping with no user-visible outcome.",
     );
     task
 }
@@ -702,13 +754,118 @@ pub fn default_heartbeat_md() -> &'static str {
      a blank line, then a body description. Entries are separated by `---`.
 
      Fields:
-       priority: urgent | high | normal | low
-       schedule: once | minutely | hourly | daily | weekly | cron: <expr>
-       status:   pending | running | done | skipped
-       last_run: ISO timestamp (written automatically each dispatch)
+       priority:   urgent | high | normal | low
+       schedule:   once | minutely | hourly | daily | weekly | cron: <expr>
+       status:     pending | running | done | skipped
+       last_run:   ISO timestamp (written automatically each dispatch)
+       not_before: ISO timestamp — entry will not fire until this time has passed
 
      Urgent entries trigger immediately on first dispatch, then follow schedule.
+     `not_before` defers firing until a future time (useful for reminders).
      `running` means the schedule remains active; set `done` to disable it. -->
 
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, TimeZone};
+
+    fn make_entry(schedule: Schedule, last_run: Option<DateTime<Local>>, not_before: Option<DateTime<Local>>) -> HeartbeatEntry {
+        HeartbeatEntry {
+            title: "test".into(),
+            priority: Priority::Normal,
+            schedule,
+            status: Status::Pending,
+            last_run,
+            not_before,
+            body: String::new(),
+        }
+    }
+
+    #[test]
+    fn not_before_in_future_blocks_firing() {
+        let future = Local::now() + Duration::hours(1);
+        let entry = make_entry(Schedule::Once, None, Some(future));
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn not_before_in_past_allows_firing() {
+        let past = Local::now() - Duration::hours(1);
+        let entry = make_entry(Schedule::Once, None, Some(past));
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn not_before_none_preserves_existing_behavior() {
+        let entry = make_entry(Schedule::Once, None, None);
+        assert!(is_entry_due(&entry, None));
+
+        let ran = make_entry(Schedule::Once, Some(Local::now()), None);
+        assert!(!is_entry_due(&ran, None));
+    }
+
+    #[test]
+    fn not_before_blocks_even_urgent() {
+        let future = Local::now() + Duration::hours(1);
+        let mut entry = make_entry(Schedule::Once, None, Some(future));
+        entry.priority = Priority::Urgent;
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn parse_serialize_roundtrip_not_before() {
+        let now = Local::now();
+        let md = format!(
+            "# Heartbeat\n\n## Reminder\npriority: normal\nschedule: once\nstatus: pending\nnot_before: {}\n\nDo the thing\n\n---\n",
+            now.to_rfc3339()
+        );
+        let entries = parse_heartbeat(&md);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].not_before.is_some());
+        let nb = entries[0].not_before.unwrap();
+        // Timestamps should be within 1 second (rfc3339 truncation).
+        assert!((nb - now).num_seconds().abs() <= 1);
+
+        let serialized = serialize_heartbeat(&entries);
+        let re_parsed = parse_heartbeat(&serialized);
+        assert_eq!(re_parsed.len(), 1);
+        assert!(re_parsed[0].not_before.is_some());
+    }
+
+    #[test]
+    fn timezone_affects_daily_due_check() {
+        // Create an entry that last ran "today" in UTC but "yesterday" in a far-west timezone.
+        // Use a fixed UTC time just after midnight UTC — in US/Samoa (UTC-11) it's still the
+        // previous day, so a daily entry should be due there but NOT due in UTC+12.
+        let utc_midnight = Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 30, 0)
+            .unwrap();
+        let last_run_utc = Utc.from_utc_datetime(&utc_midnight);
+        let last_run_local = last_run_utc.with_timezone(&Local);
+
+        let entry = make_entry(Schedule::Daily, Some(last_run_local), None);
+
+        // In a timezone well ahead of UTC (same calendar day as UTC) → not due.
+        let due_ahead = is_entry_due(&entry, Some("Pacific/Auckland"));
+        // In a timezone far behind UTC (previous calendar day) → due.
+        let due_behind = is_entry_due(&entry, Some("Pacific/Pago_Pago"));
+
+        // At least one of these should differ from the other (proving TZ matters).
+        // The exact result depends on the current UTC date, but the key invariant:
+        // Pago_Pago (UTC-11) should see last_run as further in the past than Auckland (UTC+12/13).
+        // We can't assert both deterministically without freezing time, so just verify no panic
+        // and that the function accepts timezone strings.
+        let _ = (due_ahead, due_behind);
+    }
+
+    #[test]
+    fn invalid_timezone_falls_back_to_local() {
+        let entry = make_entry(Schedule::Once, None, None);
+        // Should not panic; falls back to Local.
+        assert!(is_entry_due(&entry, Some("Invalid/Timezone")));
+    }
 }

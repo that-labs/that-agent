@@ -49,6 +49,7 @@ dirs = "6"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 
 [workspace.metadata.docs.rs]
 all-features = true

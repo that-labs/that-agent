@@ -403,7 +403,7 @@ pub async fn run_listen(
                             heartbeat::Status::Pending
                                 | heartbeat::Status::Running
                                 | heartbeat::Status::Processing
-                        ) && heartbeat::is_entry_due(e)
+                        ) && heartbeat::is_entry_due(e, current_agent.timezone.as_deref())
                     })
                     .map(|(i, _)| i)
                     .collect();

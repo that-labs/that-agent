@@ -77,6 +77,10 @@ pub struct AgentDef {
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval: Option<u64>,
 
+    /// IANA timezone for wall-clock schedules (daily, cron). Defaults to OS local time.
+    #[serde(default)]
+    pub timezone: Option<String>,
+
     /// Name of the parent agent that spawned this agent (if any).
     #[serde(default)]
     pub parent: Option<String>,
@@ -102,6 +106,7 @@ impl Default for AgentDef {
             shared_workspace: false,
             channels: ChannelConfig::default(),
             heartbeat_interval: default_heartbeat_interval(),
+            timezone: None,
             parent: None,
             role: None,
             inherit_workspace: false,

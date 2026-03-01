@@ -15,6 +15,7 @@
   <a href="https://github.com/that-labs/that-agent/actions/workflows/ci.yml"><img src="https://github.com/that-labs/that-agent/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/that-labs/that-agent/pkgs/container/that-agent"><img src="https://img.shields.io/badge/Docker-ghcr.io-blue?logo=docker" alt="Docker" /></a>
   <a href="https://crates.io/crates/that-cli"><img src="https://img.shields.io/crates/v/that-cli.svg" alt="crates.io" /></a>
+  <a href="https://discord.gg/Xqu6kRXW"><img src="https://img.shields.io/discord/1234567890?color=7289da&label=Discord&logo=discord&logoColor=white" alt="Discord" /></a>
 </p>
 
 Most agent frameworks configure tools for the agent. `that-agent` gives the agent a compiler and a deployment target — it authors, ships, and runs its own plugins at runtime without operator intervention.
@@ -332,6 +333,10 @@ evals/scenarios/     # TOML scenario definitions
 sandbox/             # Dockerfile + build script
 deploy/k8s/          # Kubernetes manifests
 ```
+
+## Community
+
+Come hang out with us! Join the [that-agent Discord](https://discord.gg/Xqu6kRXW) — whether you're building with `that-agent`, hacking on it, or just curious about autonomous agents, you're welcome here. Ask questions, share what you're building, report bugs, or just say hi. We'd love to have you.
 
 ## Contributing
 
