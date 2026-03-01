@@ -125,7 +125,14 @@ pub async fn execute_agent_run_streaming(
         let result = agent_loop::run(&config, &task_for_model, &hook).await;
 
         match result {
-            Ok((text, _usage)) => {
+            Ok((text, usage)) => {
+                log_prompt_cache_usage(
+                    &agent.provider,
+                    &agent.model,
+                    usage.input_tokens as u64,
+                    usage.cache_read_tokens as u64,
+                    usage.cache_write_tokens as u64,
+                );
                 tracing::Span::current().record("gen_ai.completion", text.as_str());
                 tracing::Span::current().record("output.value", text.as_str());
                 tracing::Span::current().record("otel.status_code", "ok");
@@ -238,7 +245,14 @@ pub async fn execute_agent_run_eval(
         let result = agent_loop::run(&config, &task_for_model, &hook).await;
 
         match result {
-            Ok((text, _usage)) => {
+            Ok((text, usage)) => {
+                log_prompt_cache_usage(
+                    &agent.provider,
+                    &agent.model,
+                    usage.input_tokens as u64,
+                    usage.cache_read_tokens as u64,
+                    usage.cache_write_tokens as u64,
+                );
                 tracing::Span::current().record("gen_ai.completion", text.as_str());
                 tracing::Span::current().record("output.value", text.as_str());
                 tracing::Span::current().record("otel.status_code", "ok");
@@ -343,7 +357,6 @@ pub async fn execute_agent_run_channel(
     let preview = task_preview(task, 200);
     tracing::Span::current().record("input.value", preview.as_str());
     tracing::Span::current().record("gen_ai.prompt", preview.as_str());
-    let task_for_model = append_memory_bootstrap_reminder(task, history.len());
     let mut attempt = 0u32;
     let mut empty_response_retries = 0u32;
 
@@ -427,11 +440,20 @@ pub async fn execute_agent_run_channel(
          - Keep the response concise, legible on mobile, and directly actionable.",
         active = active_channel,
     );
-    let full_preamble = if format_section.is_empty() {
-        format!("{preamble}\n\n{channel_info}\n\n{channel_output_contract}")
+    // Keep the system message = stable preamble only so the prompt cache always hits.
+    // Volatile channel context (active route, gateway URL, format instructions) is injected
+    // into the task message as a system-reminder instead.
+    let channel_ctx = if format_section.is_empty() {
+        format!("\n\n<system-reminder>\n{channel_info}\n\n{channel_output_contract}\n</system-reminder>")
     } else {
-        format!("{preamble}\n\n{channel_info}\n\n{channel_output_contract}\n\n{format_section}")
+        format!("\n\n<system-reminder>\n{channel_info}\n\n{channel_output_contract}\n\n{format_section}\n</system-reminder>")
     };
+    let task_for_model = format!(
+        "{}{}",
+        append_memory_bootstrap_reminder(task, history.len()),
+        channel_ctx
+    );
+    let full_preamble = preamble.to_string();
 
     loop {
         if attempt > 0 {

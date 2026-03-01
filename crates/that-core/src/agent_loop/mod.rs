@@ -36,6 +36,11 @@ use tracing::{debug, info, info_span, Instrument};
 
 use crate::tools::typed::dispatch as dispatch_tool;
 
+/// Max seconds to wait for the next SSE/WS chunk before treating the stream as stalled.
+/// Applies to all providers (Anthropic, OpenRouter, OpenAI HTTP).
+/// Models with extended thinking may pause before the first token, so this is generous.
+pub(super) const STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
+
 /// Max chars kept for tool args / result previews recorded on spans.
 const TRACE_PREVIEW_CHARS: usize = 400;
 /// Max chars kept for richer LLM input/output payload previews.
@@ -176,18 +181,37 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
         turn_span.record("tool_calls", tool_calls.len() as u64);
 
         total_usage = total_usage.add(&usage);
-        info!(
-            turn = turn + 1,
-            tool_calls = tool_calls.len(),
-            in_tok = usage.input_tokens,
-            out_tok = usage.output_tokens,
-            "<<< turn {}/{} calls={} tok={}/{}",
-            turn + 1,
-            config.max_turns,
-            tool_calls.len(),
-            usage.input_tokens,
-            usage.output_tokens
-        );
+        if usage.cache_read_tokens > 0 || usage.cache_write_tokens > 0 {
+            info!(
+                turn = turn + 1,
+                tool_calls = tool_calls.len(),
+                in_tok = usage.input_tokens,
+                out_tok = usage.output_tokens,
+                cache_read = usage.cache_read_tokens,
+                cache_write = usage.cache_write_tokens,
+                "<<< turn {}/{} calls={} tok={}/{} cache=r:{}/w:{}",
+                turn + 1,
+                config.max_turns,
+                tool_calls.len(),
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens,
+                usage.cache_write_tokens,
+            );
+        } else {
+            info!(
+                turn = turn + 1,
+                tool_calls = tool_calls.len(),
+                in_tok = usage.input_tokens,
+                out_tok = usage.output_tokens,
+                "<<< turn {}/{} calls={} tok={}/{}",
+                turn + 1,
+                config.max_turns,
+                tool_calls.len(),
+                usage.input_tokens,
+                usage.output_tokens
+            );
+        }
 
         if tool_calls.is_empty() {
             if !pending_edit_verification.is_empty() {

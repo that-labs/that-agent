@@ -88,8 +88,19 @@ pub(super) async fn stream_turn(
     let mut full_text = String::new();
     let mut usage = Usage::default();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    let idle_timeout = tokio::time::Duration::from_secs(super::STREAM_IDLE_TIMEOUT_SECS);
+
+    loop {
+        let chunk = match tokio::time::timeout(idle_timeout, stream.next()).await {
+            Ok(Some(chunk)) => chunk?,
+            Ok(None) => break,  // Stream ended cleanly.
+            Err(_elapsed) => {
+                return Err(anyhow::anyhow!(
+                    "Anthropic SSE stream timed out: no data for {}s",
+                    super::STREAM_IDLE_TIMEOUT_SECS
+                ));
+            }
+        };
         buf.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(nl) = buf.find('\n') {
@@ -235,7 +246,7 @@ fn build_request(
         serde_json::Value::Array(tools.iter().map(tool_to_anthropic).collect())
     };
 
-    let messages_json = messages_to_anthropic(messages);
+    let messages_json = messages_to_anthropic(messages, prompt_caching);
 
     serde_json::json!({
         "model": model,
@@ -261,7 +272,13 @@ fn tool_to_anthropic(t: &ToolDef) -> serde_json::Value {
 /// Consecutive `Message::Tool` entries (tool results) are combined into a
 /// single user turn with multiple `tool_result` content blocks, as required
 /// by the Anthropic API.
-pub fn messages_to_anthropic(messages: &[Message]) -> serde_json::Value {
+///
+/// When `prompt_caching` is true, a `cache_control` breakpoint is added to
+/// the **last user-role message** (either a plain user turn or a tool-result
+/// group). This lets Anthropic cache the entire conversation prefix up to
+/// that point, so each new turn only re-parses the latest messages instead
+/// of the full growing history.
+pub fn messages_to_anthropic(messages: &[Message], prompt_caching: bool) -> serde_json::Value {
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut i = 0;
     while i < messages.len() {
@@ -329,5 +346,35 @@ pub fn messages_to_anthropic(messages: &[Message]) -> serde_json::Value {
             }
         }
     }
+
+    // Add cache breakpoint to the last user-role message so the entire
+    // conversation prefix is cached across turns. We skip adding it when
+    // the last message is also the only message (turn 1) — in that case
+    // the system + tools breakpoints already cover the cacheable prefix.
+    if prompt_caching && out.len() > 1 {
+        if let Some(last_user_idx) = out
+            .iter()
+            .rposition(|m| m["role"].as_str() == Some("user"))
+        {
+            let msg = &mut out[last_user_idx];
+            // Content is either a string (plain user message) or an array
+            // (tool_result blocks or image + text blocks). For cache_control
+            // we need the array form so we can tag the last block.
+            if msg["content"].is_string() {
+                let text = msg["content"].as_str().unwrap_or("").to_string();
+                msg["content"] = serde_json::json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": { "type": "ephemeral" }
+                }]);
+            } else if let Some(arr) = msg["content"].as_array_mut() {
+                if let Some(last_block) = arr.last_mut() {
+                    last_block["cache_control"] =
+                        serde_json::json!({ "type": "ephemeral" });
+                }
+            }
+        }
+    }
+
     serde_json::Value::Array(out)
 }

@@ -59,8 +59,19 @@ pub(super) async fn stream_turn(
     let mut tool_slots: std::collections::HashMap<u64, (String, String, String)> =
         std::collections::HashMap::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    let idle_timeout = tokio::time::Duration::from_secs(super::STREAM_IDLE_TIMEOUT_SECS);
+
+    loop {
+        let chunk = match tokio::time::timeout(idle_timeout, stream.next()).await {
+            Ok(Some(chunk)) => chunk?,
+            Ok(None) => break,  // Stream ended cleanly.
+            Err(_elapsed) => {
+                return Err(anyhow::anyhow!(
+                    "OpenRouter SSE stream timed out: no data for {}s",
+                    super::STREAM_IDLE_TIMEOUT_SECS
+                ));
+            }
+        };
         buf.push_str(&String::from_utf8_lossy(&chunk));
 
         while let Some(nl) = buf.find('\n') {
@@ -296,6 +307,9 @@ fn tool_to_chat_completions(t: &ToolDef) -> serde_json::Value {
 ///
 /// Prepends a system message, then maps each internal message type to the
 /// corresponding Chat Completions role.
+///
+/// When `prompt_caching` is true, a `cache_control` breakpoint is added to
+/// the last user/tool message so the conversation prefix is cached across turns.
 fn messages_to_chat_completions(
     system: &str,
     messages: &[Message],
@@ -380,6 +394,34 @@ fn messages_to_chat_completions(
                     "tool_call_id": call_id,
                     "content": content,
                 }));
+            }
+        }
+    }
+
+    // Add cache breakpoint to the last user/tool message so the conversation
+    // prefix is cached. Skip on turn 1 (only system message + 1 user message).
+    if prompt_caching && out.len() > 2 {
+        if let Some(last_user_idx) = out.iter().rposition(|m| {
+            matches!(
+                m["role"].as_str(),
+                Some("user") | Some("tool")
+            )
+        }) {
+            let msg = &mut out[last_user_idx];
+            // For tool messages, content is a plain string — convert to content array.
+            // For user messages, content may be string or array.
+            if msg["content"].is_string() {
+                let text = msg["content"].as_str().unwrap_or("").to_string();
+                msg["content"] = serde_json::json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": { "type": "ephemeral" }
+                }]);
+            } else if let Some(arr) = msg["content"].as_array_mut() {
+                if let Some(last_block) = arr.last_mut() {
+                    last_block["cache_control"] =
+                        serde_json::json!({ "type": "ephemeral" });
+                }
             }
         }
     }

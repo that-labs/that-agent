@@ -220,8 +220,19 @@ async fn stream_turn_http(
     let mut tool_slots: std::collections::HashMap<u64, (String, String, String)> =
         std::collections::HashMap::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    let idle_timeout = tokio::time::Duration::from_secs(super::STREAM_IDLE_TIMEOUT_SECS);
+
+    loop {
+        let chunk = match tokio::time::timeout(idle_timeout, stream.next()).await {
+            Ok(Some(chunk)) => chunk?,
+            Ok(None) => break,  // Stream ended cleanly.
+            Err(_elapsed) => {
+                return Err(anyhow::anyhow!(
+                    "OpenAI SSE stream timed out: no data for {}s",
+                    super::STREAM_IDLE_TIMEOUT_SECS
+                ));
+            }
+        };
         buf.push_str(&String::from_utf8_lossy(&chunk));
 
         // Process complete lines from the buffer.
@@ -297,8 +308,19 @@ async fn read_ws_turn(
     let mut tool_slots: std::collections::HashMap<u64, (String, String, String)> =
         std::collections::HashMap::new();
 
-    while let Some(msg) = ws.next().await {
-        let msg = msg.map_err(|e| TurnFailure::Transport(e.into()))?;
+    let idle_timeout = tokio::time::Duration::from_secs(super::STREAM_IDLE_TIMEOUT_SECS);
+
+    loop {
+        let msg = match tokio::time::timeout(idle_timeout, ws.next()).await {
+            Ok(Some(msg)) => msg.map_err(|e| TurnFailure::Transport(e.into()))?,
+            Ok(None) => break,  // WebSocket closed cleanly.
+            Err(_elapsed) => {
+                return Err(TurnFailure::Transport(anyhow::anyhow!(
+                    "OpenAI WebSocket stream timed out: no data for {}s",
+                    super::STREAM_IDLE_TIMEOUT_SECS
+                )));
+            }
+        };
         match msg {
             WsMessage::Text(text) => {
                 match handle_response_event(&text, tx, &mut full_text, &mut usage, &mut tool_slots)
