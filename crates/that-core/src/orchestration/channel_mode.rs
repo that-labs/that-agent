@@ -185,6 +185,15 @@ pub async fn run_listen(
     // Signal K8s readiness — channels are initialized and listening.
     let _ = std::fs::File::create("/tmp/that-agent-ready");
 
+    // If unbootstrapped, greet on all channels so the user knows to start the ceremony.
+    if ws_files.needs_bootstrap() {
+        let name = &agent.name;
+        router.notify_all(&format!(
+            "Hey! I'm {name} — I just woke up for the first time. \
+             Send me a message to start our bootstrap ceremony and figure out who I am."
+        )).await;
+    }
+
     // ── Boot-time registry hydration ──────────────────────────────────────
     let cluster_registry = Arc::new(that_plugins::cluster::ClusterRegistry::new(
         state_dir.join("cluster_plugins.json"),

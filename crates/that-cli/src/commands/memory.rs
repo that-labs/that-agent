@@ -7,6 +7,9 @@ pub fn handle_mem(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use that_tools::cli::MemCommands;
     ctx.check_policy("memory").map_err(|e| e.to_string())?;
+    // Lazily initialize the memory DB only when a mem command is actually invoked,
+    // so bare tool commands (code, fs, etc.) don't create phantom agent directories.
+    that_tools::tools::memory::ensure_initialized(&ctx.config.memory)?;
     match command {
         MemCommands::Add {
             content,

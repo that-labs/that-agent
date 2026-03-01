@@ -103,6 +103,32 @@ pub fn init_workspace(
         }
     }
 
+    // Plant default workspace markdown files (skip if already present).
+    // Soul.md and Identity.md are intentionally omitted — their absence is
+    // the needs_bootstrap() signal; they get created during the bootstrap ceremony.
+    let defaults: &[(&str, &str)] = &[
+        ("Agents.md", workspace::default_agents_md()),
+        ("User.md", workspace::default_user_md()),
+        ("Tools.md", workspace::default_tools_md()),
+        ("Memory.md", workspace::default_memory_md()),
+        ("Bootstrap.md", workspace::default_bootstrap_md()),
+    ];
+    for (file, content) in defaults {
+        let path = agent_dir.join(file);
+        if path.exists() {
+            continue;
+        }
+        match workspace::save_workspace_file_local(agent_name, file, content) {
+            Ok(()) => println!("Initialized {file} at {}", path.display()),
+            Err(err) => tracing::warn!(
+                agent = %agent_name,
+                file = %file,
+                error = %err,
+                "Failed to initialize {file} during init"
+            ),
+        }
+    }
+
     Ok(())
 }
 

@@ -12,6 +12,9 @@
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Built_with-Rust-orange.svg" alt="Rust" /></a>
+  <a href="https://github.com/that-labs/that-agent/actions/workflows/ci.yml"><img src="https://github.com/that-labs/that-agent/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/that-labs/that-agent/pkgs/container/that-agent"><img src="https://img.shields.io/badge/Docker-ghcr.io-blue?logo=docker" alt="Docker" /></a>
+  <a href="https://crates.io/crates/that-cli"><img src="https://img.shields.io/crates/v/that-cli.svg" alt="crates.io" /></a>
 </p>
 
 Most agent frameworks configure tools for the agent. `that-agent` gives the agent a compiler and a deployment target — it authors, ships, and runs its own plugins at runtime without operator intervention.
@@ -73,6 +76,50 @@ The agent diffs the current and previous deployments, reads rollout status, insp
 ### Persistent workspace, shared with sub-agents
 
 The agent runs with a persistent volume mounted at `/workspace`. Sub-agents are spawned with a scoped view of the same volume — the parent writes, children read and extend. Work survives restarts, spans multiple agents, and never leaves your cluster. A parent orchestrating a fleet of specialists shares context with all of them through the workspace.
+
+## 5-Minute Quickstart
+
+**Install:**
+
+```bash
+cargo install that-cli
+```
+
+Or pull the Docker image:
+
+```bash
+docker pull ghcr.io/that-labs/that-agent:latest
+```
+
+**Configure:**
+
+```bash
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+```
+
+**Run a single task:**
+
+```bash
+that run "Create a hello-world Python script and verify it runs"
+```
+
+Expected output:
+
+```
+[init] Agent bootstrapped
+[tool] fs_write → hello.py
+[tool] shell_exec → python hello.py
+[result] Hello, world!
+✓ Task complete
+```
+
+**Start an interactive session:**
+
+```bash
+that chat
+```
+
+> **Tip:** Add `--no-sandbox` to run directly on your host instead of inside a container.
 
 ## Get Started
 
@@ -168,6 +215,22 @@ cargo build --release
 | 5 | Policy hierarchy | Done | Sub-agents cannot elevate beyond the main agent's policy ceiling |
 | 6 | Eval sandbox gating | Done | Scenarios requiring destructive ops must explicitly opt into sandbox mode |
 | 7 | Audit log | Done | Every tool call recorded with outcome; structured and queryable |
+
+### Production Deployment Warning
+
+> **This is an autonomous agent that can write code, execute commands, and deploy services.** The default sandbox settings are designed for development and single-user experimentation — not multi-tenant production.
+
+Before deploying to production, apply these hardening measures:
+
+| Measure | Why |
+|---|---|
+| gVisor / Kata Containers runtime class | Stronger workload isolation than default runc |
+| Network policies restricting egress | Prevent the agent from reaching unintended services |
+| Read-only root filesystem | Limit persistence of unintended modifications |
+| Strict seccomp profile | Reduce available syscall surface |
+| CPU and memory resource limits | Prevent runaway workloads from starving the node |
+| Dedicated namespace with tight RBAC | Contain blast radius of any misconfiguration |
+| No host path mounts | Prevent container escape to host filesystem |
 
 ## Architecture
 

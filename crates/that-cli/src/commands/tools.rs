@@ -60,14 +60,6 @@ pub fn handle_tools_command(cli: &cli::Cli) -> Result<(), Box<dyn std::error::Er
     };
     let agent_name = resolved_tools_agent_name(cli);
     apply_agent_memory_db(&mut tools_config, &agent_name);
-    if let Err(err) = that_tools::tools::memory::ensure_initialized(&tools_config.memory) {
-        tracing::warn!(
-            agent = %agent_name,
-            path = %tools_config.memory.db_path,
-            error = %err,
-            "Failed to initialize agent memory database for CLI tool command"
-        );
-    }
 
     let explicit_max_tokens = cli.max_tokens;
     let resolved_format = cli
