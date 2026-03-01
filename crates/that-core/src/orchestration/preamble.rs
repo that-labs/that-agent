@@ -207,6 +207,8 @@ pub fn build_preamble(
          mainly for creating new files or explicit full-file rewrites.\n\
          After every successful `code_edit`, call `code_read` on that file to verify the actual result before doing another edit or finalizing your response.\n\
          Heartbeat schedules support `once|minutely|hourly|daily|weekly` and cron expressions (`cron: */5 * * * *`).\n\
+         For reminders or deferred one-time tasks, use `schedule: once` with a `not_before:` field set to an RFC3339 timestamp — the entry will not fire until that time. \
+         Do not use `priority: urgent` or cron hacks for reminders; just set `not_before` to the target time.\n\
          For recurring entries, use `status: running`; set `status: done` only to disable.\n\
          Prefer Heartbeat schedules over installing/configuring system cron daemons for agent recurrence.\n\n",
     );
