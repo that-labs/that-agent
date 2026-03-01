@@ -41,10 +41,16 @@ jobs:
           apt-get update
           apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
         with:
-          key: ${{ matrix.target }}
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            target
+          key: cargo-bookworm-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-bookworm-${{ matrix.target }}-
 
       - name: Build binary
         env:
