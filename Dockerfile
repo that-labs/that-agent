@@ -2,6 +2,7 @@
 
 ############################
 # Stage 1: Build that
+# Skipped in CI via: --build-context builder=<dir-with-binary>
 ############################
 FROM rust:1-bookworm AS builder
 ARG THAT_CARGO_BUILD_JOBS=0
@@ -74,7 +75,7 @@ RUN if [ "$THAT_RUNTIME_PROFILE" = "full" ]; then npm install -g typescript ts-n
 # Pre-install common Python testing/dev packages (full profile only)
 RUN if [ "$THAT_RUNTIME_PROFILE" = "full" ]; then pip install --no-cache-dir pytest hypothesis requests; fi
 
-# that binary from builder
+# that binary — from builder stage (local) or pre-built via --build-context (CI)
 COPY --from=builder /build/that /usr/local/bin/that
 COPY --from=buildkit-bin /usr/bin/buildctl /usr/local/bin/buildctl
 RUN ln -sf /usr/local/bin/buildctl /usr/bin/buildctl
