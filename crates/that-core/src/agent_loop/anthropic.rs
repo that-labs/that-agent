@@ -92,8 +92,7 @@ pub(super) async fn stream_turn(
         let chunk = chunk?;
         buf.push_str(&String::from_utf8_lossy(&chunk));
 
-        loop {
-            let Some(nl) = buf.find('\n') else { break };
+        while let Some(nl) = buf.find('\n') {
             let line = buf[..nl].trim_end_matches('\r').to_string();
             buf = buf[nl + 1..].to_string();
 
