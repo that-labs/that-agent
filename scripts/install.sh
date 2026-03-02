@@ -37,8 +37,11 @@ AGENT_IMAGE="ghcr.io/that-labs/that-agent:latest"
 AGENT_NAMESPACE=""          # derived from agent name if not set
 INSTALL_K3S=true
 KUBECTL="kubectl"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+REPO_ROOT=""
+if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/../build.sh" ]]; then
+  REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
 OVERLAY_DIR=""              # set after we know the agent name
 
 # In-cluster registry — NodePort on the host so k3s containerd can pull,
@@ -259,29 +262,40 @@ if [[ -z "${AGENT_DESCRIPTION}" ]]; then
   warn "No description provided. Using default."
 fi
 
-# LLM provider
-echo ""
-echo "  LLM provider:"
-echo "    1) Anthropic (Claude)"
-echo "    2) OpenAI"
-echo "    3) OpenRouter"
-read -rp "  Choose [1]: " PROVIDER_CHOICE < /dev/tty
-case "${PROVIDER_CHOICE:-1}" in
-  1|"") LLM_PROVIDER="anthropic" ;;
-  2)    LLM_PROVIDER="openai"    ;;
-  3)    LLM_PROVIDER="openrouter" ;;
-  *)    die "Invalid choice." ;;
-esac
-
-# API key
-echo ""
-read -rsp "  ${LLM_PROVIDER} API key: " LLM_API_KEY < /dev/tty
-echo ""
+# LLM key — auto-detect provider from key prefix, or pick up from env
+LLM_API_KEY="${ANTHROPIC_API_KEY:-${CLAUDE_CODE_OAUTH_TOKEN:-${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-}}}}"
+if [[ -n "${LLM_API_KEY}" ]]; then
+  ok "Detected API key from environment."
+else
+  echo ""
+  echo "  Paste your API key (Anthropic, Claude Code OAuth, OpenAI, or OpenRouter)."
+  echo "  The provider will be detected automatically from the key prefix."
+  echo ""
+  read -rsp "  API key: " LLM_API_KEY < /dev/tty
+  echo ""
+fi
 if [[ -z "${LLM_API_KEY}" ]]; then
   die "API key is required."
 fi
 
-# Model (optional override)
+# Detect provider from key prefix
+detect_provider() {
+  local key="$1"
+  if   [[ "${key}" == sk-ant-oat01-* ]]; then echo "anthropic"   # Claude Code OAuth
+  elif [[ "${key}" == sk-ant-* ]];        then echo "anthropic"
+  elif [[ "${key}" == sk-or-* ]];         then echo "openrouter"
+  elif [[ "${key}" == sk-* ]];            then echo "openai"
+  else echo ""
+  fi
+}
+
+LLM_PROVIDER="$(detect_provider "${LLM_API_KEY}")"
+if [[ -z "${LLM_PROVIDER}" ]]; then
+  die "Could not detect provider from key prefix. Expected sk-ant-*, sk-or-*, or sk-*."
+fi
+ok "Provider: ${LLM_PROVIDER}"
+
+# Model default
 case "${LLM_PROVIDER}" in
   anthropic)  DEFAULT_MODEL="claude-sonnet-4-6" ;;
   openai)     DEFAULT_MODEL="gpt-5.2-codex"     ;;
@@ -333,7 +347,7 @@ esac
 # ── Step 4: Build or pull image ──────────────────────────────────────────────
 header "Step 4 — Container image"
 
-if [[ -f "${REPO_ROOT}/build.sh" ]] && command -v docker &>/dev/null; then
+if [[ -n "${REPO_ROOT}" && -f "${REPO_ROOT}/build.sh" ]] && command -v docker &>/dev/null; then
   echo ""
   read -rp "  Local repo detected. Build image from source? [y/N]: " BUILD_LOCAL < /dev/tty
   case "${BUILD_LOCAL:-n}" in
@@ -362,6 +376,19 @@ header "Step 5 — Generating Kubernetes overlay"
 
 mkdir -p "${OVERLAY_DIR}"
 
+# Ensure base manifests are available locally
+BASE_REF="./base"
+if [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}/deploy/k8s/base" ]]; then
+  cp -r "${REPO_ROOT}/deploy/k8s/base" "${OVERLAY_DIR}/base"
+  ok "Copied base manifests from local repo."
+else
+  info "Downloading base manifests from GitHub…"
+  mkdir -p "${OVERLAY_DIR}/base"
+  curl -fsSL "https://github.com/that-labs/that-agent/archive/refs/heads/main.tar.gz" | \
+    tar -xz --strip-components=3 -C "${OVERLAY_DIR}/base" "that-agent-main/deploy/k8s/base/"
+  ok "Base manifests downloaded."
+fi
+
 # kustomization.yaml
 cat > "${OVERLAY_DIR}/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -370,7 +397,7 @@ kind: Kustomization
 namespace: ${AGENT_NAMESPACE}
 
 resources:
-  - ${REPO_ROOT}/deploy/k8s/base
+  - ${BASE_REF}
   - namespace.yaml
   - secret.yaml
 
@@ -409,13 +436,17 @@ data:
   THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT: "${REGISTRY_PUSH_ENDPOINT}"
 EOF
 
-# secret.yaml
+# secret.yaml — use the correct env var name for the runtime
 SECRET_API_KEY_VAR=""
-case "${LLM_PROVIDER}" in
-  anthropic)   SECRET_API_KEY_VAR="ANTHROPIC_API_KEY" ;;
-  openai)      SECRET_API_KEY_VAR="OPENAI_API_KEY"    ;;
-  openrouter)  SECRET_API_KEY_VAR="OPENROUTER_API_KEY" ;;
-esac
+if [[ "${LLM_API_KEY}" == sk-ant-oat01-* ]]; then
+  SECRET_API_KEY_VAR="CLAUDE_CODE_OAUTH_TOKEN"
+else
+  case "${LLM_PROVIDER}" in
+    anthropic)   SECRET_API_KEY_VAR="ANTHROPIC_API_KEY" ;;
+    openai)      SECRET_API_KEY_VAR="OPENAI_API_KEY"    ;;
+    openrouter)  SECRET_API_KEY_VAR="OPENROUTER_API_KEY" ;;
+  esac
+fi
 
 cat > "${OVERLAY_DIR}/secret.yaml" <<EOF
 apiVersion: v1
