@@ -117,6 +117,14 @@ else
   die "No running Kubernetes cluster found. Remove --no-k3s to install k3s automatically."
 fi
 
+# Ensure local-path is the default StorageClass so PVCs without an explicit
+# storageClassName bind automatically.
+info "Ensuring local-path is the default StorageClass…"
+${KUBECTL} patch storageclass local-path \
+  -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' \
+  2>/dev/null && ok "local-path marked as default StorageClass." \
+  || warn "Could not patch local-path StorageClass — PVCs may need an explicit storageClassName."
+
 # ── Step 2: In-cluster image registry ───────────────────────────────────────
 header "Step 2 — In-cluster image registry"
 
@@ -134,6 +142,7 @@ metadata:
   name: registry-data
   namespace: ${REGISTRY_NAMESPACE}
 spec:
+  storageClassName: local-path
   accessModes: [ReadWriteOnce]
   resources:
     requests:
