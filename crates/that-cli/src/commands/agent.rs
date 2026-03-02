@@ -1,6 +1,5 @@
 use crate::cli::{self, PluginCommands};
 
-
 fn required_agent_name_or_exit(
     cli: &cli::Cli,
     ws: &that_core::config::WorkspaceConfig,
