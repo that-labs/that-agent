@@ -1083,6 +1083,7 @@ pub async fn run_chat_tui(
                                             call_id: call_id.clone(),
                                             name: name.clone(),
                                             content: result.clone(),
+                                            images: vec![],
                                         });
                                     }
                                 }

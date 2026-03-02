@@ -5,7 +5,10 @@ use tracing::warn;
 
 use crate::agent_loop::{self, LoopConfig, Message, ToolContext};
 use crate::config::AgentDef;
-use crate::hooks::{channel_notify_tool_def, channel_send_file_tool_def, ChannelHook};
+use crate::hooks::{
+    channel_notify_tool_def, channel_send_file_tool_def, channel_send_message_tool_def,
+    channel_send_raw_tool_def, ChannelHook,
+};
 use crate::tools::all_tool_defs;
 
 use super::config::*;
@@ -479,6 +482,17 @@ pub async fn execute_agent_run_channel(
             tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
         }
 
+        // Clear any stale adapter state from a previously aborted or failed run.
+        if !suppress_output {
+            route_channel_event(
+                router.as_ref(),
+                route_channel_id.as_deref(),
+                route_target.as_ref(),
+                &that_channels::ChannelEvent::Reset,
+            )
+            .await;
+        }
+
         // Per-attempt log channel: collects all tool call/result events for the session transcript.
         // A fresh channel is created each attempt so retried runs don't mix events.
         let (log_tx, mut log_rx) =
@@ -502,6 +516,8 @@ pub async fn execute_agent_run_channel(
         let mut tools = all_tool_defs(&container);
         tools.push(channel_notify_tool_def());
         tools.push(channel_send_file_tool_def());
+        tools.push(channel_send_message_tool_def());
+        tools.push(channel_send_raw_tool_def());
 
         let api_key = match api_key_for_provider(&agent.provider) {
             Ok(k) => k,

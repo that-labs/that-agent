@@ -388,13 +388,35 @@ fn messages_to_chat_completions(
                 out.push(assistant_msg);
             }
             Message::Tool {
-                call_id, content, ..
+                call_id,
+                content,
+                images,
+                ..
             } => {
                 out.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": call_id,
                     "content": content,
                 }));
+                // OpenRouter tool role is text-only; inject a user message
+                // with image_url blocks so the model can see images.
+                if !images.is_empty() {
+                    let mut parts: Vec<serde_json::Value> = images
+                        .iter()
+                        .map(|(data, mime)| {
+                            let b64 = base64::prelude::BASE64_STANDARD.encode(data);
+                            serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": format!("data:{mime};base64,{b64}") }
+                            })
+                        })
+                        .collect();
+                    parts.push(serde_json::json!({
+                        "type": "text",
+                        "text": "[Visual content from image_read tool]"
+                    }));
+                    out.push(serde_json::json!({ "role": "user", "content": parts }));
+                }
             }
         }
     }

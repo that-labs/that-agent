@@ -33,6 +33,12 @@ const SANDBOX_MODE_ENV: &str = "THAT_SANDBOX_MODE";
 #[error("{0}")]
 pub struct ToolError(pub String);
 
+/// Result of a tool dispatch: text output + optional images for vision.
+pub struct DispatchResult {
+    pub text: String,
+    pub images: Vec<(Vec<u8>, String)>, // (data, mime_type)
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 async fn run_on_host(
@@ -365,6 +371,11 @@ pub struct ShellExecArgs {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ImageReadArgs {
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ReadPluginArgs {
     pub plugin_id: Option<String>,
     #[serde(default)]
@@ -545,6 +556,19 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "path": { "type": "string" },
                     "recursive": { "type": "boolean", "default": false },
                     "dry_run": { "type": "boolean", "default": false }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "image_read".into(),
+            description: "Read an image file and return it for visual analysis. \
+                Supports PNG, JPEG, GIF, WebP. Max 5 MB. \
+                Auto-resizes large images to fit within vision model limits.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to the image file" }
                 },
                 "required": ["path"]
             }),
@@ -1127,13 +1151,87 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
 
 /// Dispatch a tool call by name to the appropriate implementation.
 ///
-/// Returns a JSON string suitable for injection into the LLM conversation as a
-/// tool result. Errors are formatted as `{"error": "..."}`.
-pub async fn dispatch(name: &str, args_json: &str, ctx: &ToolContext) -> String {
+/// Returns a `DispatchResult` with text output (JSON string) and optional images
+/// for vision-capable LLMs. Errors are formatted as `{"error": "..."}`.
+pub async fn dispatch(name: &str, args_json: &str, ctx: &ToolContext) -> DispatchResult {
+    // image_read is handled separately because it returns binary image data
+    // that must bypass the normal JSON-only path.
+    if name == "image_read" {
+        return dispatch_image_read(args_json, ctx).await;
+    }
     let result = dispatch_inner(name, args_json, ctx).await;
     match result {
-        Ok(v) => v.to_string(),
-        Err(e) => serde_json::json!({ "error": e.0 }).to_string(),
+        Ok(v) => DispatchResult {
+            text: v.to_string(),
+            images: vec![],
+        },
+        Err(e) => DispatchResult {
+            text: serde_json::json!({ "error": e.0 }).to_string(),
+            images: vec![],
+        },
+    }
+}
+
+async fn dispatch_image_read(args_json: &str, ctx: &ToolContext) -> DispatchResult {
+    let err = |msg: &str| DispatchResult {
+        text: serde_json::json!({ "error": msg }).to_string(),
+        images: vec![],
+    };
+
+    let args: ImageReadArgs = match serde_json::from_str(args_json) {
+        Ok(a) => a,
+        Err(e) => return err(&format!("invalid args: {e}")),
+    };
+
+    // Policy check: image_read uses fs_read policy
+    if matches!(
+        ctx.config.policy.tools.fs_read,
+        that_tools::config::PolicyLevel::Deny
+    ) {
+        return err("policy denied: tool 'fs_read' is not allowed by current policy");
+    }
+
+    let path_str = if let Some(c) = ctx.container.as_deref() {
+        // Sandbox: docker cp the file out to a temp location
+        let cpath = container_path(&args.path);
+        let tmp = std::env::temp_dir().join(format!("image_read_{}", uuid::Uuid::new_v4()));
+        let output = Command::new("docker")
+            .args(["cp", &format!("{c}:{cpath}"), &tmp.to_string_lossy()])
+            .output()
+            .await;
+        match output {
+            Ok(o) if o.status.success() => tmp.to_string_lossy().to_string(),
+            Ok(o) => {
+                return err(&format!(
+                    "docker cp failed: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                ))
+            }
+            Err(e) => return err(&format!("docker cp failed: {e}")),
+        }
+    } else {
+        args.path.clone()
+    };
+
+    match that_tools::tools::fs::image::image_read(std::path::Path::new(&path_str)) {
+        Ok(result) => {
+            let meta = that_tools::tools::fs::image::ImageReadMeta::from(&result);
+            let images = vec![(result.data, result.mime_type)];
+            // Clean up temp file if we docker-cp'd
+            if ctx.container.is_some() {
+                let _ = std::fs::remove_file(&path_str);
+            }
+            DispatchResult {
+                text: serde_json::to_string(&meta).unwrap_or_default(),
+                images,
+            }
+        }
+        Err(e) => {
+            if ctx.container.is_some() {
+                let _ = std::fs::remove_file(&path_str);
+            }
+            err(&e.to_string())
+        }
     }
 }
 
@@ -2258,7 +2356,7 @@ mod tests {
         )
         .await;
         assert!(
-            result.contains("host-read-only"),
+            result.text.contains("host-read-only"),
             "fs_cat output should contain file content"
         );
         let _ = fs::remove_file(path);
@@ -2277,7 +2375,7 @@ mod tests {
         )
         .await;
         assert!(
-            result.contains("sandbox required"),
+            result.text.contains("sandbox required"),
             "fs_write should reject local mode"
         );
     }
@@ -2289,7 +2387,7 @@ mod tests {
         let _mode = EnvVarGuard::set(SANDBOX_MODE_ENV, Some("docker"));
         let ctx = test_ctx(ThatToolsConfig::default(), None);
         let result = dispatch("fs_rm", &serde_json::json!({"path": unique_tmp_path("policy-deny").to_string_lossy().to_string()}).to_string(), &ctx).await;
-        assert!(result.contains("sandbox required"));
+        assert!(result.text.contains("sandbox required"));
     }
 
     #[tokio::test]
@@ -2304,7 +2402,7 @@ mod tests {
             &ctx,
         )
         .await;
-        assert!(result.contains("sandbox required"));
+        assert!(result.text.contains("sandbox required"));
     }
 
     #[tokio::test]
@@ -2323,7 +2421,7 @@ mod tests {
         )
         .await;
         assert!(
-            !result.contains("sandbox required"),
+            !result.text.contains("sandbox required"),
             "sandbox mode should attempt docker execution"
         );
     }
@@ -2343,8 +2441,9 @@ mod tests {
         )
         .await;
         assert!(
-            !result.contains("error"),
-            "trusted local mode should allow fs_write: {result}"
+            !result.text.contains("error"),
+            "trusted local mode should allow fs_write: {}",
+            result.text
         );
         let written = fs::read_to_string(&target).expect("file should have been written");
         assert_eq!(written, "trusted");
@@ -2354,7 +2453,7 @@ mod tests {
             &ctx,
         )
         .await;
-        assert!(result.contains("trusted-local-shell"));
+        assert!(result.text.contains("trusted-local-shell"));
         let _ = fs::remove_file(target);
     }
 

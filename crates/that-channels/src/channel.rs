@@ -2,9 +2,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::config::AdapterConfig;
+use crate::message::OutboundMessage;
 
 /// An attachment received alongside an inbound user message.
 #[derive(Debug, Clone)]
@@ -42,6 +44,11 @@ pub enum ChannelEvent {
         name: String,
         result: String,
     },
+    /// Clear per-run adapter state (buffered tokens, in-progress tool indicators).
+    ///
+    /// Fired at the start of every agent run attempt so adapters discard any stale
+    /// state left behind by a previously aborted run targeting the same session.
+    Reset,
     /// The agent turn completed successfully.
     Done {
         text: String,
@@ -121,6 +128,11 @@ pub struct ChannelCapabilities {
     pub inbound_images: bool,
     /// Adapter can receive inbound audio attachments.
     pub inbound_audio: bool,
+    /// Adapter supports structured [`OutboundMessage`] with rich UI elements
+    /// (inline keyboards, reply markups, etc.) via [`Channel::send_message`].
+    pub rich_messages: bool,
+    /// Adapter supports raw platform API passthrough via [`Channel::send_raw`].
+    pub native_api: bool,
 }
 
 impl Default for ChannelCapabilities {
@@ -135,6 +147,8 @@ impl Default for ChannelCapabilities {
             attachments: false,
             inbound_images: false,
             inbound_audio: false,
+            rich_messages: false,
+            native_api: false,
         }
     }
 }
@@ -164,6 +178,8 @@ pub struct InboundMessage {
     pub callback_url: Option<String>,
     /// Attachments received alongside the message (images, audio, etc.).
     pub attachments: Vec<InboundAttachment>,
+    /// Platform-specific metadata (e.g. callback query info from Telegram).
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Optional outbound routing metadata for channel replies.
@@ -292,6 +308,28 @@ pub trait Channel: Send + Sync {
     /// native reactions.
     async fn react(&self, _chat_id: &str, _message_id: i64, _emoji: &str) -> Result<()> {
         Ok(())
+    }
+
+    /// Send a structured rich message to the channel.
+    ///
+    /// Adapters that declare `capabilities().rich_messages == true` translate
+    /// the [`OutboundMessage`] into their native API representation (e.g.
+    /// Telegram `sendMessage` with `reply_markup`).
+    async fn send_message(
+        &self,
+        _msg: OutboundMessage,
+        _target: Option<&OutboundTarget>,
+    ) -> Result<MessageHandle> {
+        Err(anyhow::anyhow!("rich messages not supported"))
+    }
+
+    /// Raw platform API passthrough.
+    ///
+    /// Adapters that declare `capabilities().native_api == true` forward the
+    /// method name and JSON payload directly to the underlying platform API
+    /// and return the raw response.
+    async fn send_raw(&self, _method: &str, _payload: Value) -> Result<Value> {
+        Err(anyhow::anyhow!("native API not supported"))
     }
 
     /// Register slash commands with the platform's native command menu.

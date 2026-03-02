@@ -30,6 +30,7 @@
 # User-created overlays and all secret files are excluded.
 deploy/k8s/overlays/*/secret.yaml
 !deploy/k8s/overlays/example/
+/deploy/k8s/overlays/default/
 
 # Logs
 *.log

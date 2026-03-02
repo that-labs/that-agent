@@ -95,8 +95,10 @@ impl that_channels::Channel for TuiChannel {
                 };
                 self.tx.send(TuiEvent::Token(line))
             }
-            // TUI has its own visual rendering — typing indicators are not needed.
-            ChannelEvent::TypingIndicator => return Ok(that_channels::MessageHandle::default()),
+            // TUI has its own visual rendering — typing indicators and run resets are not needed.
+            ChannelEvent::TypingIndicator | ChannelEvent::Reset => {
+                return Ok(that_channels::MessageHandle::default())
+            }
         };
         Ok(that_channels::MessageHandle::default())
     }

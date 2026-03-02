@@ -8,6 +8,7 @@ use crate::channel::{
     BotCommand, ChannelEvent, ChannelRef, InboundMessage, MessageHandle, OutboundTarget,
 };
 use crate::config::AdapterConfig;
+use crate::message::OutboundMessage;
 
 /// Routes agent events to multiple channels simultaneously (fan-out).
 ///
@@ -344,6 +345,40 @@ impl ChannelRouter {
             }
         }
         Ok(())
+    }
+
+    /// Send a structured rich message to a specific channel.
+    ///
+    /// Routes the [`OutboundMessage`] to the adapter identified by `channel_id`.
+    /// Returns an error if the channel is not found or does not support rich messages.
+    pub async fn send_message(
+        &self,
+        channel_id: &str,
+        msg: OutboundMessage,
+        target: Option<&OutboundTarget>,
+    ) -> Result<MessageHandle> {
+        let guard = self.channels.read().await;
+        if let Some(ch) = guard.iter().find(|c| c.id() == channel_id) {
+            return ch.send_message(msg, target).await;
+        }
+        Err(anyhow::anyhow!("channel '{channel_id}' not found"))
+    }
+
+    /// Raw platform API passthrough to a specific channel.
+    ///
+    /// Routes the method + payload to the adapter identified by `channel_id`.
+    /// Returns an error if the channel is not found or does not support native API.
+    pub async fn send_raw(
+        &self,
+        channel_id: &str,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let guard = self.channels.read().await;
+        if let Some(ch) = guard.iter().find(|c| c.id() == channel_id) {
+            return ch.send_raw(method, payload).await;
+        }
+        Err(anyhow::anyhow!("channel '{channel_id}' not found"))
     }
 
     /// Runtime environment variable pairs to expose to the agent.

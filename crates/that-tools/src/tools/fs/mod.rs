@@ -4,6 +4,8 @@
 //! `anvil fs ls` returns minimal JSON arrays instead of verbose ls output.
 //! `anvil fs cat` returns budget-limited file content.
 
+pub mod image;
+
 use crate::output::{self, BudgetedOutput, CompactionStrategy};
 use crate::tools::path_guard;
 use ignore::WalkBuilder;

@@ -112,6 +112,82 @@ pub fn channel_send_file_tool_def() -> ToolDef {
     }
 }
 
+/// Return the `channel_send_message` tool schema.
+///
+/// Include this in the tool list when the agent has channel access. Sends a
+/// structured message with optional rich UI (inline keyboards, reply markups).
+/// [`ChannelHook`] intercepts calls and routes them to the router.
+pub fn channel_send_message_tool_def() -> ToolDef {
+    ToolDef {
+        name: "channel_send_message".into(),
+        description: "Send a rich message with optional interactive UI elements (inline \
+            keyboards, reply keyboards) to a specific channel. Use this for messages that \
+            need buttons, custom keyboards, or explicit parse mode control. For plain text \
+            notifications, prefer channel_notify instead."
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "channel_id": {
+                    "type": "string",
+                    "description": "Target channel ID (e.g. 'telegram')."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Message text content."
+                },
+                "parse_mode": {
+                    "type": "string",
+                    "enum": ["MarkdownV2", "HTML", "Plain"],
+                    "description": "Optional text parsing mode. Omit for adapter default."
+                },
+                "reply_markup": {
+                    "type": "object",
+                    "description": "Optional interactive markup. Use {\"InlineKeyboard\": [[{\"text\":\"Label\",\"callback_data\":\"value\"}]]} for inline buttons, {\"ReplyKeyboard\":{\"keyboard\":[[{\"text\":\"Option\"}]],\"resize\":true,\"one_time\":true}} for custom keyboards, or {\"RemoveKeyboard\":null} to dismiss."
+                },
+                "reply_to_message_id": {
+                    "type": "integer",
+                    "description": "Optional message ID to reply to."
+                }
+            },
+            "required": ["channel_id", "text"]
+        }),
+    }
+}
+
+/// Return the `channel_send_raw` tool schema.
+///
+/// Escape hatch for calling platform-native APIs directly. [`ChannelHook`]
+/// intercepts calls and routes them to the router.
+pub fn channel_send_raw_tool_def() -> ToolDef {
+    ToolDef {
+        name: "channel_send_raw".into(),
+        description: "Call a platform-native API method directly on a channel adapter. \
+            Use this as an escape hatch when the rich message model doesn't cover your \
+            use case. The method name and JSON payload are forwarded verbatim to the \
+            platform API, and the raw response JSON is returned."
+            .into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "channel_id": {
+                    "type": "string",
+                    "description": "Target channel ID (e.g. 'telegram')."
+                },
+                "method": {
+                    "type": "string",
+                    "description": "Platform API method name (e.g. 'sendPhoto', 'sendPoll')."
+                },
+                "payload": {
+                    "type": "object",
+                    "description": "JSON payload to send to the API method."
+                }
+            },
+            "required": ["channel_id", "method", "payload"]
+        }),
+    }
+}
+
 /// Return the `channel_notify` tool schema.
 ///
 /// Include this in the tool list when the agent is running in channel mode
@@ -352,6 +428,97 @@ impl LoopHook for ChannelHook {
                         })
                         .to_string(),
                     }
+                };
+                HookAction::Skip { result_json }
+            }
+            "channel_send_message" => {
+                let args = serde_json::from_str::<serde_json::Value>(args_json).unwrap_or_default();
+                let channel_id = args
+                    .get("channel_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let text = args
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if channel_id.is_empty() || text.is_empty() {
+                    return HookAction::Skip {
+                        result_json: r#"{"error":"channel_id and text are required"}"#.to_string(),
+                    };
+                }
+
+                let parse_mode = args
+                    .get("parse_mode")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| match s {
+                        "MarkdownV2" => Some(that_channels::message::ParseMode::MarkdownV2),
+                        "HTML" => Some(that_channels::message::ParseMode::HTML),
+                        "Plain" => Some(that_channels::message::ParseMode::Plain),
+                        _ => None,
+                    });
+
+                let reply_markup: Option<that_channels::message::ReplyMarkup> = args
+                    .get("reply_markup")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+                let reply_to_message_id = args.get("reply_to_message_id").and_then(|v| v.as_i64());
+
+                let msg = that_channels::message::OutboundMessage {
+                    text,
+                    parse_mode,
+                    reply_markup,
+                    reply_to_message_id,
+                };
+
+                let result_json = match self
+                    .router
+                    .send_message(channel_id, msg, self.target.as_ref())
+                    .await
+                {
+                    Ok(handle) => serde_json::json!({
+                        "sent": true,
+                        "message_id": handle.message_id,
+                        "channel_id": handle.channel_id,
+                    })
+                    .to_string(),
+                    Err(e) => serde_json::json!({
+                        "error": format!("{e:#}")
+                    })
+                    .to_string(),
+                };
+                HookAction::Skip { result_json }
+            }
+            "channel_send_raw" => {
+                let args = serde_json::from_str::<serde_json::Value>(args_json).unwrap_or_default();
+                let channel_id = args
+                    .get("channel_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                let payload = args
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
+
+                if channel_id.is_empty() || method.is_empty() {
+                    return HookAction::Skip {
+                        result_json: r#"{"error":"channel_id and method are required"}"#
+                            .to_string(),
+                    };
+                }
+
+                let result_json = match self.router.send_raw(channel_id, method, payload).await {
+                    Ok(resp) => serde_json::json!({
+                        "ok": true,
+                        "response": resp,
+                    })
+                    .to_string(),
+                    Err(e) => serde_json::json!({
+                        "error": format!("{e:#}")
+                    })
+                    .to_string(),
                 };
                 HookAction::Skip { result_json }
             }

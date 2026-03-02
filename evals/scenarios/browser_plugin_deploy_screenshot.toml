@@ -1,0 +1,223 @@
+name        = "Browser Plugin — Deploy and Screenshot"
+description = """
+Tests whether the agent can autonomously set up a headless browser capability as a
+Kubernetes-deployable plugin, sanity-check the deployment, and use it to capture a
+screenshot that gets delivered to a channel.
+
+This scenario catches shallow success by requiring concrete side-effects at each stage:
+1) a well-formed plugin manifest and container spec exist on disk,
+2) Kubernetes manifests are present and reference a plausible image,
+3) the plugin is registered and a browser command is exposed,
+4) a screenshot is captured and saved as a real image file.
+
+Prompts are written as natural user requests — the agent decides autonomously which
+tools, skills, and deployment primitives to use.
+"""
+agent_name      = "eval"
+provider        = "openai"
+model           = "gpt-5.2-codex"
+judge_provider  = "openai"
+judge_model     = "gpt-5.2-codex"
+max_turns       = 60
+sandbox         = true
+tags            = ["plugins", "kubernetes", "browser", "screenshot", "deploy"]
+timeout_secs    = 600
+
+# ── Pre-cleanup ────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = "rm -rf ~/.that-agent/agents/eval/plugins/browser_plugin 2>/dev/null; true"
+
+[[steps]]
+type    = "run_command"
+command = """
+mkdir -p "$HOME/.that-agent/agents"
+if [ ! -f "$HOME/.that-agent/agents/eval.toml" ]; then
+  cat > "$HOME/.that-agent/agents/eval.toml" <<'TOML'
+provider = "openai"
+model = "gpt-5.2-codex"
+max_turns = 75
+max_tokens = 16384
+shared_workspace = false
+TOML
+fi
+mkdir -p "$HOME/.that-agent/agents/eval/plugins"
+mkdir -p "$HOME/.that-agent/agents/eval"
+if [ ! -e "$HOME/.that-agent/agents/eval/agent.toml" ]; then
+  ln -sf ../eval.toml "$HOME/.that-agent/agents/eval/agent.toml"
+fi
+
+STATE="$HOME/.that-agent/agents/eval/plugins/.plugin-state.toml"
+if [ -f "$STATE" ]; then
+  awk '
+    BEGIN { skip=0 }
+    /^\\[plugins\\.browser_plugin\\]/ { skip=1; next }
+    /^\\[plugins\\./ { skip=0 }
+    skip==0 { print }
+  ' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+fi
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-screenshot.png 2>/dev/null || true
+true
+"""
+
+# ── Turn 1: Create browser plugin ─────────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I want you to set yourself up with a browser capability so you can take screenshots
+of websites on demand. Please create a plugin for it — it should be deployable to
+Kubernetes, include a container spec, expose a command I can invoke later, and be
+ready to use once deployed.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "test -f ~/.that-agent/agents/eval/plugins/browser_plugin/plugin.toml"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "grep -q 'id.*=.*\"browser_plugin\"' ~/.that-agent/agents/eval/plugins/browser_plugin/plugin.toml"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "find ~/.that-agent/agents/eval/plugins/browser_plugin -name Dockerfile | grep -q ."
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+find ~/.that-agent/agents/eval/plugins/browser_plugin/deploy -name '*.yaml' -o -name '*.yml' | grep -q .
+"""
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "grep -rq 'screenshot' ~/.that-agent/agents/eval/plugins/browser_plugin/plugin.toml"
+
+# ── Turn 2: Build and deploy ───────────────────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Go ahead and build the container image and get it running in the cluster. Once it's
+up, verify it's healthy, then let me know what command I can use to take a screenshot.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+# Agent should have updated plugin state to enabled after deploy
+python3 - <<'PY'
+from pathlib import Path
+import tomllib
+
+plugin_id = "browser_plugin"
+state_path = Path.home() / ".that-agent/agents/eval/plugins/.plugin-state.toml"
+manifest_path = Path.home() / ".that-agent/agents/eval/plugins" / plugin_id / "plugin.toml"
+
+manifest = tomllib.loads(manifest_path.read_text())
+enabled = bool(manifest.get("enabled_by_default", True))
+
+if state_path.exists() and state_path.read_text().strip():
+    state = tomllib.loads(state_path.read_text())
+    enabled = bool(
+        state.get("plugins", {})
+             .get(plugin_id, {})
+             .get("enabled", enabled)
+    )
+
+assert enabled is True, f"Plugin not enabled after deploy (effective={enabled})"
+PY
+"""
+
+# ── Session boundary ───────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Turn 3: Take a screenshot after fresh session ─────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Take a screenshot of https://example.com and save it as /tmp/eval-screenshot.png.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-screenshot.png"
+[[steps.assertions]]
+kind    = "command_succeeds"
+# PNG magic bytes: 89 50 4E 47
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME python3 -c "
+data = open('/tmp/eval-screenshot.png','rb').read(8)
+assert data[:4] == bytes([0x89,0x50,0x4E,0x47]), f'not a valid PNG: {data[:4].hex()}'
+"
+"""
+
+# ── Cleanup ────────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+rm -rf ~/.that-agent/agents/eval/plugins/browser_plugin 2>/dev/null
+STATE="$HOME/.that-agent/agents/eval/plugins/.plugin-state.toml"
+if [ -f "$STATE" ]; then
+  awk '
+    BEGIN { skip=0 }
+    /^\\[plugins\\.browser_plugin\\]/ { skip=1; next }
+    /^\\[plugins\\./ { skip=0 }
+    skip==0 { print }
+  ' "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+fi
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-screenshot.png 2>/dev/null || true
+true
+"""
+
+# ── Rubric ─────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "plugin_structure_quality"
+description = """
+Agent produced a complete, coherent plugin structure: manifest with correct id, a
+container spec (Dockerfile), Kubernetes deploy manifests, and at least one screenshot
+command entry — all without being told which files to create or which tools to call.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "deployment_execution"
+description = """
+Agent actually attempted to build the image and deploy it to the cluster (not just
+created files). High score requires evidence in transcript of build/deploy commands
+being issued and the agent verifying the pod came up healthy.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "cross_session_tool_reuse"
+description = """
+After session reset, agent discovered and used the browser plugin without being
+reminded of its existence. High score if transcript shows explicit plugin/skill
+discovery before invoking the screenshot capability.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "screenshot_delivery"
+description = """
+A real PNG file was produced at the expected path. High score if the agent confirmed
+the file exists and is valid; partial credit if the file exists but the agent did not
+verify.
+"""
+weight = 15
+
+[[rubric.criteria]]
+name        = "autonomy_and_recovery"
+description = """
+Agent worked end-to-end without stalling on clarification or giving up after errors.
+Recovered sensibly from any deploy/network issues.
+"""
+weight = 10

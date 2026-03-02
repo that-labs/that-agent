@@ -19,6 +19,7 @@ pub enum Message {
         call_id: String,
         name: String,
         content: String,
+        images: Vec<(Vec<u8>, String)>, // (data, mime_type) — vision blocks for image_read
     },
 }
 

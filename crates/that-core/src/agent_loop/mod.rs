@@ -277,6 +277,7 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
                 .on_tool_call(&tc.name, &tc.call_id, &tc.args_json)
                 .await;
 
+            let mut tool_images: Vec<(Vec<u8>, String)> = Vec::new();
             let result = match action {
                 HookAction::Skip { result_json } => {
                     // Brief synchronous entry so the span appears in the trace.
@@ -299,30 +300,33 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
                                 });
                                 edit_verification_guard_result(&edit_path, &previous_call_id)
                             } else {
-                                let dispatched =
-                                    dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
-                                        .instrument(tool_span.clone())
-                                        .await;
-                                if !is_tool_error_result(&dispatched) {
+                                let dr = dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
+                                    .instrument(tool_span.clone())
+                                    .await;
+                                tool_images = dr.images;
+                                if !is_tool_error_result(&dr.text) {
                                     pending_edit_verification.insert(edit_path, tc.call_id.clone());
                                 }
-                                dispatched
+                                dr.text
                             }
                         } else {
-                            dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
+                            let dr = dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
                                 .instrument(tool_span.clone())
-                                .await
+                                .await;
+                            tool_images = dr.images;
+                            dr.text
                         }
                     } else {
-                        let dispatched = dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
+                        let dr = dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
                             .instrument(tool_span.clone())
                             .await;
-                        if tc.name == "code_read" && !is_tool_error_result(&dispatched) {
+                        tool_images = dr.images;
+                        if tc.name == "code_read" && !is_tool_error_result(&dr.text) {
                             if let Some(read_path) = tool_arg_path(&tc.args_json) {
                                 pending_edit_verification.remove(&read_path);
                             }
                         }
-                        dispatched
+                        dr.text
                     }
                 }
             };
@@ -351,6 +355,7 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
                 call_id: tc.call_id.clone(),
                 name: tc.name.clone(),
                 content,
+                images: tool_images,
             });
         }
 
@@ -673,6 +678,7 @@ fn messages_to_trace(messages: &[Message]) -> Vec<serde_json::Value> {
                 call_id,
                 name,
                 content,
+                ..
             } => out.push(serde_json::json!({
                 "role": "tool",
                 "call_id": call_id,

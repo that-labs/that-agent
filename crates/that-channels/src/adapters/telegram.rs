@@ -388,7 +388,10 @@ impl TelegramAdapter {
             .query(&[
                 ("offset", offset.to_string()),
                 ("timeout", timeout_secs.to_string()),
-                ("allowed_updates", r#"["message"]"#.to_string()),
+                (
+                    "allowed_updates",
+                    r#"["message","callback_query"]"#.to_string(),
+                ),
             ])
             .timeout(std::time::Duration::from_secs(timeout_secs + 5))
             .send()
@@ -476,6 +479,8 @@ impl Channel for TelegramAdapter {
             attachments: true,
             inbound_images: true,
             inbound_audio: true,
+            rich_messages: true,
+            native_api: true,
         }
     }
 
@@ -509,7 +514,17 @@ impl Channel for TelegramAdapter {
              - Italic: `_text_`\n\
              - Code: `` `code` `` or ` ```block``` `\n\
              - Escape special chars: `.`, `!`, `(`, `)`, `-`, `_`, `*`, `[`, `]`, `{`, `}`, `#`, `+`, `=`, `|`, `~`, `>`, `<`\n\
-             Long responses are automatically split into multiple messages — no need to manually shorten them."
+             Long responses are automatically split into multiple messages — no need to manually shorten them.\n\n\
+             ## Rich Messages (Telegram)\n\n\
+             Use `channel_send_message` to send messages with interactive UI elements:\n\
+             - Inline keyboards: rows of buttons with callback data, rendered below the message\n\
+             - Reply keyboards: custom keyboard layouts replacing the default keyboard\n\
+             - Remove keyboard: dismiss a previously shown reply keyboard\n\
+             Parse modes: `MarkdownV2`, `HTML`, `Plain`.\n\n\
+             ## Native API (Telegram)\n\n\
+             Use `channel_send_raw` to call any Telegram Bot API method directly when the \
+             rich message model doesn't cover your use case. Pass the method name and a JSON \
+             payload — the response JSON is returned verbatim."
                 .to_string(),
         )
     }
@@ -603,6 +618,13 @@ impl Channel for TelegramAdapter {
             }
             ChannelEvent::ThinkingDelta(_) => {
                 // Thinking deltas are not forwarded to Telegram.
+                MessageHandle::default()
+            }
+            ChannelEvent::Reset => {
+                // New run starting — discard any stale state from an aborted previous run.
+                let mut state = self.state.lock().await;
+                state.token_buffers.remove(&stream_key);
+                state.tool_status.remove(&chat_id);
                 MessageHandle::default()
             }
             ChannelEvent::ToolCall { name, args, .. } => {
@@ -832,6 +854,112 @@ impl Channel for TelegramAdapter {
         self.set_reaction(effective_chat, message_id, emoji).await
     }
 
+    async fn send_message(
+        &self,
+        msg: crate::message::OutboundMessage,
+        target: Option<&OutboundTarget>,
+    ) -> Result<MessageHandle> {
+        let chat_id = self.target_chat_id(target).to_string();
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": msg.text,
+        });
+        match msg.parse_mode {
+            Some(crate::message::ParseMode::MarkdownV2) => {
+                body["parse_mode"] = "MarkdownV2".into();
+            }
+            Some(crate::message::ParseMode::HTML) => {
+                body["parse_mode"] = "HTML".into();
+            }
+            Some(crate::message::ParseMode::Plain) | None => {}
+        }
+        if let Some(reply_id) = msg.reply_to_message_id {
+            body["reply_to_message_id"] = reply_id.into();
+        }
+        if let Some(markup) = &msg.reply_markup {
+            body["reply_markup"] = match markup {
+                crate::message::ReplyMarkup::InlineKeyboard(rows) => {
+                    let keyboard: Vec<Vec<serde_json::Value>> = rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|btn| {
+                                    serde_json::json!({
+                                        "text": btn.text,
+                                        "callback_data": btn.callback_data,
+                                    })
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    serde_json::json!({ "inline_keyboard": keyboard })
+                }
+                crate::message::ReplyMarkup::ReplyKeyboard {
+                    keyboard,
+                    resize,
+                    one_time,
+                } => {
+                    let kb: Vec<Vec<serde_json::Value>> = keyboard
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|btn| serde_json::json!({ "text": btn.text }))
+                                .collect()
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "keyboard": kb,
+                        "resize_keyboard": resize,
+                        "one_time_keyboard": one_time,
+                    })
+                }
+                crate::message::ReplyMarkup::RemoveKeyboard => {
+                    serde_json::json!({ "remove_keyboard": true })
+                }
+            };
+        }
+
+        let resp = self
+            .http
+            .post(self.api_url("sendMessage"))
+            .json(&body)
+            .send()
+            .await
+            .context("Telegram sendMessage (rich) request failed")?
+            .json::<serde_json::Value>()
+            .await
+            .context("Telegram sendMessage (rich) JSON parse failed")?;
+
+        if resp["ok"].as_bool() != Some(true) {
+            let desc = resp["description"].as_str().unwrap_or("unknown error");
+            anyhow::bail!("Telegram sendMessage (rich) failed: {desc}");
+        }
+        let message_id = resp["result"]["message_id"].as_i64();
+        Ok(MessageHandle {
+            message_id,
+            channel_id: Some(self.id.clone()),
+            conversation_id: Some(chat_id),
+        })
+    }
+
+    async fn send_raw(
+        &self,
+        method: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .http
+            .post(self.api_url(method))
+            .json(&payload)
+            .send()
+            .await
+            .with_context(|| format!("Telegram {method} request failed"))?
+            .json::<serde_json::Value>()
+            .await
+            .with_context(|| format!("Telegram {method} JSON parse failed"))?;
+        Ok(resp)
+    }
+
     async fn register_commands(&self, commands: &[BotCommand]) -> Result<()> {
         let tg_commands: Vec<serde_json::Value> = commands
             .iter()
@@ -915,6 +1043,52 @@ impl Channel for TelegramAdapter {
             for update in &updates {
                 let update_id = update["update_id"].as_i64().unwrap_or(0);
                 offset = update_id + 1;
+
+                // Handle callback_query updates from inline keyboard buttons.
+                if let Some(cb) = update.get("callback_query") {
+                    let cb_id = cb["id"].as_str().unwrap_or_default();
+                    let cb_data = cb["data"].as_str().unwrap_or_default().to_string();
+                    let cb_chat_id = cb["message"]["chat"]["id"]
+                        .as_i64()
+                        .map(|id| id.to_string())
+                        .unwrap_or_default();
+                    let cb_sender_id = cb["from"]["id"]
+                        .as_i64()
+                        .map(|id| id.to_string())
+                        .unwrap_or_default();
+                    let cb_message_id = cb["message"]["message_id"].as_i64();
+
+                    // Auto-answer to dismiss the client spinner.
+                    let _ = self
+                        .http
+                        .post(self.api_url("answerCallbackQuery"))
+                        .json(&serde_json::json!({ "callback_query_id": cb_id }))
+                        .send()
+                        .await;
+
+                    if !cb_data.is_empty() {
+                        let msg = InboundMessage {
+                            channel_id: self.id.clone(),
+                            sender_id: cb_sender_id,
+                            text: cb_data.clone(),
+                            message_id: cb_message_id,
+                            conversation_id: Some(cb_chat_id),
+                            session_hint: None,
+                            attachments: vec![],
+                            callback_url: None,
+                            metadata: Some(serde_json::json!({
+                                "type": "callback_query",
+                                "callback_query_id": cb_id,
+                                "data": cb_data,
+                            })),
+                        };
+                        if tx.send(msg).is_err() {
+                            info!(channel = %self.id, "Inbound receiver dropped — stopping listener");
+                            return Ok(());
+                        }
+                    }
+                    continue;
+                }
 
                 let chat_id = update["message"]["chat"]["id"]
                     .as_i64()
@@ -1083,6 +1257,7 @@ impl Channel for TelegramAdapter {
                     session_hint: None,
                     attachments,
                     callback_url: None,
+                    metadata: None,
                 };
                 if tx.send(msg).is_err() {
                     // Receiver dropped — stop listening.

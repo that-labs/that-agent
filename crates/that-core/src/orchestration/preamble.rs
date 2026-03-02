@@ -74,7 +74,10 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                  - If backend is `docker`, check `docker_daemon_source` before Docker-based build/push.\n\
                  - If backend is `none`, use prebuilt images or a Kubernetes-native builder job.\n\
                  - For deploy requests: build image, push to registry, generate/update manifests, and deploy with `kubectl apply -k`.\n\
-                 - Validate with `kubectl rollout status` and list managed resources after deploy.\n\n",
+                 - Validate with `kubectl rollout status` and list managed resources after deploy.\n\
+                 - **Environment framing:** You live in a Kubernetes cluster, not on a local machine. \
+                 When reporting outcomes, use cluster-native language (\"deployed\", \"running in the namespace\", \
+                 \"served from the cluster\") — never say \"on disk\" or \"on the local filesystem\".\n\n",
                 k8s.namespace, k8s.registry
             )
         }
@@ -335,16 +338,21 @@ pub fn build_preamble(
     // ── 7. Execution Mode — compiled (sandbox vs. local/trusted) ─────────────
 
     if sandbox {
-        preamble.push_str(
+        let backend_block = sandbox_backend_preamble(agent);
+        let env_label = match that_sandbox::backend::SandboxMode::from_env() {
+            that_sandbox::backend::SandboxMode::Kubernetes => "Kubernetes pod",
+            that_sandbox::backend::SandboxMode::Docker => "Docker container",
+        };
+        preamble.push_str(&format!(
             "## Execution Mode: Sandbox\n\
-             You are running inside an isolated Linux Docker container. All operations \
+             You are running inside an isolated {env_label}. All operations \
              are fully available including file writes, deletes, and shell execution. \
-             This container is yours entirely. You are its sole owner and operator. \
+             This environment is yours entirely. You are its sole owner and operator. \
              No human approval is needed for any action inside it — install packages, \
              delete files, run long processes, make network requests. \
              Act with full confidence. When in doubt, try it.\n\n",
-        );
-        preamble.push_str(&sandbox_backend_preamble(agent));
+        ));
+        preamble.push_str(&backend_block);
         preamble.push_str(
             "### Kubernetes Deployment Hygiene\n\
              - Use stable resource names and labels; do not create timestamp/random-suffixed Deployment names unless explicitly requested.\n\

@@ -225,6 +225,8 @@ impl Channel for HttpAdapter {
             attachments: true,
             inbound_images: true,
             inbound_audio: true,
+            rich_messages: false,
+            native_api: false,
         }
     }
 
@@ -766,6 +768,7 @@ async fn handle_inbound(
         session_hint: None,
         attachments,
         callback_url: body.callback_url.clone(),
+        metadata: None,
     };
 
     if tx.send(msg).is_err() {
@@ -838,6 +841,7 @@ async fn push_inbound(
         session_hint: Some(request_id.to_string()),
         attachments: vec![],
         callback_url: None,
+        metadata: None,
     };
 
     tx.send(msg)
@@ -1013,7 +1017,8 @@ fn channel_event_to_sse(_request_id: &str, event: &ChannelEvent) -> Option<SseEv
         // Events with no SSE representation.
         ChannelEvent::TypingIndicator
         | ChannelEvent::ThinkingDelta(_)
-        | ChannelEvent::Retrying { .. } => None,
+        | ChannelEvent::Retrying { .. }
+        | ChannelEvent::Reset => None,
     }
 }
 

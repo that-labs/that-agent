@@ -129,6 +129,10 @@ pub enum ToolRequest {
         message: String,
         timeout: Option<u64>,
     },
+    // Image
+    FsImageRead {
+        path: String,
+    },
     // Exec
     ShellExec {
         command: String,
@@ -181,7 +185,9 @@ impl ToolResponse {
 /// Map a tool request to its policy name for enforcement.
 fn policy_name_for(request: &ToolRequest) -> &'static str {
     match request {
-        ToolRequest::FsLs { .. } | ToolRequest::FsCat { .. } => "fs_read",
+        ToolRequest::FsLs { .. } | ToolRequest::FsCat { .. } | ToolRequest::FsImageRead { .. } => {
+            "fs_read"
+        }
         ToolRequest::FsWrite { .. } | ToolRequest::FsMkdir { .. } => "fs_write",
         ToolRequest::FsRm { .. } => "fs_delete",
         ToolRequest::CodeRead { .. }
@@ -586,6 +592,22 @@ pub fn execute_tool(
         ToolRequest::SearchFetch { urls, mode } => {
             match crate::tools::search::fetch(urls, mode, max_tokens) {
                 Ok(result) => ToolResponse::from_budgeted(&result),
+                Err(e) => ToolResponse::error(&e.to_string()),
+            }
+        }
+        ToolRequest::FsImageRead { path } => {
+            match crate::tools::fs::image::image_read(std::path::Path::new(path)) {
+                Ok(result) => {
+                    let meta = crate::tools::fs::image::ImageReadMeta::from(&result);
+                    let output = serde_json::to_value(&meta).unwrap_or_default();
+                    ToolResponse {
+                        success: true,
+                        output,
+                        tokens: 0,
+                        original_tokens: 0,
+                        truncated: false,
+                    }
+                }
                 Err(e) => ToolResponse::error(&e.to_string()),
             }
         }

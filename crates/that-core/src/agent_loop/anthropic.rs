@@ -339,14 +339,38 @@ pub fn messages_to_anthropic(messages: &[Message], prompt_caching: bool) -> serd
                 let mut tool_results: Vec<serde_json::Value> = Vec::new();
                 while i < messages.len() {
                     if let Message::Tool {
-                        call_id, content, ..
+                        call_id,
+                        content,
+                        images,
+                        ..
                     } = &messages[i]
                     {
-                        tool_results.push(serde_json::json!({
-                            "type": "tool_result",
-                            "tool_use_id": call_id,
-                            "content": content,
-                        }));
+                        if images.is_empty() {
+                            tool_results.push(serde_json::json!({
+                                "type": "tool_result",
+                                "tool_use_id": call_id,
+                                "content": content,
+                            }));
+                        } else {
+                            // Build array content with image block(s) + text
+                            let mut blocks: Vec<serde_json::Value> = images
+                                .iter()
+                                .map(|(data, mime)| {
+                                    let b64 =
+                                        base64::prelude::BASE64_STANDARD.encode(data);
+                                    serde_json::json!({
+                                        "type": "image",
+                                        "source": { "type": "base64", "media_type": mime, "data": b64 }
+                                    })
+                                })
+                                .collect();
+                            blocks.push(serde_json::json!({ "type": "text", "text": content }));
+                            tool_results.push(serde_json::json!({
+                                "type": "tool_result",
+                                "tool_use_id": call_id,
+                                "content": blocks,
+                            }));
+                        }
                         i += 1;
                     } else {
                         break;
