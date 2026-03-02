@@ -1,22 +1,5 @@
 use crate::cli::{self, PluginCommands};
 
-fn api_key_env_var_for_provider(provider: &str) -> anyhow::Result<&'static str> {
-    match provider {
-        "openai" => Ok("OPENAI_API_KEY"),
-        "anthropic" => {
-            // Prefer OAuth token when available.
-            if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok() {
-                Ok("CLAUDE_CODE_OAUTH_TOKEN")
-            } else {
-                Ok("ANTHROPIC_API_KEY")
-            }
-        }
-        "openrouter" => Ok("OPENROUTER_API_KEY"),
-        other => anyhow::bail!(
-            "Unsupported provider '{other}'. Use 'anthropic', 'openai', or 'openrouter'."
-        ),
-    }
-}
 
 fn required_agent_name_or_exit(
     cli: &cli::Cli,
@@ -119,21 +102,26 @@ pub async fn handle_agent_orchestration_command(cli: &cli::Cli) -> anyhow::Resul
                         defaults.max_turns = max_turns;
                     }
 
-                    let env_key = api_key_env_var_for_provider(&defaults.provider)?;
-                    let resolved_api_key = if let Some(value) =
+                    // If --api-key was passed, inject it into the correct env var so
+                    // api_key_for_provider (called later in execution) picks it up.
+                    if let Some(value) =
                         api_key.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty())
                     {
-                        value.to_string()
+                        let env_key = match defaults.provider.as_str() {
+                            "anthropic" => "ANTHROPIC_API_KEY",
+                            "openai" => "OPENAI_API_KEY",
+                            "openrouter" => "OPENROUTER_API_KEY",
+                            other => anyhow::bail!(
+                                "Unsupported provider '{other}'. Use 'anthropic', 'openai', or 'openrouter'."
+                            ),
+                        };
+                        std::env::set_var(env_key, value);
                     } else {
-                        std::env::var(env_key).map_err(|_| {
-                            anyhow::anyhow!(
-                                "Missing API key for provider '{}'. Pass --api-key or set {} in environment/.env.",
-                                defaults.provider,
-                                env_key
-                            )
-                        })?
-                    };
-                    std::env::set_var(env_key, resolved_api_key);
+                        // Validate a key is available before proceeding.
+                        that_core::orchestration::execution::api_key_for_provider(
+                            &defaults.provider,
+                        )?;
+                    }
 
                     that_core::orchestration::init_workspace(
                         &ws,
