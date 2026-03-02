@@ -237,7 +237,7 @@ echo ""
 
 # Agent name
 while true; do
-  read -rp "  Agent name (lowercase, no spaces) [default: my-agent]: " AGENT_NAME
+  read -rp "  Agent name (lowercase, no spaces) [default: my-agent]: " AGENT_NAME < /dev/tty
   AGENT_NAME="${AGENT_NAME:-my-agent}"
   if [[ "${AGENT_NAME}" =~ ^[a-z][a-z0-9-]*$ ]]; then
     break
@@ -251,7 +251,7 @@ echo "  Describe your agent in a few sentences. What is its purpose? What should
 echo "  focus on? What tone or personality do you want it to have?"
 echo "  (This is passed to the LLM at first boot to generate Soul.md and Identity.md.)"
 echo ""
-read -rp "  Agent description: " AGENT_DESCRIPTION
+read -rp "  Agent description: " AGENT_DESCRIPTION < /dev/tty
 if [[ -z "${AGENT_DESCRIPTION}" ]]; then
   AGENT_DESCRIPTION="A general-purpose autonomous agent that helps with software development, research, and task automation."
   warn "No description provided. Using default."
@@ -263,7 +263,7 @@ echo "  LLM provider:"
 echo "    1) Anthropic (Claude)"
 echo "    2) OpenAI"
 echo "    3) OpenRouter"
-read -rp "  Choose [1]: " PROVIDER_CHOICE
+read -rp "  Choose [1]: " PROVIDER_CHOICE < /dev/tty
 case "${PROVIDER_CHOICE:-1}" in
   1|"") LLM_PROVIDER="anthropic" ;;
   2)    LLM_PROVIDER="openai"    ;;
@@ -273,7 +273,7 @@ esac
 
 # API key
 echo ""
-read -rsp "  ${LLM_PROVIDER} API key: " LLM_API_KEY
+read -rsp "  ${LLM_PROVIDER} API key: " LLM_API_KEY < /dev/tty
 echo ""
 if [[ -z "${LLM_API_KEY}" ]]; then
   die "API key is required."
@@ -286,14 +286,14 @@ case "${LLM_PROVIDER}" in
   openrouter) DEFAULT_MODEL=""                   ;;
 esac
 echo ""
-read -rp "  Model override (leave blank for default: ${DEFAULT_MODEL:-provider default}): " AGENT_MODEL
+read -rp "  Model override (leave blank for default: ${DEFAULT_MODEL:-provider default}): " AGENT_MODEL < /dev/tty
 AGENT_MODEL="${AGENT_MODEL:-${DEFAULT_MODEL}}"
 
 # Telegram (optional)
 echo ""
-read -rp "  Telegram bot token (optional, press Enter to skip): " TELEGRAM_BOT_TOKEN
+read -rp "  Telegram bot token (optional, press Enter to skip): " TELEGRAM_BOT_TOKEN < /dev/tty
 if [[ -n "${TELEGRAM_BOT_TOKEN}" ]]; then
-  read -rp "  Telegram chat ID: " TELEGRAM_CHAT_ID
+  read -rp "  Telegram chat ID: " TELEGRAM_CHAT_ID < /dev/tty
   if [[ -z "${TELEGRAM_CHAT_ID}" ]]; then
     warn "No chat ID provided — Telegram channel will not be configured."
     TELEGRAM_BOT_TOKEN=""
@@ -322,7 +322,7 @@ echo "  Telegram:     ${TELEGRAM_BOT_TOKEN:+configured}${TELEGRAM_BOT_TOKEN:-not
 echo "  Image:        ${AGENT_IMAGE}"
 echo "  Overlay dir:  ${OVERLAY_DIR}"
 echo ""
-read -rp "  Proceed with deployment? [Y/n]: " CONFIRM
+read -rp "  Proceed with deployment? [Y/n]: " CONFIRM < /dev/tty
 case "${CONFIRM:-y}" in
   [Yy]*) ;;
   *) info "Aborted."; exit 0 ;;
@@ -333,7 +333,7 @@ header "Step 4 — Container image"
 
 if [[ -f "${REPO_ROOT}/build.sh" ]] && command -v docker &>/dev/null; then
   echo ""
-  read -rp "  Local repo detected. Build image from source? [y/N]: " BUILD_LOCAL
+  read -rp "  Local repo detected. Build image from source? [y/N]: " BUILD_LOCAL < /dev/tty
   case "${BUILD_LOCAL:-n}" in
     [Yy]*)
       info "Building that-agent image from source…"
