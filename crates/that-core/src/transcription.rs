@@ -22,6 +22,9 @@ pub async fn transcribe(api_key: &str, data: &[u8], mime_type: &str) -> Result<S
         .context("whisper request failed")?;
 
     let json: serde_json::Value = resp.json().await.context("whisper response parse")?;
+    if let Some(err_msg) = json["error"]["message"].as_str() {
+        anyhow::bail!("{err_msg}");
+    }
     json["text"]
         .as_str()
         .map(|s| s.to_string())

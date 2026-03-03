@@ -1218,8 +1218,27 @@ async fn run_agent_for_sender(
                             enriched_task =
                                 format!("[Voice transcript]: {transcript}\n\n{enriched_task}");
                         }
-                        Err(e) => warn!("transcription failed: {e:#}"),
+                        Err(e) => {
+                            warn!("transcription failed: {e:#}");
+                            router
+                                .notify_channel(
+                                    &channel_id,
+                                    &format!("Voice transcription failed: {e:#}"),
+                                    Some(&route_target),
+                                )
+                                .await;
+                            return;
+                        }
                     }
+                } else {
+                    router
+                        .notify_channel(
+                            &channel_id,
+                            "Voice messages require OPENAI_API_KEY to be set.",
+                            Some(&route_target),
+                        )
+                        .await;
+                    return;
                 }
             }
             that_channels::InboundAttachment::Image { data, mime_type } => {

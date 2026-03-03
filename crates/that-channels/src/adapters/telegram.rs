@@ -14,6 +14,9 @@ use crate::config::AdapterConfig;
 /// Maximum number of completed tools to show in the status message.
 const TOOL_STATUS_MAX_HISTORY: usize = 8;
 
+/// Minimum milliseconds between `sendMessageDraft` calls per stream (throttle).
+const DRAFT_THROTTLE_MS: u128 = 300;
+
 /// Tracks a single editable tool-status message per chat.
 ///
 /// Instead of sending one Telegram message per tool call, all tool calls
@@ -55,6 +58,8 @@ impl ToolStatusTracker {
 struct TelegramState {
     /// Per-run/per-target stream buffers; keyed by `stream_key(...)`.
     token_buffers: HashMap<String, String>,
+    /// Timestamp of the last `sendMessageDraft` call per stream key (for throttling).
+    draft_last_sent: HashMap<String, std::time::Instant>,
     /// Last processed update ID for long-polling offset tracking.
     update_offset: i64,
     /// Pending ask_human replies keyed by chat/sender (see `ask_key`).
@@ -115,6 +120,7 @@ impl TelegramAdapter {
             http: reqwest::Client::new(),
             state: Mutex::new(TelegramState {
                 token_buffers: HashMap::new(),
+                draft_last_sent: HashMap::new(),
                 update_offset: 0,
                 pending_asks: HashMap::new(),
                 allowed_chats,
@@ -290,6 +296,27 @@ impl TelegramAdapter {
             anyhow::bail!("Telegram sendMessage failed: {desc}");
         }
         Ok(resp["result"]["message_id"].as_i64())
+    }
+
+    /// Stream a partial draft message to a DM chat via `sendMessageDraft` (Bot API 9.3+).
+    ///
+    /// Fire-and-forget: errors are non-fatal — the final `sendMessage` always commits the result.
+    /// Only valid for private chats (positive chat ID); groups silently ignore this.
+    async fn send_message_draft(&self, chat_id: &str, text: &str) -> Result<()> {
+        let body = serde_json::json!({ "chat_id": chat_id, "text": text });
+        let resp = self
+            .http
+            .post(self.api_url("sendMessageDraft"))
+            .json(&body)
+            .send()
+            .await
+            .context("sendMessageDraft request failed")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("sendMessageDraft failed ({status}): {body}");
+        }
+        Ok(())
     }
 
     /// Edit an existing Telegram message in-place using `editMessageText`.
@@ -604,12 +631,37 @@ impl Channel for TelegramAdapter {
         let handle = match event {
             ChannelEvent::StreamToken(token) => {
                 // Buffer tokens — send as one message on Done.
+                // Also push live draft updates via sendMessageDraft for DM chats (Bot API 9.3+).
+                let is_dm = chat_id.parse::<i64>().map(|id| id > 0).unwrap_or(false);
                 let mut state = self.state.lock().await;
+                // Push token first — entry borrow ends at the semicolon.
                 state
                     .token_buffers
-                    .entry(stream_key)
+                    .entry(stream_key.clone())
                     .or_default()
                     .push_str(token);
+                let draft_text = if is_dm {
+                    let now = std::time::Instant::now();
+                    let due = state
+                        .draft_last_sent
+                        .get(&stream_key)
+                        .map(|t| now.duration_since(*t).as_millis() >= DRAFT_THROTTLE_MS)
+                        .unwrap_or(true);
+                    if due {
+                        state.draft_last_sent.insert(stream_key.clone(), now);
+                        state.token_buffers.get(&stream_key).cloned()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                drop(state);
+                if let Some(text) = draft_text {
+                    if let Err(e) = self.send_message_draft(&chat_id, &text).await {
+                        debug!(channel = %self.id, "sendMessageDraft failed (non-fatal): {e:#}");
+                    }
+                }
                 MessageHandle::default()
             }
             ChannelEvent::TypingIndicator => {
@@ -624,6 +676,7 @@ impl Channel for TelegramAdapter {
                 // New run starting — discard any stale state from an aborted previous run.
                 let mut state = self.state.lock().await;
                 state.token_buffers.remove(&stream_key);
+                state.draft_last_sent.remove(&stream_key);
                 state.tool_status.remove(&chat_id);
                 MessageHandle::default()
             }
@@ -632,6 +685,7 @@ impl Channel for TelegramAdapter {
                 {
                     let mut state = self.state.lock().await;
                     state.token_buffers.remove(&stream_key);
+                    state.draft_last_sent.remove(&stream_key);
                 }
                 // Consolidate all tool calls into a single editable status message.
                 // Each new ToolCall edits the message to show the current tool
