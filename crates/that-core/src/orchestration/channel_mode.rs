@@ -334,6 +334,17 @@ pub async fn run_listen(
         let plugin_dir_hb = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
             .join(".that-agent")
             .join("plugins");
+        // Dedicated liveness ticker — independent of heartbeat work so long-running
+        // agent runs don't starve the K8s liveness probe.
+        tokio::spawn(async {
+            let mut liveness = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                liveness.tick().await;
+                let _ = tokio::fs::File::create("/tmp/that-agent-alive").await;
+            }
+        });
+
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -342,9 +353,6 @@ pub async fn run_listen(
                 .unwrap_or_else(std::time::Instant::now);
             loop {
                 ticker.tick().await;
-
-                // Touch liveness file so K8s knows the event loop is alive.
-                let _ = tokio::fs::File::create("/tmp/that-agent-alive").await;
 
                 // Reconcile plugin deploy status every 60s.
                 if last_reconcile.elapsed() >= std::time::Duration::from_secs(60) {
@@ -645,8 +653,22 @@ pub async fn run_listen(
     let sender_locks = SenderRunLocks::default();
     let active_sender_runs: ActiveSenderRuns = Arc::default();
     let sender_run_seq = Arc::new(AtomicU64::new(1));
+    // ── SIGTERM / SIGINT handler ───────────────────────────────────────────
+    // Without this, K8s pod termination (SIGTERM) or OOM-adjacent kills leave
+    // no trace in logs, making crashes look "silent".
+    let shutdown_signal = async {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("failed to register SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => error!("Received SIGTERM — shutting down"),
+            _ = sigint.recv() => error!("Received SIGINT — shutting down"),
+        }
+    };
+
     let inbound_router = that_channels::InboundRouter::new(inbound_rx);
-    inbound_router
+    let inbound_loop = inbound_router
         .run_concurrent(move |msg| {
             let router = Arc::clone(&router);
             let container = container.clone();
@@ -1048,8 +1070,16 @@ pub async fn run_listen(
                 drop(sender_guard);
                 evict_sender_lock_if_idle(&sender_locks, &sender_key, &sender_lock).await;
             }
-        })
-        .await;
+        });
+
+    tokio::select! {
+        _ = inbound_loop => {
+            error!("Inbound message loop exited unexpectedly — all channel senders dropped?");
+        }
+        _ = shutdown_signal => {
+            // Logged inside the signal handler above.
+        }
+    }
 
     Ok(())
 }
