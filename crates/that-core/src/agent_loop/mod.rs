@@ -47,6 +47,12 @@ const TRACE_PREVIEW_CHARS: usize = 400;
 const TRACE_LLM_IO_CHARS: usize = 4_000;
 /// Max chars logged for tool call args/results in app logs (compact single-line).
 const TOOL_LOG_PREVIEW_CHARS: usize = 120;
+/// Prefix injected into steering hint messages so the LLM can identify them.
+pub const STEERING_HINT_PREFIX: &str = "[hint]:";
+
+/// Shared type for the optional mid-run steering queue.
+pub type SteeringQueue = Arc<Mutex<Vec<String>>>;
+
 /// Hard ceiling on tool result chars allowed into conversation context.
 /// ~8K tokens at ~4 chars/token. Generous for structured data, fatal for base64.
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
@@ -95,6 +101,8 @@ pub struct LoopConfig {
     pub tool_ctx: ToolContext,
     /// Images to attach to the current turn's user message (data, mime_type).
     pub images: Vec<(Vec<u8>, String)>,
+    /// Optional steering queue: mid-run hints from the human, drained each turn.
+    pub steering: Option<SteeringQueue>,
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -119,6 +127,20 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
         };
 
     for turn in 0..config.max_turns {
+        // Drain steering hints queued by the human between turns.
+        if let Some(ref queue) = config.steering {
+            let hints: Vec<String> = {
+                let mut q = queue.lock().await;
+                q.drain(..).collect()
+            };
+            if !hints.is_empty() {
+                let merged = hints.join("\n");
+                messages.push(Message::user(format!("{STEERING_HINT_PREFIX} {merged}")));
+                hook.on_steering_picked_up().await;
+                debug!("Injected {} steering hint(s)", hints.len());
+            }
+        }
+
         info!(
             turn = turn + 1,
             max_turns = config.max_turns,

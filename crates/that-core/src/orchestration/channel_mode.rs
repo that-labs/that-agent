@@ -5,7 +5,7 @@ use anyhow::Result;
 use chrono::{Local, Utc};
 use tracing::{debug, error, info, warn};
 
-use crate::agent_loop::Message;
+use crate::agent_loop::{Message, SteeringQueue};
 use crate::config::{AgentDef, WorkspaceConfig};
 use crate::heartbeat;
 use crate::session::{
@@ -54,6 +54,7 @@ pub(super) type SenderRunLocks =
 pub(super) struct ActiveSenderRun {
     run_id: u64,
     abort: tokio::task::AbortHandle,
+    steering: SteeringQueue,
 }
 pub(super) type ActiveSenderRuns =
     Arc<tokio::sync::Mutex<std::collections::HashMap<String, ActiveSenderRun>>>;
@@ -180,13 +181,17 @@ pub async fn run_listen(
         agent.name,
     );
 
-    // Validate each channel's config (token check, connectivity) before opening listeners.
+    // Initialize immediate channels (HTTP gateway) — deferred channels (Telegram, etc.)
+    // run after the readiness probe so external API calls don't block K8s startup.
     router.initialize().await;
 
     router.start_listeners().await?;
 
-    // Signal K8s readiness — channels are initialized and listening.
+    // Signal K8s readiness — gateway is bound and listening.
     let _ = std::fs::File::create("/tmp/that-agent-ready");
+
+    // Now initialize deferred channels (external API validation: Telegram getMe, etc.).
+    router.initialize_deferred().await;
 
     // If unbootstrapped, greet on all channels so the user knows to start the ceremony.
     if ws_files.needs_bootstrap() {
@@ -573,6 +578,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&route_registry_hb)),
                         skill_roots_hb.clone(),
                         None,
+                        None,
                     )
                     .await;
                 }
@@ -627,6 +633,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&channel_registry_hb)),
                         Some(Arc::clone(&route_registry_hb)),
                         skill_roots_hb.clone(),
+                        None,
                         None,
                     )
                     .await;
@@ -695,6 +702,20 @@ pub async fn run_listen(
                         .await;
                     return;
                 }
+                // ── Mid-turn steering: if a run is active for this sender,
+                // push the message as a hint instead of blocking on the lock.
+                if parsed_slash.is_none() && hot.read().await.agent.steering {
+                    let steering_arc = {
+                        let runs = active_sender_runs.lock().await;
+                        runs.get(&sender_key).map(|r| Arc::clone(&r.steering))
+                    };
+                    if let Some(q) = steering_arc {
+                        q.lock().await.push(msg.text);
+                        debug!(sender = %sender_key, "Enqueued steering hint for active run");
+                        return;
+                    }
+                }
+
                 let sender_lock = {
                     let mut locks = sender_locks.lock().await;
                     locks
@@ -1062,6 +1083,8 @@ async fn run_agent_for_sender_tracked(
     let active_run_id = run_seq.fetch_add(1, Ordering::Relaxed);
     let sender_key_for_task = sender_key.clone();
     let sender_key_for_cleanup = sender_key.clone();
+    let steering: SteeringQueue = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let steering_for_task = Arc::clone(&steering);
 
     let run_task = tokio::spawn(async move {
         run_agent_for_sender(
@@ -1085,6 +1108,7 @@ async fn run_agent_for_sender_tracked(
             route_registry,
             skill_roots,
             callback_url,
+            Some(steering_for_task),
         )
         .await;
     });
@@ -1096,6 +1120,7 @@ async fn run_agent_for_sender_tracked(
             ActiveSenderRun {
                 run_id: active_run_id,
                 abort: abort_handle,
+                steering,
             },
         );
     }
@@ -1135,6 +1160,7 @@ async fn run_agent_for_sender(
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
     callback_url: Option<String>,
+    steering: Option<SteeringQueue>,
 ) {
     struct TypingTaskGuard(Option<tokio::task::JoinHandle<()>>);
     impl TypingTaskGuard {
@@ -1340,6 +1366,7 @@ async fn run_agent_for_sender(
     } else {
         Some(route_target.clone())
     };
+    let steering_for_run = steering.filter(|_| agent.steering);
     let run_result = execute_agent_run_channel(
         &agent,
         container,
@@ -1358,6 +1385,7 @@ async fn run_agent_for_sender(
         channel_registry,
         route_registry,
         skill_roots,
+        steering_for_run,
     )
     .await;
 

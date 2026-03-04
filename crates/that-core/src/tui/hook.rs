@@ -77,4 +77,8 @@ impl LoopHook for TuiHook {
             result: result_json.to_string(),
         });
     }
+
+    async fn on_steering_picked_up(&self) {
+        let _ = self.tx.send(TuiEvent::SteeringPickedUp);
+    }
 }

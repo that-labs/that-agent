@@ -31,6 +31,9 @@ pub trait LoopHook: Send + Sync {
 
     /// Called after a tool has returned its result.
     async fn on_tool_result(&self, name: &str, call_id: &str, result_json: &str);
+
+    /// Called when the loop drains queued steering hints (default: no-op).
+    async fn on_steering_picked_up(&self) {}
 }
 
 /// A no-op hook used as a default / in tests.

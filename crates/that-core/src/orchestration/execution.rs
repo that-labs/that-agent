@@ -127,6 +127,7 @@ pub async fn execute_agent_run_streaming(
                 state_dir: agent_state_dir(agent),
             },
             images: vec![],
+            steering: None,
         };
         let hook = AgentHook { debug };
         let result = agent_loop::run(&config, &task_for_model, &hook).await;
@@ -248,6 +249,7 @@ pub async fn execute_agent_run_eval(
                 state_dir: agent_state_dir(agent),
             },
             images: vec![],
+            steering: None,
         };
         let hook = EvalHook::new();
         let result = agent_loop::run(&config, &task_for_model, &hook).await;
@@ -558,6 +560,7 @@ pub async fn execute_agent_run_channel(
                 state_dir: agent_state_dir(agent),
             },
             images: images.clone(),
+            steering: None,
         };
         let task_for_attempt = if empty_response_retries > 0 {
             build_empty_channel_retry_task(&task_for_model)

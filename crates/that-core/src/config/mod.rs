@@ -92,6 +92,14 @@ pub struct AgentDef {
     /// When true, inherit the parent agent's workspace directory instead of creating an isolated one.
     #[serde(default)]
     pub inherit_workspace: bool,
+
+    /// Enable mid-turn steering hints from the human (default: true).
+    #[serde(default = "default_true")]
+    pub steering: bool,
+}
+
+pub(crate) fn default_true() -> bool {
+    true
 }
 
 impl Default for AgentDef {
@@ -110,6 +118,7 @@ impl Default for AgentDef {
             parent: None,
             role: None,
             inherit_workspace: false,
+            steering: true,
         }
     }
 }
@@ -196,6 +205,16 @@ impl AgentDef {
                 "1" | "true" | "yes" | "on"
             ) {
                 self.inherit_workspace = true;
+            }
+        }
+
+        // ── Fallback default: steering ──
+        if !file_has("steering") {
+            if let Ok(v) = std::env::var("THAT_AGENT_STEERING") {
+                self.steering = matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                );
             }
         }
     }

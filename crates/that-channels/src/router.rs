@@ -89,15 +89,28 @@ impl ChannelRouter {
             })
     }
 
-    /// Validate each channel's configuration and establish connections.
+    /// Initialize channels that do NOT have `deferred_start` set.
     ///
-    /// Calls `on_start()` on every channel concurrently. Failures are logged as
-    /// warnings but do not abort startup — a misconfigured adapter should not
-    /// prevent other channels from working.
+    /// Runs `on_start()` concurrently on all immediate channels (e.g. HTTP gateway).
+    /// Deferred channels (external APIs like Telegram) are skipped here and
+    /// should be initialized later via [`Self::initialize_deferred`].
     pub async fn initialize(&self) {
+        self.initialize_filtered(false).await;
+    }
+
+    /// Initialize channels that have `deferred_start` set.
+    ///
+    /// Call this after the readiness probe fires so that slow external API
+    /// validation (DNS, TLS, token checks) does not block K8s startup.
+    pub async fn initialize_deferred(&self) {
+        self.initialize_filtered(true).await;
+    }
+
+    async fn initialize_filtered(&self, deferred: bool) {
         let channels: Vec<_> = self.channels.read().await.clone();
         let futs: Vec<_> = channels
             .iter()
+            .filter(|ch| ch.capabilities().deferred_start == deferred)
             .map(|ch| {
                 let ch = Arc::clone(ch);
                 async move {

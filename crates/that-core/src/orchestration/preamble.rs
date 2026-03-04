@@ -557,6 +557,13 @@ pub fn build_preamble(
     // Operator-level overrides that take precedence over Agents.md. Useful for
     // quick per-agent customizations without requiring a full file edit.
 
+    if agent.steering {
+        let prefix = crate::agent_loop::STEERING_HINT_PREFIX;
+        preamble.push_str(&format!(
+            "`{prefix}` messages are soft mid-run nudges from the human — consider them but don't redirect unless warranted.\n\n",
+        ));
+    }
+
     if let Some(user_preamble) = &agent.preamble {
         preamble.push_str("## Additional Instructions\n");
         preamble.push_str(user_preamble);

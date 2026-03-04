@@ -48,8 +48,13 @@ pub async fn prepare_container(
     sandbox: bool,
 ) -> Result<Option<String>> {
     // Always install skills on the host — ReadSkillTool reads from the host regardless of mode.
-    default_skills::install_default_skills(&agent.name);
-    install_that_tools_skills_local(&agent.name);
+    // Run both installs concurrently to reduce PVC I/O time on network storage.
+    let name1 = agent.name.clone();
+    let name2 = agent.name.clone();
+    let (_, _) = tokio::join!(
+        tokio::task::spawn_blocking(move || default_skills::install_default_skills(&name1)),
+        tokio::task::spawn_blocking(move || install_that_tools_skills_local(&name2)),
+    );
 
     if sandbox {
         info!(agent = %agent.name, "Preparing Docker sandbox container");
@@ -62,13 +67,19 @@ pub async fn prepare_container(
 
 /// Install that-tools skills in the agent skills directory.
 ///
-/// This runs in-process (no shelling out to `that`) so it is deterministic even
-/// when PATH contains an older binary. A legacy skill directory is removed
-/// during install migration.
+/// Skips the write when the installed version marker already matches the
+/// current binary — avoids redundant PVC writes on network-attached storage.
 pub fn install_that_tools_skills_local(agent_name: &str) {
     let Some(skills_dir) = skills::skills_dir_local(agent_name) else {
         return;
     };
+
+    // Version gate — same pattern as install_default_skills.
+    let version = env!("CARGO_PKG_VERSION");
+    let marker = skills_dir.join(".that-tools-installed-version");
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(version) {
+        return;
+    }
 
     fn legacy_skill_dir_name() -> String {
         ['o', 'w', 'a', 'n', 'a', 'i'].iter().collect()
@@ -93,7 +104,10 @@ pub fn install_that_tools_skills_local(agent_name: &str) {
     }
 
     match that_tools::tools::skills::install(None, Some(&skills_dir), true) {
-        Ok(_) => info!(agent = %agent_name, "Installed that-tools skills locally"),
+        Ok(_) => {
+            let _ = std::fs::write(&marker, version);
+            info!(agent = %agent_name, "Installed that-tools skills locally");
+        }
         Err(err) => tracing::warn!(
             agent = %agent_name,
             error = %err,

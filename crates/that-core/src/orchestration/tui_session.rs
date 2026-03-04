@@ -112,6 +112,11 @@ pub async fn run_chat_tui(
     let mut agent = agent.clone();
     let mut history: Vec<Message> = Vec::new();
     let mut agent_handle: Option<tokio::task::JoinHandle<Result<String>>> = None;
+    let steering_queue: Option<agent_loop::SteeringQueue> = if agent.steering {
+        Some(std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())))
+    } else {
+        None
+    };
     let mut tick_interval = tokio::time::interval(std::time::Duration::from_millis(150));
     let mut stats = tui::UsageStats::new();
     // Per-turn tool call/result pairs collected for history reconstruction.
@@ -474,6 +479,7 @@ pub async fn run_chat_tui(
                                                 let session_id_for_trace = session_id.clone();
                                                 let run_id_for_trace = run_id.clone();
                                                 let sr = skill_roots.clone();
+                                    let steer_q = steering_queue.clone();
 
                                                 history.push(Message::user(&task_for_model));
 
@@ -492,6 +498,7 @@ pub async fn run_chat_tui(
                                                                 Some(&session_id_for_trace),
                                                                 Some(&run_id_for_trace),
                                                                 sr,
+                                                                steer_q.clone(),
                                                             ),
                                                         )
                                                         .catch_unwind()
@@ -551,6 +558,7 @@ pub async fn run_chat_tui(
                                                         let session_id_for_trace = session_id.clone();
                                                         let run_id_for_trace = run_id.clone();
                                                         let sr = skill_roots.clone();
+                                    let steer_q = steering_queue.clone();
 
                                                         history.push(Message::user(&task_for_model));
 
@@ -569,6 +577,7 @@ pub async fn run_chat_tui(
                                                                         Some(&session_id_for_trace),
                                                                         Some(&run_id_for_trace),
                                                                         sr,
+                                                                        steer_q.clone(),
                                                                     ),
                                                                 )
                                                                 .catch_unwind()
@@ -648,6 +657,7 @@ pub async fn run_chat_tui(
                                     let session_id_for_trace = session_id.clone();
                                     let run_id_for_trace = run_id.clone();
                                     let sr = skill_roots.clone();
+                                    let steer_q = steering_queue.clone();
 
                                     history.push(Message::user(&task_text));
 
@@ -666,6 +676,7 @@ pub async fn run_chat_tui(
                                                     Some(&session_id_for_trace),
                                                     Some(&run_id_for_trace),
                                                     sr,
+                                                    steer_q.clone(),
                                                 ),
                                             )
                                             .catch_unwind()
@@ -810,6 +821,14 @@ pub async fn run_chat_tui(
                             }
                             tui::KeyAction::SubmitHumanAsk(response) => {
                                 app.send_human_ask_response(response);
+                            }
+                            tui::KeyAction::Steer(text) => {
+                                if let Some(ref q) = steering_queue {
+                                    if let Ok(mut g) = q.try_lock() {
+                                        g.push(text.clone());
+                                    }
+                                    app.push_hint(&text);
+                                }
                             }
                             tui::KeyAction::InterruptRun => {
                                 if let Some(handle) = agent_handle.take() {
@@ -1179,6 +1198,7 @@ pub async fn execute_agent_run_tui(
     session_id_for_trace: Option<&str>,
     run_id_for_trace: Option<&str>,
     skill_roots: Vec<std::path::PathBuf>,
+    steering: Option<agent_loop::SteeringQueue>,
 ) -> Result<String> {
     if let Some(sid) = session_id_for_trace {
         tracing::Span::current().record("session.id", sid);
@@ -1236,6 +1256,7 @@ pub async fn execute_agent_run_tui(
                     .map(|h| h.join(".that-agent").join("agents").join(&agent.name)),
             },
             images: vec![],
+            steering: steering.clone(),
         };
         let result = agent_loop::run(&config, &task_for_model, &hook).await;
 

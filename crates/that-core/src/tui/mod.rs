@@ -170,6 +170,8 @@ pub enum TuiEvent {
     CompactDone { message: String, summary: String },
     /// Session compaction failed.
     CompactError(String),
+    /// The agent loop picked up queued steering hints.
+    SteeringPickedUp,
 }
 
 /// Which mode the TUI input area is currently in.
@@ -203,6 +205,7 @@ enum ChatLine {
     ToolResult(String),
     Error(String),
     System(String),
+    Hint { text: String, picked_up: bool },
 }
 
 /// What the key handler wants the main loop to do.
@@ -218,6 +221,7 @@ pub enum KeyAction {
         kind: ModalKind,
         detail: String,
     },
+    Steer(String),
     InterruptRun,
     Quit,
     None,
@@ -521,6 +525,14 @@ impl<'a> ChatApp<'a> {
                             .add_modifier(Modifier::ITALIC),
                     )));
                 }
+                ChatLine::Hint { text, picked_up } => {
+                    let icon = if *picked_up { "\u{2705}" } else { "\u{23f3}" };
+                    let prefix = crate::agent_loop::STEERING_HINT_PREFIX;
+                    lines.push(Line::from(Span::styled(
+                        format!("{icon} {prefix} {text}"),
+                        Style::default().fg(Color::Cyan),
+                    )));
+                }
             }
             lines.push(Line::from(""));
         }
@@ -726,10 +738,14 @@ impl<'a> ChatApp<'a> {
                             self.set_textarea_content("");
                             return KeyAction::InterruptRun;
                         }
+                        if !text.is_empty() {
+                            self.set_textarea_content("");
+                            return KeyAction::Steer(text);
+                        }
                         KeyAction::None
                     }
                     _ => {
-                        // Allow composing text while streaming so `/stop` can be typed.
+                        // Allow composing text while streaming so `/stop` or hints can be typed.
                         self.textarea.input(key);
                         KeyAction::None
                     }
@@ -1150,6 +1166,9 @@ impl<'a> ChatApp<'a> {
                 self.focused_pane = Pane::Input;
                 self.user_scrolled = false;
             }
+            TuiEvent::SteeringPickedUp => {
+                self.mark_hints_picked_up();
+            }
         }
     }
 
@@ -1216,6 +1235,24 @@ impl<'a> ChatApp<'a> {
     /// Add a system message to the chat history.
     pub fn push_system_message(&mut self, text: &str) {
         self.messages.push(ChatLine::System(text.to_string()));
+    }
+
+    /// Add a queued steering hint to the chat.
+    pub fn push_hint(&mut self, text: &str) {
+        self.messages.push(ChatLine::Hint {
+            text: text.to_string(),
+            picked_up: false,
+        });
+    }
+
+    /// Mark all queued hints as picked up by the agent loop.
+    pub fn mark_hints_picked_up(&mut self) {
+        for msg in self.messages.iter_mut().rev() {
+            match msg {
+                ChatLine::Hint { picked_up, .. } if !*picked_up => *picked_up = true,
+                _ => break, // hints are always at the tail; stop on any other line
+            }
+        }
     }
 
     /// Interrupt the current run and return to normal input mode.

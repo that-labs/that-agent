@@ -133,6 +133,11 @@ pub struct ChannelCapabilities {
     pub rich_messages: bool,
     /// Adapter supports raw platform API passthrough via [`Channel::send_raw`].
     pub native_api: bool,
+    /// `on_start()` requires external network calls (DNS, TLS, API validation).
+    ///
+    /// Channels with this flag are initialized *after* the readiness probe
+    /// fires, so slow external APIs don't block K8s startup.
+    pub deferred_start: bool,
 }
 
 impl Default for ChannelCapabilities {
@@ -149,6 +154,7 @@ impl Default for ChannelCapabilities {
             inbound_audio: false,
             rich_messages: false,
             native_api: false,
+            deferred_start: false,
         }
     }
 }

@@ -508,6 +508,7 @@ impl Channel for TelegramAdapter {
             inbound_audio: true,
             rich_messages: true,
             native_api: true,
+            deferred_start: true,
         }
     }
 
