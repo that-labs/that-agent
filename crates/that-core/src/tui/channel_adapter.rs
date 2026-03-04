@@ -25,9 +25,11 @@ impl that_channels::Channel for TuiChannel {
         &self.id
     }
 
-    fn format_instructions(&self) -> Option<String> {
-        // TUI renders markdown natively; no special instructions needed.
-        None
+    fn capabilities(&self) -> that_channels::ChannelCapabilities {
+        that_channels::ChannelCapabilities {
+            ask_human: true,
+            ..that_channels::ChannelCapabilities::default()
+        }
     }
 
     async fn send_event(

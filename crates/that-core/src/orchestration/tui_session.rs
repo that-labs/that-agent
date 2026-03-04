@@ -479,7 +479,7 @@ pub async fn run_chat_tui(
                                                 let session_id_for_trace = session_id.clone();
                                                 let run_id_for_trace = run_id.clone();
                                                 let sr = skill_roots.clone();
-                                    let steer_q = steering_queue.clone();
+                                                let steer_q = steering_queue.clone();
 
                                                 history.push(Message::user(&task_for_model));
 
@@ -558,7 +558,7 @@ pub async fn run_chat_tui(
                                                         let session_id_for_trace = session_id.clone();
                                                         let run_id_for_trace = run_id.clone();
                                                         let sr = skill_roots.clone();
-                                    let steer_q = steering_queue.clone();
+                                                        let steer_q = steering_queue.clone();
 
                                                         history.push(Message::user(&task_for_model));
 

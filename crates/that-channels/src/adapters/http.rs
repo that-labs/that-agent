@@ -249,6 +249,7 @@ impl Channel for HttpAdapter {
             inbound_images: true,
             inbound_audio: true,
             rich_messages: false,
+            reactions: false,
             native_api: false,
             deferred_start: false,
         }
@@ -336,7 +337,7 @@ impl Channel for HttpAdapter {
         event: &ChannelEvent,
         target: Option<&OutboundTarget>,
     ) -> Result<MessageHandle> {
-        let request_id = target.and_then(|t| t.thread_id.as_deref()).unwrap_or("");
+        let request_id = target.and_then(|t| t.request_id.as_deref()).unwrap_or("");
 
         if request_id.is_empty() {
             // No target request — cannot route the event.
@@ -369,8 +370,8 @@ impl Channel for HttpAdapter {
         target: Option<&OutboundTarget>,
     ) -> Result<String> {
         let request_id = target
-            .and_then(|t| t.thread_id.as_deref())
-            .ok_or_else(|| anyhow::anyhow!("HTTP ask_human: no request_id in target.thread_id"))?;
+            .and_then(|t| t.request_id.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("HTTP ask_human: no request_id in target"))?;
 
         let timeout_secs = timeout.unwrap_or(self.request_timeout_secs);
 

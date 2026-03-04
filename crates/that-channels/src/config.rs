@@ -87,26 +87,20 @@ pub struct AdapterConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    // ── Telegram ──────────────────────────────────────────────────────────────
+    // ── Telegram (legacy top-level — prefer nested `telegram:` in new configs) ──
     /// Telegram Bot API token. Supports `${TELEGRAM_BOT_TOKEN}`.
     pub bot_token: Option<String>,
     /// Telegram chat ID to send messages to.
     pub chat_id: Option<String>,
-
-    // ── Access control ────────────────────────────────────────────────────────
-    /// Additional chat IDs the bot will listen and respond in (Telegram groups, channels, DMs).
-    ///
-    /// The primary `chat_id` is always accepted. Each entry here opens an additional
-    /// chat. Telegram group IDs are negative numbers (e.g. `-1001234567890`).
-    /// If empty, the bot only responds in the primary `chat_id`.
-    /// The agent can manage this list at runtime using its file tools — hot-reloaded within 5s.
+    /// Additional chat IDs the bot will listen and respond in.
     #[serde(default)]
     pub allowed_chats: Vec<String>,
 
-    /// Allowlist of Telegram user IDs permitted to send messages to the agent.
+    // ── Access control ────────────────────────────────────────────────────────
+    /// Allowlist of user IDs permitted to send messages to the agent.
     ///
-    /// Applies across all accepted chats. If empty, all users in accepted chats
-    /// can message the agent. The agent can manage this list at runtime — hot-reloaded within 5s.
+    /// Applies to any adapter that supports sender filtering.
+    /// If empty, all users are accepted.
     #[serde(default)]
     pub allowed_senders: Vec<String>,
 

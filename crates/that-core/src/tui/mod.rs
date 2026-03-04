@@ -1245,12 +1245,12 @@ impl<'a> ChatApp<'a> {
         });
     }
 
-    /// Mark all queued hints as picked up by the agent loop.
+    /// Mark all unpicked hints as picked up by the agent loop.
     pub fn mark_hints_picked_up(&mut self) {
         for msg in self.messages.iter_mut().rev() {
             match msg {
                 ChatLine::Hint { picked_up, .. } if !*picked_up => *picked_up = true,
-                _ => break, // hints are always at the tail; stop on any other line
+                _ => {}
             }
         }
     }

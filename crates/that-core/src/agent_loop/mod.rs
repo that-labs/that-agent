@@ -126,6 +126,10 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             None
         };
 
+    // Turn-budget thresholds — loop-invariant.
+    let budget_half = config.max_turns / 2;
+    let budget_eighty = config.max_turns * 4 / 5;
+
     for turn in 0..config.max_turns {
         // Drain steering hints queued by the human between turns.
         if let Some(ref queue) = config.steering {
@@ -141,14 +145,29 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             }
         }
 
+        // ── Turn-budget reminders ────────────────────────────────────────────
+        // Inject a lightweight system reminder at 50% and 80% of max_turns so the
+        // agent has a live signal of how many turns remain — the baked-in preamble
+        // instruction gets buried under tool history in long runs.
+        let current = turn + 1;
+        if config.max_turns >= 10 && (current == budget_half || current == budget_eighty) {
+            let remaining = config.max_turns - current;
+            messages.push(Message::user(format!(
+                "<system-reminder>\nturn_budget: {current}/{} — {remaining} turns remaining. \
+                 Prioritize completing the current objective. If you have open tasks, \
+                 focus on finishing them before starting new work.\n</system-reminder>",
+                config.max_turns
+            )));
+        }
+
         info!(
-            turn = turn + 1,
+            turn = current,
             max_turns = config.max_turns,
             provider = %config.provider,
             model = %config.model,
-            ">>> turn {}/{}", turn + 1, config.max_turns
+            ">>> turn {current}/{}", config.max_turns
         );
-        let turn_input_preview = llm_input_preview(config, &messages, turn + 1);
+        let turn_input_preview = llm_input_preview(config, &messages, current);
 
         // ── LLM request span ─────────────────────────────────────────────────
         // Emit both GenAI semantic-convention attributes and OpenInference
@@ -161,7 +180,7 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             gen_ai.provider.name = %config.provider,
             gen_ai.request.model = %config.model,
             gen_ai.operation.name = "chat",
-            turn = turn + 1,
+            turn = current,
             gen_ai.prompt = %turn_input_preview,
             gen_ai.completion = tracing::field::Empty,
             llm.provider = %config.provider,
@@ -213,14 +232,13 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
         total_usage = total_usage.add(&usage);
         if usage.cache_read_tokens > 0 || usage.cache_write_tokens > 0 {
             info!(
-                turn = turn + 1,
+                turn = current,
                 tool_calls = tool_calls.len(),
                 in_tok = usage.input_tokens,
                 out_tok = usage.output_tokens,
                 cache_read = usage.cache_read_tokens,
                 cache_write = usage.cache_write_tokens,
-                "<<< turn {}/{} calls={} tok={}/{} cache=r:{}/w:{}",
-                turn + 1,
+                "<<< turn {current}/{} calls={} tok={}/{} cache=r:{}/w:{}",
                 config.max_turns,
                 tool_calls.len(),
                 usage.input_tokens,
@@ -230,12 +248,11 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             );
         } else {
             info!(
-                turn = turn + 1,
+                turn = current,
                 tool_calls = tool_calls.len(),
                 in_tok = usage.input_tokens,
                 out_tok = usage.output_tokens,
-                "<<< turn {}/{} calls={} tok={}/{}",
-                turn + 1,
+                "<<< turn {current}/{} calls={} tok={}/{}",
                 config.max_turns,
                 tool_calls.len(),
                 usage.input_tokens,
@@ -400,7 +417,7 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             ));
         }
 
-        debug!(turn = turn + 1, "Loop turn complete, continuing");
+        debug!(turn = current, "Loop turn complete, continuing");
     }
 
     Err(anyhow::anyhow!("max turns ({}) reached", config.max_turns))

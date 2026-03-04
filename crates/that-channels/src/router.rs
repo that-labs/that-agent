@@ -335,11 +335,14 @@ impl ChannelRouter {
         &self,
         channel_id: &str,
         chat_id: &str,
-        message_id: i64,
+        message_id: &str,
         emoji: &str,
     ) {
         let guard = self.channels.read().await;
         if let Some(ch) = guard.iter().find(|c| c.id() == channel_id) {
+            if !ch.capabilities().reactions {
+                return;
+            }
             if let Err(e) = ch.react(chat_id, message_id, emoji).await {
                 warn!(channel = %channel_id, "react_to_message failed: {e:#}");
             }

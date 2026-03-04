@@ -74,10 +74,8 @@ pub fn install_that_tools_skills_local(agent_name: &str) {
         return;
     };
 
-    // Version gate — same pattern as install_default_skills.
-    let version = env!("CARGO_PKG_VERSION");
     let marker = skills_dir.join(".that-tools-installed-version");
-    if std::fs::read_to_string(&marker).ok().as_deref() == Some(version) {
+    if crate::default_skills::version_matches(&marker) {
         return;
     }
 
@@ -105,7 +103,7 @@ pub fn install_that_tools_skills_local(agent_name: &str) {
 
     match that_tools::tools::skills::install(None, Some(&skills_dir), true) {
         Ok(_) => {
-            let _ = std::fs::write(&marker, version);
+            crate::default_skills::stamp_version(&marker);
             info!(agent = %agent_name, "Installed that-tools skills locally");
         }
         Err(err) => tracing::warn!(

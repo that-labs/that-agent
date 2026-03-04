@@ -92,8 +92,8 @@ pub enum ChannelEvent {
 /// Adapters that do not support editing return [`MessageHandle::default()`].
 #[derive(Debug, Clone, Default)]
 pub struct MessageHandle {
-    /// Platform-native message ID (e.g. Telegram `message_id`).
-    pub message_id: Option<i64>,
+    /// Platform-native message ID (stringified per-platform: Telegram i64, Discord snowflake, Slack timestamp, etc.).
+    pub message_id: Option<String>,
     /// Channel identifier the handle belongs to (e.g. "telegram").
     pub channel_id: Option<String>,
     /// Conversation-level identifier (chat ID, thread ID, etc.).
@@ -131,6 +131,8 @@ pub struct ChannelCapabilities {
     /// Adapter supports structured [`OutboundMessage`] with rich UI elements
     /// (inline keyboards, reply markups, etc.) via [`Channel::send_message`].
     pub rich_messages: bool,
+    /// Adapter supports adding emoji reactions to messages via [`Channel::react`].
+    pub reactions: bool,
     /// Adapter supports raw platform API passthrough via [`Channel::send_raw`].
     pub native_api: bool,
     /// `on_start()` requires external network calls (DNS, TLS, API validation).
@@ -153,6 +155,7 @@ impl Default for ChannelCapabilities {
             inbound_images: false,
             inbound_audio: false,
             rich_messages: false,
+            reactions: false,
             native_api: false,
             deferred_start: false,
         }
@@ -168,9 +171,9 @@ pub struct InboundMessage {
     pub sender_id: String,
     /// The message text content.
     pub text: String,
-    /// Platform-native message ID, used for reactions and reply threading.
+    /// Platform-native message ID (stringified), used for reactions and reply threading.
     /// `None` for channels that don't expose message IDs (e.g. TUI).
-    pub message_id: Option<i64>,
+    pub message_id: Option<String>,
     /// Conversation-level destination identifier for replies.
     ///
     /// Examples:
@@ -202,8 +205,11 @@ pub struct OutboundTarget {
     pub thread_id: Option<String>,
     /// Session identifier for correlation.
     pub session_id: Option<String>,
-    /// Reply-to message identifier when supported.
-    pub reply_to_message_id: Option<i64>,
+    /// Reply-to message identifier when supported (stringified).
+    pub reply_to_message_id: Option<String>,
+    /// Correlation identifier for request/response pairing (e.g. HTTP request ID).
+    /// Distinct from `thread_id` which represents actual platform threads.
+    pub request_id: Option<String>,
 }
 
 /// Abstraction over a communication channel (TUI, Telegram, Discord, WhatsApp, …).
@@ -232,7 +238,9 @@ pub trait Channel: Send + Sync {
     ///
     /// Return `Some(instructions)` to teach the agent how to format responses for
     /// this channel. Return `None` if no special formatting is required.
-    fn format_instructions(&self) -> Option<String>;
+    fn format_instructions(&self) -> Option<String> {
+        None
+    }
 
     /// Validate configuration and establish any persistent connections.
     ///
@@ -294,16 +302,21 @@ pub trait Channel: Send + Sync {
     /// receive a broadcast notification that input is pending.
     async fn ask_human(
         &self,
-        message: &str,
-        timeout: Option<u64>,
-        target: Option<&OutboundTarget>,
-    ) -> Result<String>;
+        _message: &str,
+        _timeout: Option<u64>,
+        _target: Option<&OutboundTarget>,
+    ) -> Result<String> {
+        anyhow::bail!("ask_human not supported by this channel")
+    }
 
     /// Start an inbound listener, feeding received messages into `tx`.
     ///
     /// Called once at startup by `ChannelRouter::start_listeners()`. Only called
-    /// for adapters where `capabilities().inbound` is true.
-    async fn start_listener(&self, tx: mpsc::UnboundedSender<InboundMessage>) -> Result<()>;
+    /// for adapters where `capabilities().inbound` is true. Default no-op for
+    /// outbound-only adapters.
+    async fn start_listener(&self, _tx: mpsc::UnboundedSender<InboundMessage>) -> Result<()> {
+        Ok(())
+    }
 
     /// Add an emoji reaction to a specific inbound message.
     ///
@@ -312,7 +325,7 @@ pub trait Channel: Send + Sync {
     /// Used to acknowledge received messages (e.g. 👀) without sending a
     /// separate chat message. Default no-op for channels that don't support
     /// native reactions.
-    async fn react(&self, _chat_id: &str, _message_id: i64, _emoji: &str) -> Result<()> {
+    async fn react(&self, _chat_id: &str, _message_id: &str, _emoji: &str) -> Result<()> {
         Ok(())
     }
 
@@ -351,7 +364,7 @@ pub trait Channel: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct BotCommand {
     /// Command name without the leading slash.
-    /// Must be lowercase, alphanumeric + underscores, max 32 chars (Telegram limit).
+    /// Must be lowercase, alphanumeric + underscores. Length constraints are platform-specific.
     pub command: String,
     /// Short human-readable description shown in the command picker UI.
     pub description: String,

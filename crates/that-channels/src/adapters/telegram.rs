@@ -507,6 +507,7 @@ impl Channel for TelegramAdapter {
             inbound_images: true,
             inbound_audio: true,
             rich_messages: true,
+            reactions: true,
             native_api: true,
             deferred_start: true,
         }
@@ -832,7 +833,7 @@ impl Channel for TelegramAdapter {
             .conversation_id
             .as_deref()
             .unwrap_or(&self.default_chat_id);
-        let message_id = match handle.message_id {
+        let message_id: i64 = match handle.message_id.as_deref().and_then(|s| s.parse().ok()) {
             Some(id) => id,
             None => return Ok(()),
         };
@@ -900,13 +901,16 @@ impl Channel for TelegramAdapter {
         }
     }
 
-    async fn react(&self, chat_id: &str, message_id: i64, emoji: &str) -> Result<()> {
+    async fn react(&self, chat_id: &str, message_id: &str, emoji: &str) -> Result<()> {
         let effective_chat = if chat_id.is_empty() {
             &self.default_chat_id
         } else {
             chat_id
         };
-        self.set_reaction(effective_chat, message_id, emoji).await
+        let mid: i64 = message_id
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid Telegram message_id: {message_id}"))?;
+        self.set_reaction(effective_chat, mid, emoji).await
     }
 
     async fn send_message(
@@ -928,7 +932,11 @@ impl Channel for TelegramAdapter {
             }
             Some(crate::message::ParseMode::Plain) | None => {}
         }
-        if let Some(reply_id) = msg.reply_to_message_id {
+        if let Some(reply_id) = msg
+            .reply_to_message_id
+            .as_deref()
+            .and_then(|s| s.parse::<i64>().ok())
+        {
             body["reply_to_message_id"] = reply_id.into();
         }
         if let Some(markup) = &msg.reply_markup {
@@ -989,7 +997,9 @@ impl Channel for TelegramAdapter {
             let desc = resp["description"].as_str().unwrap_or("unknown error");
             anyhow::bail!("Telegram sendMessage (rich) failed: {desc}");
         }
-        let message_id = resp["result"]["message_id"].as_i64();
+        let message_id = resp["result"]["message_id"]
+            .as_i64()
+            .map(|id| id.to_string());
         Ok(MessageHandle {
             message_id,
             channel_id: Some(self.id.clone()),
@@ -1111,7 +1121,9 @@ impl Channel for TelegramAdapter {
                         .as_i64()
                         .map(|id| id.to_string())
                         .unwrap_or_default();
-                    let cb_message_id = cb["message"]["message_id"].as_i64();
+                    let cb_message_id = cb["message"]["message_id"]
+                        .as_i64()
+                        .map(|id| id.to_string());
 
                     // Auto-answer to dismiss the client spinner.
                     let _ = self
@@ -1301,7 +1313,9 @@ impl Channel for TelegramAdapter {
                 drop(state);
 
                 // Otherwise route to the inbound channel.
-                let message_id = update["message"]["message_id"].as_i64();
+                let message_id = update["message"]["message_id"]
+                    .as_i64()
+                    .map(|id| id.to_string());
                 info!(channel = %self.id, sender = %sender_id, message_id = ?message_id, "Dispatching inbound message to agent");
                 let msg = InboundMessage {
                     channel_id: self.id.clone(),

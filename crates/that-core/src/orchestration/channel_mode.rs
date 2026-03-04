@@ -711,7 +711,8 @@ pub async fn run_listen(
                         sender_id: Some(msg.sender_id.clone()),
                         thread_id: msg.session_hint.clone(),
                         session_id: None,
-                        reply_to_message_id: msg.message_id,
+                        reply_to_message_id: msg.message_id.clone(),
+                        request_id: msg.session_hint.clone(),
                     };
                     let stopped = stop_active_sender_run(&active_sender_runs, &sender_key).await;
                     let text = if stopped {
@@ -734,6 +735,13 @@ pub async fn run_listen(
                     if let Some(q) = steering_arc {
                         q.lock().await.push(msg.text);
                         debug!(sender = %sender_key, "Enqueued steering hint for active run");
+                        // Visual acknowledgment — fire-and-forget so we don't block on Telegram API.
+                        if let Some(mid) = msg.message_id.clone() {
+                            let r = Arc::clone(&router);
+                            let ch = msg.channel_id.clone();
+                            let chat = msg.conversation_id.clone().unwrap_or_default();
+                            tokio::spawn(async move { r.react_to_message(&ch, &chat, &mid, "\u{1F3AF}").await });
+                        }
                         return;
                     }
                 }
@@ -755,7 +763,8 @@ pub async fn run_listen(
                         sender_id: Some(msg.sender_id.clone()),
                         thread_id: msg.session_hint.clone(),
                         session_id: None,
-                        reply_to_message_id: msg.message_id,
+                        reply_to_message_id: msg.message_id.clone(),
+                        request_id: msg.session_hint.clone(),
                     };
 
                     // Snapshot the current hot state for this message.
@@ -1091,7 +1100,7 @@ async fn run_agent_for_sender_tracked(
     channel_id: String,
     sender_id: String,
     conversation_id: Option<String>,
-    message_id: Option<i64>,
+    message_id: Option<String>,
     session_hint: Option<String>,
     sender_key: String,
     sessions: ChannelSessions,
@@ -1174,7 +1183,7 @@ async fn run_agent_for_sender(
     channel_id: String,
     sender_id: String,
     conversation_id: Option<String>,
-    message_id: Option<i64>,
+    message_id: Option<String>,
     session_hint: Option<String>,
     sender_key: String,
     sessions: ChannelSessions,
@@ -1214,21 +1223,24 @@ async fn run_agent_for_sender(
         sender_id: Some(sender_id.clone()),
         thread_id: session_hint.clone(),
         session_id: None,
-        reply_to_message_id: message_id,
+        reply_to_message_id: message_id.clone(),
+        request_id: session_hint.clone(),
     };
 
     // Immediately acknowledge the message so the user knows the agent is working.
     // Skip for internal heartbeat sources.
     let mut typing_task = TypingTaskGuard(if !is_internal_source {
-        // React to the user's message with 👀 so they know the agent saw it.
+        // React to the user's message with 👀 — fire-and-forget so the agent
+        // run starts immediately without waiting for the Telegram API round-trip.
         if let Some(mid) = message_id {
             let react_chat = base_target
                 .recipient_id
                 .as_deref()
-                .unwrap_or(sender_id.as_str());
-            router
-                .react_to_message(&channel_id, react_chat, mid, "👀")
-                .await;
+                .unwrap_or(sender_id.as_str())
+                .to_string();
+            let r = Arc::clone(&router);
+            let ch = channel_id.clone();
+            tokio::spawn(async move { r.react_to_message(&ch, &react_chat, &mid, "👀").await });
         }
         // Send typing indicator immediately and refresh every 4s while the agent runs.
         // Telegram's "typing" action expires after ~5s, so 4s keeps it alive.

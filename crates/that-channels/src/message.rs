@@ -16,7 +16,7 @@ pub struct OutboundMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_markup: Option<ReplyMarkup>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply_to_message_id: Option<i64>,
+    pub reply_to_message_id: Option<String>,
 }
 
 /// Text parsing mode for outbound messages.

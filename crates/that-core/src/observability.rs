@@ -25,6 +25,7 @@
 //! Call `shutdown_tracing()` at the end of `main()` to flush any buffered spans
 //! before the process exits. It is a no-op when tracing export is disabled.
 
+use std::fmt;
 use std::sync::OnceLock;
 
 use opentelemetry::trace::TraceContextExt as _;
@@ -35,9 +36,113 @@ use opentelemetry_sdk::trace::{
     span_processor_with_async_runtime::BatchSpanProcessor, SdkTracerProvider,
 };
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
+
+/// Fields to suppress from the fmt (stderr) layer — they contain huge LLM
+/// payloads that make compact log output unreadable. The OTel layer still
+/// receives them via span extensions, so Phoenix/Jaeger traces are unaffected.
+const FILTERED_FIELD_NAMES: &[&str] = &[
+    "input.value",
+    "input.mime_type",
+    "output.value",
+    "output.mime_type",
+    "gen_ai.prompt",
+    "gen_ai.completion",
+];
+
+/// Formats span fields for the fmt layer, skipping blocklisted verbose fields.
+/// Delegates to `DefaultFields` for the actual formatting — the filtering
+/// happens by recording into an intermediate `String` per field and only
+/// emitting allowed ones.
+struct FilteredFields;
+
+impl FilteredFields {
+    fn new() -> Self {
+        Self
+    }
+}
+
+impl<'writer> FormatFields<'writer> for FilteredFields {
+    fn format_fields<R: tracing_subscriber::field::RecordFields>(
+        &self,
+        writer: tracing_subscriber::fmt::format::Writer<'writer>,
+        fields: R,
+    ) -> fmt::Result {
+        let mut v = FilteredFmtVisitor::new(writer);
+        fields.record(&mut v);
+        Ok(())
+    }
+}
+
+/// Visitor that writes field=value pairs to a `Writer`, skipping blocklisted names.
+/// Mimics `DefaultFields` output format: `field=value field2=value2 ...`
+struct FilteredFmtVisitor<'writer> {
+    writer: tracing_subscriber::fmt::format::Writer<'writer>,
+    needs_sep: bool,
+}
+
+impl<'writer> FilteredFmtVisitor<'writer> {
+    fn new(writer: tracing_subscriber::fmt::format::Writer<'writer>) -> Self {
+        Self {
+            writer,
+            needs_sep: false,
+        }
+    }
+
+    fn skip(field: &tracing::field::Field) -> bool {
+        FILTERED_FIELD_NAMES.contains(&field.name())
+    }
+
+    fn sep(&mut self) {
+        if self.needs_sep {
+            let _ = write!(self.writer, " ");
+        }
+        self.needs_sep = true;
+    }
+}
+
+/// Collapse the identical skip-check + sep + write pattern for scalar types.
+macro_rules! record_scalar {
+    ($name:ident, $ty:ty) => {
+        fn $name(&mut self, field: &tracing::field::Field, value: $ty) {
+            if Self::skip(field) {
+                return;
+            }
+            self.sep();
+            let _ = write!(self.writer, "{}={value}", field.name());
+        }
+    };
+}
+
+impl tracing::field::Visit for FilteredFmtVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        if Self::skip(field) {
+            return;
+        }
+        self.sep();
+        let _ = write!(self.writer, "{}={:?}", field.name(), value);
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if Self::skip(field) {
+            return;
+        }
+        self.sep();
+        if field.name() == "message" {
+            let _ = write!(self.writer, "{value}");
+        } else {
+            let _ = write!(self.writer, "{}={value}", field.name());
+        }
+    }
+
+    record_scalar!(record_i64, i64);
+    record_scalar!(record_u64, u64);
+    record_scalar!(record_f64, f64);
+    record_scalar!(record_bool, bool);
+}
 
 /// Initialise the global tracing subscriber.
 ///
@@ -78,6 +183,7 @@ pub fn init_tracing(default_filter: &str) {
                     )
                     .with(
                         tracing_subscriber::fmt::layer()
+                            .fmt_fields(FilteredFields::new())
                             .compact()
                             .with_target(false)
                             .with_writer(std::io::stderr)
@@ -100,6 +206,7 @@ pub fn init_tracing(default_filter: &str) {
 
     // Plain stderr fallback (default path).
     tracing_subscriber::fmt()
+        .fmt_fields(FilteredFields::new())
         .compact()
         .with_env_filter(build_fmt_env_filter(default_filter))
         .with_target(false)

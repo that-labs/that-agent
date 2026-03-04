@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tracing::warn;
 
-use crate::agent_loop::{self, LoopConfig, Message, ToolContext};
+use crate::agent_loop::{self, LoopConfig, Message, SteeringQueue, ToolContext};
 use crate::config::AgentDef;
 use crate::hooks::{
     channel_notify_tool_def, channel_send_file_tool_def, channel_send_message_tool_def,
@@ -353,6 +353,7 @@ pub async fn execute_agent_run_channel(
     channel_registry: Option<std::sync::Arc<that_channels::registry::DynamicChannelRegistry>>,
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
+    steering: Option<SteeringQueue>,
 ) -> Result<(String, Vec<that_channels::ToolLogEvent>)> {
     if let Some(sid) = session_id_for_trace {
         tracing::Span::current().record("session.id", sid);
@@ -560,7 +561,7 @@ pub async fn execute_agent_run_channel(
                 state_dir: agent_state_dir(agent),
             },
             images: images.clone(),
-            steering: None,
+            steering: steering.clone(),
         };
         let task_for_attempt = if empty_response_retries > 0 {
             build_empty_channel_retry_task(&task_for_model)

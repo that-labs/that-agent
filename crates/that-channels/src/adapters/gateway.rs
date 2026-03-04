@@ -1,11 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 
 use super::validate_callback_url;
-use crate::channel::{
-    Channel, ChannelCapabilities, ChannelEvent, InboundMessage, MessageHandle, OutboundTarget,
-};
+use crate::channel::{Channel, ChannelCapabilities, ChannelEvent, MessageHandle, OutboundTarget};
 use crate::registry::ChannelEntry;
 
 /// Outbound-only channel adapter that POSTs the final agent response to a
@@ -36,10 +33,6 @@ impl Channel for GatewayChannelAdapter {
             ask_human: false,
             ..ChannelCapabilities::default()
         }
-    }
-
-    fn format_instructions(&self) -> Option<String> {
-        None
     }
 
     async fn send_event(
@@ -81,18 +74,5 @@ impl Channel for GatewayChannelAdapter {
             _ => {} // drop streaming tokens
         }
         Ok(MessageHandle::default())
-    }
-
-    async fn ask_human(
-        &self,
-        _message: &str,
-        _timeout: Option<u64>,
-        _target: Option<&OutboundTarget>,
-    ) -> Result<String> {
-        anyhow::bail!("GatewayChannelAdapter does not support ask_human")
-    }
-
-    async fn start_listener(&self, _tx: mpsc::UnboundedSender<InboundMessage>) -> Result<()> {
-        Ok(()) // no-op, outbound only
     }
 }

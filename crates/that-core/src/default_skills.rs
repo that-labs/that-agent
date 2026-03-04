@@ -1,3 +1,15 @@
+use std::path::Path;
+
+/// Check if a version marker file matches the current binary version.
+pub(crate) fn version_matches(marker: &Path) -> bool {
+    std::fs::read_to_string(marker).ok().as_deref() == Some(env!("CARGO_PKG_VERSION"))
+}
+
+/// Write the current binary version to a marker file.
+pub(crate) fn stamp_version(marker: &Path) {
+    let _ = std::fs::write(marker, env!("CARGO_PKG_VERSION"));
+}
+
 /// Default skills bundled with that-agent.
 ///
 /// Each skill is embedded at compile time via `include_str!`. Skills with
@@ -56,9 +68,8 @@ pub fn install_default_skills(agent_name: &str) {
         return;
     };
 
-    let version = env!("CARGO_PKG_VERSION");
     let marker = skills_dir.join(".installed-version");
-    if std::fs::read_to_string(&marker).ok().as_deref() == Some(version) {
+    if version_matches(&marker) {
         return;
     }
 
@@ -83,7 +94,7 @@ pub fn install_default_skills(agent_name: &str) {
 
     // Write version marker after successful install.
     let _ = std::fs::create_dir_all(&skills_dir);
-    let _ = std::fs::write(&marker, version);
+    stamp_version(&marker);
 }
 
 /// Return true if the SKILL.md frontmatter contains `bootstrap: true` under `metadata:`.

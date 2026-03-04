@@ -147,8 +147,8 @@ pub fn channel_send_message_tool_def() -> ToolDef {
                     "description": "Optional interactive markup. Use {\"InlineKeyboard\": [[{\"text\":\"Label\",\"callback_data\":\"value\"}]]} for inline buttons, {\"ReplyKeyboard\":{\"keyboard\":[[{\"text\":\"Option\"}]],\"resize\":true,\"one_time\":true}} for custom keyboards, or {\"RemoveKeyboard\":null} to dismiss."
                 },
                 "reply_to_message_id": {
-                    "type": "integer",
-                    "description": "Optional message ID to reply to."
+                    "type": "string",
+                    "description": "Optional message ID to reply to (stringified platform ID)."
                 }
             },
             "required": ["channel_id", "text"]
@@ -507,7 +507,9 @@ impl LoopHook for ChannelHook {
                     .get("reply_markup")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
 
-                let reply_to_message_id = args.get("reply_to_message_id").and_then(|v| v.as_i64());
+                let reply_to_message_id = args
+                    .get("reply_to_message_id")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()));
 
                 let msg = that_channels::message::OutboundMessage {
                     text,
