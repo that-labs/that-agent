@@ -5,6 +5,8 @@ resources:
   - serviceaccount.yaml
   - role.yaml
   - rolebinding.yaml
+  - clusterrole.yaml
+  - clusterrolebinding.yaml
   - pvc.yaml
   - configmap.yaml
   - gateway-service.yaml

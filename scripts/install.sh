@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
 #
 # Or download and run with flags:
-#   bash install.sh [--image <image:tag>] [--namespace <ns>] [--no-k3s] [--no-cilium] [--no-tailscale] [--no-k9s]
+#   bash install.sh [--image <image:tag>] [--namespace <ns>] [--no-k3s] [--no-cilium] [--no-tailscale] [--no-k9s] [--no-subagents]
 #
 # What this script does:
 #   1. Optionally installs k3s (lightweight Kubernetes) if not already present
@@ -39,6 +39,7 @@ INSTALL_K3S=true
 INSTALL_CILIUM=true
 INSTALL_TAILSCALE_OPERATOR=true
 INSTALL_K9S=true
+ENABLE_SUBAGENTS=true
 KUBECTL="kubectl"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 REPO_ROOT=""
@@ -65,8 +66,9 @@ while [[ $# -gt 0 ]]; do
     --no-cilium)  INSTALL_CILIUM=false; shift  ;;
     --no-tailscale) INSTALL_TAILSCALE_OPERATOR=false; shift ;;
     --no-k9s)     INSTALL_K9S=false;   shift   ;;
+    --no-subagents) ENABLE_SUBAGENTS=false; shift ;;
     --help|-h)
-      echo "Usage: $0 [--image IMAGE:TAG] [--namespace NS] [--no-k3s] [--no-cilium] [--no-tailscale] [--no-k9s]"
+      echo "Usage: $0 [--image IMAGE:TAG] [--namespace NS] [--no-k3s] [--no-cilium] [--no-tailscale] [--no-k9s] [--no-subagents]"
       exit 0
       ;;
     *) die "Unknown option: $1" ;;
@@ -503,6 +505,13 @@ else
 fi
 
 # kustomization.yaml
+KUSTOMIZE_PATCHES="  - path: patch-configmap.yaml"
+
+if [[ "${ENABLE_SUBAGENTS}" == "true" ]]; then
+  KUSTOMIZE_PATCHES="${KUSTOMIZE_PATCHES}
+  - path: patch-clusterrolebinding.yaml"
+fi
+
 cat > "${OVERLAY_DIR}/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -515,7 +524,7 @@ resources:
   - secret.yaml
 
 patches:
-  - path: patch-configmap.yaml
+${KUSTOMIZE_PATCHES}
 
 images:
   - name: that-agent
@@ -529,6 +538,22 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: ${AGENT_NAMESPACE}
+EOF
+
+# patch-clusterrolebinding.yaml — set the namespace on the ServiceAccount subject
+cat > "${OVERLAY_DIR}/patch-clusterrolebinding.yaml" <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: that-agent-cluster
+subjects:
+  - kind: ServiceAccount
+    name: that-agent
+    namespace: ${AGENT_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: that-agent-cluster
 EOF
 
 # patch-configmap.yaml

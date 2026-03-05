@@ -140,6 +140,7 @@ The installer is interactive and sets up a production-ready single-node cluster 
 | 2 | [Cilium](https://cilium.io/) | eBPF-based CNI with L3/L4/L7 network policies and [Hubble](https://docs.cilium.io/en/stable/observability/hubble/) flow observability | `--no-cilium` |
 | 3 | [Tailscale Operator](https://tailscale.com/kb/1236/kubernetes-operator) | Expose cluster services to your Tailnet — no public IPs, no port forwarding | `--no-tailscale` |
 | 4 | [K9s](https://k9scli.io/) | Terminal-based Kubernetes UI for cluster inspection | `--no-k9s` |
+| — | Sub-agent RBAC | ClusterRole for namespace creation and cross-namespace orchestration | `--no-subagents` |
 | 5 | In-cluster registry | Private container registry (NodePort) for agent-built images | always |
 | 6–9 | Agent config + deploy | Interactive prompts → Kustomize overlay → `kubectl apply` | — |
 
@@ -196,7 +197,9 @@ k9s
 
 #### RBAC — what the agent can access
 
-The agent runs as a **namespace-scoped** ServiceAccount (`that-agent`) with a Role — **not** a ClusterRole. It has no cluster-wide permissions. All access is confined to its own namespace (`that-<agent-name>`).
+The agent gets two levels of RBAC: a **namespace-scoped Role** for full control within its own namespace, and a **ClusterRole** for bootstrapping sub-agent namespaces.
+
+**Namespace Role** (`that-agent-runtime`) — full access within `that-<agent-name>`:
 
 | API Group | Resources | Verbs | Why |
 |-----------|-----------|-------|-----|
@@ -209,24 +212,45 @@ The agent runs as a **namespace-scoped** ServiceAccount (`that-agent`) with a Ro
 | `rbac.authorization.k8s.io` | roles, rolebindings | all | Create scoped RBAC for sub-agent ServiceAccounts |
 | `*` (wildcard) | `*` | all | Access namespaced custom resources managed by plugins (e.g. Tailscale proxies, CRDs from operator charts) |
 
+**ClusterRole** (`that-agent-cluster`) — cross-namespace operations for sub-agent orchestration:
+
+| API Group | Resources | Verbs | Why |
+|-----------|-----------|-------|-----|
+| `""` (core) | namespaces | all | Create/delete namespaces for sub-agents |
+| `rbac.authorization.k8s.io` | roles, rolebindings | all | Bootstrap RBAC in new sub-agent namespaces so the parent SA gains access |
+| `""` (core) | pods, pods/log, services, events | get, list, watch | Monitor sub-agent workloads across namespaces |
+| `apps` | deployments, statefulsets | get, list, watch | Watch sub-agent deployment status across namespaces |
+
+**How sub-agent namespace bootstrap works:**
+
+1. Parent agent creates a new namespace for the sub-agent
+2. Parent creates a **Role** in that namespace (mirroring `that-agent-runtime` permissions)
+3. Parent creates a **RoleBinding** in that namespace, binding its own ServiceAccount to that Role
+4. Parent can now deploy the sub-agent and manage resources in that namespace
+5. The sub-agent inherits the same pattern if it needs to spawn its own children
+
+This is the least-privilege approach — the ClusterRole only grants the ability to create namespaces and bootstrap RBAC. Actual resource management in each namespace requires the explicit RoleBinding step.
+
 **What this means for cluster admins:**
 
-- The agent **cannot** access resources in other namespaces
-- The agent **cannot** create or modify ClusterRoles, ClusterRoleBindings, Namespaces, Nodes, or any cluster-scoped resource
-- The agent **cannot** escalate beyond its own namespace boundary
-- The wildcard rule (`apiGroups: ["*"]`) applies only to **namespaced** resources — it exists so the agent can interact with CRDs (like Tailscale proxy StatefulSets) without enumerating every possible operator CRD in advance
+- The agent **can** create new namespaces and grant itself access to them via RBAC bootstrap
+- The agent **cannot** access existing namespaces it hasn't bootstrapped into (no pre-existing RoleBinding = no access)
+- The agent **cannot** create or modify ClusterRoles or ClusterRoleBindings (it only has the pre-installed ones)
+- The agent **cannot** access Nodes, PersistentVolumes, or other cluster-scoped resources beyond namespaces
+- The ClusterRole grants **read-only** cross-namespace access to pods, services, and deployments — not write
 - The pod runs as **non-root** (UID 1000) with no host path mounts
 
 **Hardening options:**
 
 | Action | Effect |
 |--------|--------|
-| Remove the `*/*` wildcard rule | Restrict to only the explicitly listed API groups — tighter but may break CRD-based operators |
+| Remove the ClusterRole + ClusterRoleBinding | Agent cannot spawn sub-agents in separate namespaces — all work stays in its own namespace |
+| Remove the `*/*` wildcard from the namespace Role | Restrict to only the explicitly listed API groups — tighter but may break CRD-based operators |
 | Remove `secrets` from core resources | Agent loses ability to manage secrets for its plugins (must be pre-created by operator) |
-| Remove `rbac.authorization.k8s.io` | Agent cannot create RBAC for sub-agents (must be pre-created) |
-| Add `resourceNames` constraints | Lock specific resources the agent can touch (most restrictive) |
+| Remove namespace `create`/`delete` from ClusterRole | Agent can only use pre-created namespaces for sub-agents (operator provisions them) |
+| Add label selectors to namespace management | Restrict namespace operations to only namespaces with a specific label (e.g. `that-agent/managed: "true"`) |
 
-The full Role manifest is at [`deploy/k8s/base/role.yaml`](./deploy/k8s/base/role.yaml).
+Manifests: [`deploy/k8s/base/role.yaml`](./deploy/k8s/base/role.yaml) (namespace), [`deploy/k8s/base/clusterrole.yaml`](./deploy/k8s/base/clusterrole.yaml) (cluster).
 
 ### Docker
 
