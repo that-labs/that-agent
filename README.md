@@ -175,13 +175,39 @@ When Cilium is enabled, k3s is installed with `--flannel-backend=none --disable-
 # Skip Cilium and K9s, keep Tailscale
 bash install.sh --no-cilium --no-k9s
 
-# Pre-set credentials via environment
-export ANTHROPIC_API_KEY=sk-ant-...
-export TS_OAUTH_CLIENT_ID=...
-export TS_OAUTH_CLIENT_SECRET=...
-export TS_TAILNET_NAME=myteam
-bash install.sh
+# Full cluster-admin for a single-user VPS
+bash install.sh --cluster-admin
 ```
+
+#### Environment variables
+
+All interactive prompts can be pre-set via environment variables, enabling fully non-interactive installs. Set them before piping the script:
+
+```bash
+# Fully non-interactive one-liner with cluster-admin
+ANTHROPIC_API_KEY=sk-ant-... \
+CLUSTER_ADMIN=true \
+TS_OAUTH_CLIENT_ID=... \
+TS_OAUTH_CLIENT_SECRET=... \
+TS_TAILNET_NAME=myteam \
+  curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
+```
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `ANTHROPIC_API_KEY` | Anthropic API key (auto-detected) | — |
+| `OPENAI_API_KEY` | OpenAI API key (auto-detected) | — |
+| `OPENROUTER_API_KEY` | OpenRouter API key (auto-detected) | — |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code OAuth token (auto-detected) | — |
+| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client ID | prompted |
+| `TS_OAUTH_CLIENT_SECRET` | Tailscale OAuth client secret | prompted |
+| `TS_TAILNET_NAME` | Tailnet name (e.g. `myteam` from `myteam.ts.net`) | prompted |
+| `INSTALL_K3S` | Install k3s | `true` |
+| `INSTALL_CILIUM` | Install Cilium CNI | `true` |
+| `INSTALL_TAILSCALE_OPERATOR` | Install Tailscale Operator | `true` |
+| `INSTALL_K9S` | Install K9s | `true` |
+| `ENABLE_SUBAGENTS` | ClusterRole for cross-namespace sub-agents | `true` |
+| `CLUSTER_ADMIN` | Bind to built-in `cluster-admin` ClusterRole | `false` |
 
 #### Post-install
 

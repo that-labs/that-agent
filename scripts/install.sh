@@ -33,14 +33,14 @@ die()   { echo -e "${_RED}[error]${_RESET} $*" >&2; exit 1; }
 header(){ echo -e "\n${_BOLD}$*${_RESET}"; }
 
 # ── Defaults ────────────────────────────────────────────────────────────────
-AGENT_IMAGE="ghcr.io/that-labs/that-agent:latest"
-AGENT_NAMESPACE=""          # derived from agent name if not set
-INSTALL_K3S=true
-INSTALL_CILIUM=true
-INSTALL_TAILSCALE_OPERATOR=true
-INSTALL_K9S=true
-ENABLE_SUBAGENTS=true
-CLUSTER_ADMIN=false
+AGENT_IMAGE="${AGENT_IMAGE:-ghcr.io/that-labs/that-agent:latest}"
+AGENT_NAMESPACE="${AGENT_NAMESPACE:-}"   # derived from agent name if not set
+INSTALL_K3S="${INSTALL_K3S:-true}"
+INSTALL_CILIUM="${INSTALL_CILIUM:-true}"
+INSTALL_TAILSCALE_OPERATOR="${INSTALL_TAILSCALE_OPERATOR:-true}"
+INSTALL_K9S="${INSTALL_K9S:-true}"
+ENABLE_SUBAGENTS="${ENABLE_SUBAGENTS:-true}"
+CLUSTER_ADMIN="${CLUSTER_ADMIN:-false}"
 KUBECTL="kubectl"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 REPO_ROOT=""
