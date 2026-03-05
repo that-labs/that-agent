@@ -39,10 +39,10 @@ chrono-tz = { workspace = true }
 clap = { workspace = true }
 
 # Local deps
-that-tools = { path = "../that-tools", version = "0.1.0" }
-that-channels = { path = "../that-channels", version = "0.1.0" }
-that-plugins = { path = "../that-plugins", version = "0.1.0" }
-that-sandbox = { path = "../that-sandbox", version = "0.1.0" }
+that-tools = { path = "../that-tools", version = "0.2.0" }
+that-channels = { path = "../that-channels", version = "0.2.0" }
+that-plugins = { path = "../that-plugins", version = "0.2.0" }
+that-sandbox = { path = "../that-sandbox", version = "0.2.0" }
 
 # Async utilities
 futures = "0.3"

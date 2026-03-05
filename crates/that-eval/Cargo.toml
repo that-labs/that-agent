@@ -20,8 +20,8 @@ path = "src/main.rs"
 
 [dependencies]
 # Local crates
-that-core    = { path = "../that-core", version = "0.1.0" }
-that-tools   = { path = "../that-tools", version = "0.1.0" }
+that-core    = { path = "../that-core", version = "0.2.0" }
+that-tools   = { path = "../that-tools", version = "0.2.0" }
 
 # Workspace deps
 clap       = { workspace = true }
