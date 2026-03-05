@@ -82,7 +82,8 @@ pub async fn run_chat_tui(
         None,
     );
 
-    // Setup TUI terminal
+    // Setup TUI terminal — suppress stderr tracing to avoid corrupting the alternate screen
+    crate::observability::suppress_fmt_output();
     tui::install_panic_hook();
     let mut terminal = tui::setup_terminal()?;
 
@@ -1149,6 +1150,7 @@ pub async fn run_chat_tui(
     }
 
     tui::restore_terminal(&mut terminal)?;
+    crate::observability::resume_fmt_output();
 
     // Keep sandbox container by default so any in-container services remain
     // available after chat exits. Set THAT_SANDBOX_REMOVE_ON_EXIT=1 to restore

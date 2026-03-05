@@ -26,6 +26,7 @@
 //! before the process exits. It is a no-op when tracing export is disabled.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use opentelemetry::trace::TraceContextExt as _;
@@ -40,6 +41,50 @@ use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
+
+/// When true, the fmt (stderr) layer suppresses all output to avoid
+/// corrupting the TUI alternate screen.
+static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Suppress stderr tracing output (call when entering TUI mode).
+pub fn suppress_fmt_output() {
+    TUI_ACTIVE.store(true, Ordering::Relaxed);
+}
+
+/// Resume stderr tracing output (call when leaving TUI mode).
+pub fn resume_fmt_output() {
+    TUI_ACTIVE.store(false, Ordering::Relaxed);
+}
+
+/// A writer that emits to stderr unless the TUI is active, in which case
+/// it silently discards output.
+struct TuiAwareStderr;
+
+impl std::io::Write for TuiAwareStderr {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if TUI_ACTIVE.load(Ordering::Relaxed) {
+            Ok(buf.len()) // discard
+        } else {
+            std::io::stderr().write(buf)
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if TUI_ACTIVE.load(Ordering::Relaxed) {
+            Ok(())
+        } else {
+            std::io::stderr().flush()
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TuiAwareStderr {
+    type Writer = TuiAwareStderr;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TuiAwareStderr
+    }
+}
 
 /// Fields to suppress from the fmt (stderr) layer — they contain huge LLM
 /// payloads that make compact log output unreadable. The OTel layer still
@@ -186,7 +231,7 @@ pub fn init_tracing(default_filter: &str) {
                             .fmt_fields(FilteredFields::new())
                             .compact()
                             .with_target(false)
-                            .with_writer(std::io::stderr)
+                            .with_writer(TuiAwareStderr)
                             .with_filter(build_fmt_env_filter(default_filter)),
                     )
                     .init();
@@ -210,7 +255,7 @@ pub fn init_tracing(default_filter: &str) {
         .compact()
         .with_env_filter(build_fmt_env_filter(default_filter))
         .with_target(false)
-        .with_writer(std::io::stderr)
+        .with_writer(TuiAwareStderr)
         .init();
 }
 
