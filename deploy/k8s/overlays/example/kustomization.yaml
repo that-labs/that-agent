@@ -14,4 +14,4 @@ patches:
 images:
   - name: that-agent
     newName: ghcr.io/that-labs/that-agent
-    newTag: latest
+    newTag: v0.2.0

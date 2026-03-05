@@ -384,8 +384,9 @@ if [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}/deploy/k8s/base" ]]; then
 else
   info "Downloading base manifests from GitHub…"
   mkdir -p "${OVERLAY_DIR}/base"
-  curl -fsSL "https://github.com/that-labs/that-agent/archive/refs/heads/main.tar.gz" | \
-    tar -xz --strip-components=4 -C "${OVERLAY_DIR}/base" "that-agent-main/deploy/k8s/base/"
+  LATEST_TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/that-labs/that-agent/releases/latest" | grep -oE '[^/]+$')
+  curl -fsSL "https://github.com/that-labs/that-agent/archive/refs/tags/${LATEST_TAG}.tar.gz" | \
+    tar -xz --strip-components=4 -C "${OVERLAY_DIR}/base" "that-agent-${LATEST_TAG#v}/deploy/k8s/base/"
   ok "Base manifests downloaded."
 fi
 
