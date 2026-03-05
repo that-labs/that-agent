@@ -130,7 +130,69 @@ that chat
 curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
 ```
 
-Installs k3s, prompts for agent name and API credentials, deploys the agent. The description you provide is interpreted by the LLM at first boot to generate the agent's identity.
+The installer is interactive and sets up a production-ready single-node cluster with everything the agent needs. All infrastructure components are enabled by default and can be skipped with flags.
+
+#### What it installs
+
+| Step | Component | What it does | Skip flag |
+|------|-----------|-------------|-----------|
+| 1 | [k3s](https://k3s.io/) | Lightweight Kubernetes distribution | `--no-k3s` |
+| 2 | [Cilium](https://cilium.io/) | eBPF-based CNI with L3/L4/L7 network policies and [Hubble](https://docs.cilium.io/en/stable/observability/hubble/) flow observability | `--no-cilium` |
+| 3 | [Tailscale Operator](https://tailscale.com/kb/1236/kubernetes-operator) | Expose cluster services to your Tailnet — no public IPs, no port forwarding | `--no-tailscale` |
+| 4 | [K9s](https://k9scli.io/) | Terminal-based Kubernetes UI for cluster inspection | `--no-k9s` |
+| 5 | In-cluster registry | Private container registry (NodePort) for agent-built images | always |
+| 6–9 | Agent config + deploy | Interactive prompts → Kustomize overlay → `kubectl apply` | — |
+
+#### Interactive prompts
+
+The installer asks for:
+
+- **Agent name** — lowercase identifier for the deployment
+- **Agent description** — free-text prompt used by the LLM at first boot to generate the agent's identity (`Soul.md`, `Identity.md`)
+- **LLM API key** — Anthropic, OpenAI, or OpenRouter (auto-detected from key prefix)
+- **Model override** — optional, defaults to the provider's recommended model
+- **Telegram bot token + chat ID** — optional, for Telegram channel integration
+- **Tailscale OAuth credentials** — client ID + secret for the operator (prompted only when Tailscale is enabled)
+- **Tailnet name** — optional (e.g. `myteam` from `myteam.ts.net`), so the agent can construct mesh URLs directly
+
+#### Infrastructure awareness
+
+The installer writes infrastructure metadata into the agent's ConfigMap. At runtime, the agent's system-reminder reflects exactly what's installed:
+
+- **Cilium as CNI** — the agent knows it has L7 network policies available and loads the `cluster-management` skill with Cilium-specific references for zero-trust enforcement and Hubble flow visibility
+- **Tailscale Operator + tailnet name** — the agent can construct mesh URLs (`https://<service>.<tailnet>.ts.net`) without wasting turns on discovery
+- **K9s** — the agent knows an interactive cluster UI is available on the host
+
+#### Network flags
+
+When Cilium is enabled, k3s is installed with `--flannel-backend=none --disable-network-policy` so Cilium fully owns the networking stack. The agent's `cluster-management` skill teaches it to establish default-deny policies per namespace and layer L7 allow rules on top.
+
+#### Running the install with flags
+
+```bash
+# Skip Cilium and K9s, keep Tailscale
+bash install.sh --no-cilium --no-k9s
+
+# Pre-set credentials via environment
+export ANTHROPIC_API_KEY=sk-ant-...
+export TS_OAUTH_CLIENT_ID=...
+export TS_OAUTH_CLIENT_SECRET=...
+export TS_TAILNET_NAME=myteam
+bash install.sh
+```
+
+#### Post-install
+
+```bash
+# Follow agent logs
+kubectl -n that-<agent-name> logs -f deploy/that-agent
+
+# Shell into the agent pod and start a TUI chat
+kubectl -n that-<agent-name> exec -it deploy/that-agent -- that run chat --agent <agent-name>
+
+# Interactive cluster inspection
+k9s
+```
 
 ### Docker
 
