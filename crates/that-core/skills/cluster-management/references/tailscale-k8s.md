@@ -16,12 +16,25 @@ onto the mesh network.
 
 ## Exposing a Service
 
-To expose a Kubernetes Service to the mesh:
+To expose a Kubernetes Service to the mesh, annotate it:
 
-1. Annotate the Service with the operator's exposure annotation
-2. The operator detects the annotation and deploys a proxy
-3. The service becomes reachable via mesh DNS from any authorized device
-4. Verify reachability from a mesh-connected device after annotation
+```
+tailscale.com/expose: "true"
+```
+
+Optionally set a custom hostname on the mesh (defaults to the Service name):
+
+```
+tailscale.com/hostname: "my-service"
+```
+
+Apply with `kubectl annotate` or patch the Service manifest directly.
+
+**What happens next:**
+1. The operator detects the annotation and creates a proxy StatefulSet
+2. The proxy authenticates to the tailnet and registers a device
+3. The service becomes reachable at `https://<hostname>.<tailnet-name>.ts.net`
+4. If using MagicDNS, also reachable at `http://<hostname>` from mesh devices
 
 **Key behaviors:**
 - Annotation added → proxy deployed, service exposed
@@ -29,12 +42,43 @@ To expose a Kubernetes Service to the mesh:
 - Service deleted → proxy automatically cleaned up
 - The operator reconciles continuously — no manual proxy management needed
 
+## Discovering the Mesh URL
+
+After annotating a Service, the agent needs to find the actual tailnet URL.
+
+**Method 1 — Check the proxy device status:**
+```
+kubectl get svc <service-name> -n <namespace> -o jsonpath='{.metadata.annotations}'
+```
+Look for `tailscale.com/hostname` — if set, the URL is `https://<hostname>.<tailnet-name>.ts.net`.
+
+**Method 2 — List tailscale operator proxy pods:**
+```
+kubectl get statefulsets -A -l tailscale.com/parent-resource-type=svc
+```
+The StatefulSet name corresponds to the device name on the tailnet.
+
+**Method 3 — Query the tailnet device list from inside the cluster:**
+```
+kubectl get pods -A -l tailscale.com/parent-resource-type=svc -o wide
+```
+Match the parent service name to find the proxy, then derive the URL.
+
+**URL pattern:**
+- With HTTPS (MagicDNS + auto-certs): `https://<hostname>.<tailnet-name>.ts.net`
+- Without HTTPS: `http://<hostname>.<tailnet-name>.ts.net`
+- The tailnet name is visible in the Tailscale admin console or via `tailscale status`
+
+**Important:** The mesh URL is only reachable from devices that are connected to the
+same tailnet. It is not a public URL. The agent should always clarify this when
+reporting the URL to the user.
+
 ## Service Configuration
 
 - The Service must exist and have healthy endpoints before annotating
 - Use port **80** on the Service (agent port convention) for clean mesh URLs
 - The proxy forwards to the Service's ClusterIP — standard Kubernetes service routing applies
-- Hostname on the mesh can be customized via operator annotations if the default is not suitable
+- Use `tailscale.com/hostname` to set a human-friendly name instead of the default
 
 ## Access Control
 
