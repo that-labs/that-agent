@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
 #
 # Or download and run with flags:
-#   bash install.sh [--image <image:tag>] [--namespace <ns>] [--no-k3s]
+#   bash install.sh [--image <image:tag>] [--namespace <ns>] [--no-k3s] [--no-cilium] [--no-tailscale] [--no-k9s]
 #
 # What this script does:
 #   1. Optionally installs k3s (lightweight Kubernetes) if not already present
@@ -36,6 +36,9 @@ header(){ echo -e "\n${_BOLD}$*${_RESET}"; }
 AGENT_IMAGE="ghcr.io/that-labs/that-agent:latest"
 AGENT_NAMESPACE=""          # derived from agent name if not set
 INSTALL_K3S=true
+INSTALL_CILIUM=true
+INSTALL_TAILSCALE_OPERATOR=true
+INSTALL_K9S=true
 KUBECTL="kubectl"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 REPO_ROOT=""
@@ -59,8 +62,11 @@ while [[ $# -gt 0 ]]; do
     --image)      AGENT_IMAGE="$2";    shift 2 ;;
     --namespace)  AGENT_NAMESPACE="$2"; shift 2 ;;
     --no-k3s)     INSTALL_K3S=false;   shift   ;;
+    --no-cilium)  INSTALL_CILIUM=false; shift  ;;
+    --no-tailscale) INSTALL_TAILSCALE_OPERATOR=false; shift ;;
+    --no-k9s)     INSTALL_K9S=false;   shift   ;;
     --help|-h)
-      echo "Usage: $0 [--image IMAGE:TAG] [--namespace NS] [--no-k3s]"
+      echo "Usage: $0 [--image IMAGE:TAG] [--namespace NS] [--no-k3s] [--no-cilium] [--no-tailscale] [--no-k9s]"
       exit 0
       ;;
     *) die "Unknown option: $1" ;;
@@ -94,9 +100,11 @@ elif command -v kubectl &>/dev/null && kubectl get nodes &>/dev/null 2>&1; then
   INSTALL_K3S=false
 elif [[ "${INSTALL_K3S}" == "true" ]]; then
   info "Installing k3s…"
-  curl -sfL https://get.k3s.io | $SUDO sh -s - \
-    --disable traefik \
-    --write-kubeconfig-mode 644
+  K3S_ARGS="--disable traefik --write-kubeconfig-mode 644"
+  if [[ "${INSTALL_CILIUM}" == "true" ]]; then
+    K3S_ARGS="${K3S_ARGS} --flannel-backend=none --disable-network-policy"
+  fi
+  curl -sfL https://get.k3s.io | $SUDO sh -s - ${K3S_ARGS}
 
   # Give k3s a moment to start
   info "Waiting for k3s node to be ready…"
@@ -111,13 +119,13 @@ elif [[ "${INSTALL_K3S}" == "true" ]]; then
   ok "k3s is ready."
   KUBECTL="k3s kubectl"
 
-  # Make kubeconfig available to the current user
-  if [[ $EUID -ne 0 ]]; then
-    mkdir -p "${HOME}/.kube"
-    $SUDO cp /etc/rancher/k3s/k3s.yaml "${HOME}/.kube/config"
-    $SUDO chown "$(id -u):$(id -g)" "${HOME}/.kube/config"
-    KUBECTL="kubectl"
-  fi
+  # Make kubeconfig available at ~/.kube/config
+  mkdir -p "${HOME}/.kube"
+  $SUDO cp /etc/rancher/k3s/k3s.yaml "${HOME}/.kube/config"
+  $SUDO chown "$(id -u):$(id -g)" "${HOME}/.kube/config"
+  export KUBECONFIG="${HOME}/.kube/config"
+  KUBECTL="kubectl"
+  ok "Kubeconfig written to ${HOME}/.kube/config"
 else
   die "No running Kubernetes cluster found. Remove --no-k3s to install k3s automatically."
 fi
@@ -130,8 +138,99 @@ ${KUBECTL} patch storageclass local-path \
   2>/dev/null && ok "local-path marked as default StorageClass." \
   || warn "Could not patch local-path StorageClass — PVCs may need an explicit storageClassName."
 
-# ── Step 2: In-cluster image registry ───────────────────────────────────────
-header "Step 2 — In-cluster image registry"
+# ── Step 2: Cilium CNI ────────────────────────────────────────────────────────
+if [[ "${INSTALL_CILIUM}" == "true" ]]; then
+  header "Step 2 — Cilium CNI"
+
+  if command -v cilium &>/dev/null; then
+    ok "Cilium CLI already installed."
+  else
+    info "Installing Cilium CLI…"
+    CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+    CLI_ARCH="amd64"
+    if [[ "$(uname -m)" == "aarch64" ]]; then CLI_ARCH="arm64"; fi
+    curl -L --fail --remote-name-all \
+      "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz" \
+      "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz.sha256sum"
+    sha256sum --check "cilium-linux-${CLI_ARCH}.tar.gz.sha256sum"
+    $SUDO tar xzvfC "cilium-linux-${CLI_ARCH}.tar.gz" /usr/local/bin
+    rm -f "cilium-linux-${CLI_ARCH}.tar.gz" "cilium-linux-${CLI_ARCH}.tar.gz.sha256sum"
+    ok "Cilium CLI installed."
+  fi
+
+  info "Installing Cilium into the cluster…"
+  cilium install --wait
+  ok "Cilium CNI is ready."
+else
+  info "Skipping Cilium CNI (--no-cilium)."
+fi
+
+# ── Step 3: Tailscale Operator ────────────────────────────────────────────────
+if [[ "${INSTALL_TAILSCALE_OPERATOR}" == "true" ]]; then
+  header "Step 3 — Tailscale Operator"
+
+  # Ensure Helm is available
+  if ! command -v helm &>/dev/null; then
+    info "Installing Helm…"
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    ok "Helm installed."
+  fi
+
+  echo ""
+  echo "  The Tailscale Operator needs OAuth client credentials."
+  echo "  Create them at: https://login.tailscale.com/admin/settings/oauth"
+  echo "  (Scopes needed: devices, auth_keys)"
+  echo ""
+  TS_CLIENT_ID="${TS_OAUTH_CLIENT_ID:-}"
+  TS_CLIENT_SECRET="${TS_OAUTH_CLIENT_SECRET:-}"
+  if [[ -z "${TS_CLIENT_ID}" ]]; then
+    read -rp "  Tailscale OAuth client ID: " TS_CLIENT_ID < /dev/tty
+  fi
+  if [[ -z "${TS_CLIENT_SECRET}" ]]; then
+    read -rsp "  Tailscale OAuth client secret: " TS_CLIENT_SECRET < /dev/tty
+    echo ""
+  fi
+
+  if [[ -z "${TS_CLIENT_ID}" || -z "${TS_CLIENT_SECRET}" ]]; then
+    warn "Missing Tailscale OAuth credentials — skipping operator install."
+  else
+    helm repo add tailscale https://pkgs.tailscale.com/helmcharts 2>/dev/null || true
+    helm repo update tailscale
+    helm upgrade --install tailscale-operator tailscale/tailscale-operator \
+      --namespace=tailscale \
+      --create-namespace \
+      --set-string oauth.clientId="${TS_CLIENT_ID}" \
+      --set-string oauth.clientSecret="${TS_CLIENT_SECRET}" \
+      --wait
+    ok "Tailscale Operator installed."
+  fi
+else
+  info "Skipping Tailscale Operator (--no-tailscale)."
+fi
+
+# ── Step 4: K9s ──────────────────────────────────────────────────────────────
+if [[ "${INSTALL_K9S}" == "true" ]]; then
+  header "Step 4 — K9s"
+
+  if command -v k9s &>/dev/null; then
+    ok "K9s already installed."
+  else
+    info "Installing K9s…"
+    K9S_ARCH="amd64"
+    if [[ "$(uname -m)" == "aarch64" ]]; then K9S_ARCH="arm64"; fi
+    K9S_VERSION=$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+    curl -L --fail -o /tmp/k9s.tar.gz \
+      "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_${K9S_ARCH}.tar.gz"
+    $SUDO tar xzf /tmp/k9s.tar.gz -C /usr/local/bin k9s
+    rm -f /tmp/k9s.tar.gz
+    ok "K9s ${K9S_VERSION} installed."
+  fi
+else
+  info "Skipping K9s (--no-k9s)."
+fi
+
+# ── Step 5: In-cluster image registry ───────────────────────────────────────
+header "Step 5 — In-cluster image registry"
 
 info "Deploying registry:2 into namespace '${REGISTRY_NAMESPACE}' (NodePort ${REGISTRY_NODEPORT})…"
 
@@ -231,8 +330,8 @@ info "Waiting for registry pod to be ready…"
 ${KUBECTL} -n "${REGISTRY_NAMESPACE}" rollout status deploy/registry --timeout=120s
 ok "Registry ready — pull host: ${REGISTRY_PULL_HOST}, push endpoint: ${REGISTRY_PUSH_ENDPOINT}"
 
-# ── Step 3: Gather configuration ────────────────────────────────────────────
-header "Step 3 — Agent configuration"
+# ── Step 6: Gather configuration ────────────────────────────────────────────
+header "Step 6 — Agent configuration"
 
 echo ""
 echo "  This installer will create a long-lived autonomous agent running on your cluster."
@@ -344,8 +443,8 @@ case "${CONFIRM:-y}" in
   *) info "Aborted."; exit 0 ;;
 esac
 
-# ── Step 4: Build or pull image ──────────────────────────────────────────────
-header "Step 4 — Container image"
+# ── Step 7: Build or pull image ──────────────────────────────────────────────
+header "Step 7 — Container image"
 
 if [[ -n "${REPO_ROOT}" && -f "${REPO_ROOT}/build.sh" ]] && command -v docker &>/dev/null; then
   echo ""
@@ -371,8 +470,8 @@ else
   info "Using image: ${AGENT_IMAGE}"
 fi
 
-# ── Step 5: Generate overlay ─────────────────────────────────────────────────
-header "Step 5 — Generating Kubernetes overlay"
+# ── Step 8: Generate overlay ─────────────────────────────────────────────────
+header "Step 8 — Generating Kubernetes overlay"
 
 mkdir -p "${OVERLAY_DIR}"
 
@@ -435,6 +534,10 @@ data:
   THAT_SANDBOX_K8S_NAMESPACE: "${AGENT_NAMESPACE}"
   THAT_SANDBOX_K8S_REGISTRY: "${REGISTRY_PULL_HOST}"
   THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT: "${REGISTRY_PUSH_ENDPOINT}"
+  THAT_CLUSTER_BACKEND: "kubernetes"
+  THAT_CLUSTER_CNI: "$(if [[ "${INSTALL_CILIUM}" == "true" ]]; then echo cilium; else echo flannel; fi)"
+  THAT_CLUSTER_TAILSCALE: "${INSTALL_TAILSCALE_OPERATOR}"
+  THAT_CLUSTER_K9S: "${INSTALL_K9S}"
 EOF
 
 # secret.yaml — use the correct env var name for the runtime
@@ -464,8 +567,8 @@ $SUDO chmod 600 "${OVERLAY_DIR}/secret.yaml"
 
 ok "Overlay written to ${OVERLAY_DIR}"
 
-# ── Step 6: Deploy ────────────────────────────────────────────────────────────
-header "Step 6 — Deploying to cluster"
+# ── Step 9: Deploy ────────────────────────────────────────────────────────────
+header "Step 9 — Deploying to cluster"
 
 info "Applying manifests…"
 ${KUBECTL} apply -k "${OVERLAY_DIR}"

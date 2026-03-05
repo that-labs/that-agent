@@ -34,16 +34,27 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
     match that_sandbox::backend::SandboxMode::from_env() {
         that_sandbox::backend::SandboxMode::Docker => {
             let socket = that_sandbox::docker::docker_socket_status();
+            let tailscale = std::env::var("THAT_CLUSTER_TAILSCALE").unwrap_or_default();
+            let mut infra = String::new();
+            if tailscale == "true" {
+                infra.push_str(
+                    "                     - **Tailscale**: available — load `read_skill cluster-management tailscale-docker` for mesh exposure.\n"
+                );
+            }
+            let skill_hint = "                     - **Cluster management skill**: Use `read_skill cluster-management` for networking and operational patterns. \
+                     Load Docker-specific references (networking-docker, operations-docker) for detailed guidance.\n\n";
             if socket.enabled {
                 format!(
                     "### Runtime Backend: Docker\n\
                      - Mode: `docker`\n\
                      - Host Docker socket: enabled at `{}`\n\
+                     {infra}\
                      - You can orchestrate sibling containers and compose stacks from inside this sandbox.\n\
                      - For \"run/deploy this app\" requests, prefer Docker-native flows (`docker build`, `docker run`, `docker compose`).\n\
                      - If the user explicitly asks to run/deploy \"in Docker\", execute a Docker workflow and report container/port details.\n\
                      - If `docker` CLI is missing in-container, install it (`sudo apt-get update && sudo apt-get install -y docker.io`).\n\
-                     - Do not default to `python3 -m http.server` for deployment requests; use it only for temporary static preview when explicitly acceptable.\n\n",
+                     - Do not default to `python3 -m http.server` for deployment requests; use it only for temporary static preview when explicitly acceptable.\n\
+                     {skill_hint}",
                     socket.path.display()
                 )
             } else {
@@ -51,19 +62,41 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                     "### Runtime Backend: Docker\n\
                      - Mode: `docker`\n\
                      - Host Docker socket: unavailable at `{}`\n\
+                     {infra}\
                      - You can still run processes in this sandbox container, but you cannot spawn sibling host containers via Docker socket.\n\
-                     - If the user explicitly needs host-level Docker orchestration, state the socket limitation clearly.\n\n",
+                     - If the user explicitly needs host-level Docker orchestration, state the socket limitation clearly.\n\
+                     {skill_hint}",
                     socket.path.display()
                 )
             }
         }
         that_sandbox::backend::SandboxMode::Kubernetes => {
             let k8s = that_sandbox::kubernetes::KubernetesSandboxClient::from_env(&agent.name);
+            let cni = std::env::var("THAT_CLUSTER_CNI").unwrap_or_default();
+            let tailscale = std::env::var("THAT_CLUSTER_TAILSCALE").unwrap_or_default();
+            let k9s = std::env::var("THAT_CLUSTER_K9S").unwrap_or_default();
+            let mut infra = String::new();
+            if !cni.is_empty() {
+                infra.push_str(&format!(
+                    "                 - **CNI**: `{cni}` — load `read_skill cluster-management cilium` for L7 policies, zero-trust, and flow observability.\n"
+                ));
+            }
+            if tailscale == "true" {
+                infra.push_str(
+                    "                 - **Tailscale Operator**: installed — load `read_skill cluster-management tailscale-k8s` for mesh exposure.\n"
+                );
+            }
+            if k9s == "true" {
+                infra.push_str(
+                    "                 - **K9s**: available on host for interactive cluster inspection.\n"
+                );
+            }
             format!(
                 "### Runtime Backend: Kubernetes\n\
                  - Mode: `kubernetes`\n\
                  - Namespace: `{}`\n\
                  - Registry: `{}`\n\
+                 {infra}\
                  - Use `k8s_registry_push` from `<system-reminder>` for in-cluster push endpoint when it differs from image reference registry.\n\
                  - Base deployment includes a rootless BuildKit sidecar exposed via `${{BUILDKIT_HOST}}`.\n\
                  - Use `image_build_backend` from `<system-reminder>` to choose builder (`buildkit`, `docker`, or `none`) and follow it strictly.\n\
@@ -77,7 +110,9 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                  - Validate with `kubectl rollout status` and list managed resources after deploy.\n\
                  - **Environment framing:** You live in a Kubernetes cluster, not on a local machine. \
                  When reporting outcomes, use cluster-native language (\"deployed\", \"running in the namespace\", \
-                 \"served from the cluster\") — never say \"on disk\" or \"on the local filesystem\".\n\n",
+                 \"served from the cluster\") — never say \"on disk\" or \"on the local filesystem\".\n\
+                 - **Cluster management skill**: Use `read_skill cluster-management` for networking, security policies, and operational patterns. \
+                 Load backend-specific references (networking-k8s, operations-k8s) for detailed guidance.\n\n",
                 k8s.namespace, k8s.registry
             )
         }
