@@ -194,6 +194,40 @@ kubectl -n that-<agent-name> exec -it deploy/that-agent -- that run chat --agent
 k9s
 ```
 
+#### RBAC — what the agent can access
+
+The agent runs as a **namespace-scoped** ServiceAccount (`that-agent`) with a Role — **not** a ClusterRole. It has no cluster-wide permissions. All access is confined to its own namespace (`that-<agent-name>`).
+
+| API Group | Resources | Verbs | Why |
+|-----------|-----------|-------|-----|
+| `""` (core) | pods, pods/log, services, endpoints, configmaps, secrets, serviceaccounts, persistentvolumeclaims, events | all | Deploy and manage plugin workloads, read logs, manage config |
+| `apps` | deployments, statefulsets, daemonsets, replicasets | all | Create/update/rollback plugin deployments |
+| `batch` | jobs, cronjobs | all | Run one-off build jobs and scheduled tasks |
+| `networking.k8s.io` | ingresses, networkpolicies | all | Manage service exposure and zero-trust network policies |
+| `autoscaling` | horizontalpodautoscalers | all | Scale plugin workloads |
+| `policy` | poddisruptionbudgets | all | Manage disruption budgets for resilient deployments |
+| `rbac.authorization.k8s.io` | roles, rolebindings | all | Create scoped RBAC for sub-agent ServiceAccounts |
+| `*` (wildcard) | `*` | all | Access namespaced custom resources managed by plugins (e.g. Tailscale proxies, CRDs from operator charts) |
+
+**What this means for cluster admins:**
+
+- The agent **cannot** access resources in other namespaces
+- The agent **cannot** create or modify ClusterRoles, ClusterRoleBindings, Namespaces, Nodes, or any cluster-scoped resource
+- The agent **cannot** escalate beyond its own namespace boundary
+- The wildcard rule (`apiGroups: ["*"]`) applies only to **namespaced** resources — it exists so the agent can interact with CRDs (like Tailscale proxy StatefulSets) without enumerating every possible operator CRD in advance
+- The pod runs as **non-root** (UID 1000) with no host path mounts
+
+**Hardening options:**
+
+| Action | Effect |
+|--------|--------|
+| Remove the `*/*` wildcard rule | Restrict to only the explicitly listed API groups — tighter but may break CRD-based operators |
+| Remove `secrets` from core resources | Agent loses ability to manage secrets for its plugins (must be pre-created by operator) |
+| Remove `rbac.authorization.k8s.io` | Agent cannot create RBAC for sub-agents (must be pre-created) |
+| Add `resourceNames` constraints | Lock specific resources the agent can touch (most restrictive) |
+
+The full Role manifest is at [`deploy/k8s/base/role.yaml`](./deploy/k8s/base/role.yaml).
+
 ### Docker
 
 ```bash
