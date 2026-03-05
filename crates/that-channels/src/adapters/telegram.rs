@@ -266,7 +266,7 @@ impl TelegramAdapter {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            debug!(channel = %self.id, "setMessageReaction failed ({status}) — ignoring");
+            warn!(channel = %self.id, %emoji, "setMessageReaction failed ({status})");
         }
         Ok(())
     }

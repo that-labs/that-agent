@@ -740,7 +740,7 @@ pub async fn run_listen(
                             let r = Arc::clone(&router);
                             let ch = msg.channel_id.clone();
                             let chat = msg.conversation_id.clone().unwrap_or_default();
-                            tokio::spawn(async move { r.react_to_message(&ch, &chat, &mid, "\u{1F3AF}").await });
+                            tokio::spawn(async move { r.react_to_message(&ch, &chat, &mid, "\u{1FAE1}").await });
                         }
                         return;
                     }
