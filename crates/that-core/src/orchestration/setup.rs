@@ -57,9 +57,17 @@ pub async fn prepare_container(
     );
 
     if sandbox {
-        info!(agent = %agent.name, "Preparing Docker sandbox container");
-        let sc = SandboxClient::connect(agent, workspace).await?;
-        Ok(Some(sc.container_name))
+        let mode = that_sandbox::backend::SandboxMode::from_env();
+        if mode == that_sandbox::backend::SandboxMode::Kubernetes {
+            // Already running inside a Kubernetes pod — the pod is the sandbox.
+            // Tools route via THAT_SANDBOX_MODE; no Docker container needed.
+            info!(agent = %agent.name, "Kubernetes sandbox mode — pod is the sandbox, skipping container setup");
+            Ok(None)
+        } else {
+            info!(agent = %agent.name, "Preparing Docker sandbox container");
+            let sc = SandboxClient::connect(agent, workspace).await?;
+            Ok(Some(sc.container_name))
+        }
     } else {
         Ok(None)
     }
