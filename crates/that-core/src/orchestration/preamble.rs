@@ -201,12 +201,7 @@ pub fn build_preamble(
             preamble.push('\n');
         }
 
-        preamble.push_str(
-            "\n> **On self-editing Identity.md or Soul.md**: Before any change, read the file fully. \
-             Understand the why behind each section. \
-             Edit with surgical precision — these files are your identity, not a scratch pad. \
-             After editing, re-read the result to confirm coherence.\n\n",
-        );
+        preamble.push('\n');
     }
 
     // ── 2. Harness — compiled (runtime-volatile paths and modes) ─────────────
@@ -253,16 +248,9 @@ pub fn build_preamble(
     preamble.push_str(
         "## Tools Available\n\
          Call typed tools by name. Use `read_skill <name>` to load a skill reference before using it.\n\
-         For existing code/skill/plugin files, prefer `code_edit` for targeted edits; use `fs_write` \
-         mainly for creating new files or explicit full-file rewrites.\n\
-         After every successful `code_edit`, call `code_read` on that file to verify the actual result before doing another edit or finalizing your response.\n\
-         Heartbeat schedules support `once|minutely|hourly|daily|weekly` and cron expressions (`cron: */5 * * * *`).\n\
-         For reminders or deferred one-time tasks, use `schedule: once` with a `not_before:` field set to an RFC3339 timestamp — the entry will not fire until that time. \
-         Do not use `priority: urgent` or cron hacks for reminders; just set `not_before` to the target time.\n\
-         For recurring entries, use `status: running`; set `status: done` only to disable.\n\
-         Prefer Heartbeat schedules over installing/configuring system cron daemons for agent recurrence.\n\
-         To set your timezone, add `timezone = \"IANA/Name\"` to your agent config.toml — never hack shell profiles or /etc/localtime. \
-         The runtime uses this field for wall-clock schedules (daily, cron) and all timestamps.\n\n",
+         Heartbeat fields: `schedule` (`once|minutely|hourly|daily|weekly|cron: <expr>`), \
+         `status` (`running|done`), `priority` (`normal|urgent`), `not_before` (RFC3339 timestamp).\n\
+         Your Agents.md defines tool habits and workflow preferences.\n\n",
     );
 
     // ── 3.1. Communication — keep responses human ─────────────────────────────
@@ -280,8 +268,6 @@ pub fn build_preamble(
     // where its memory store is and that it is empty — so it knows to call mem_recall.
     // Full chunks live in SQLite; the agent fetches them on demand via mem_recall.
 
-    let can_write = sandbox || trusted_local;
-
     preamble.push_str("## Memory Index\n\n");
     if let Some(mem) = &ws.memory {
         preamble.push_str(mem);
@@ -290,22 +276,7 @@ pub fn build_preamble(
         }
     } else {
         preamble.push_str(
-            "> Memory store is empty — no compaction summaries yet.\n\
-             > Call `mem_recall \"<topic>\"` to search, `mem_add` to store, \
-             and `mem_compact` to create a pinned summary.\n",
-        );
-        if can_write {
-            preamble.push_str(
-                "> After your first `mem_compact`, write `Memory.md` in your agent directory \
-                 with the index format described in the default template.\n",
-            );
-        }
-    }
-    if can_write {
-        preamble.push_str(
-            "> After each `mem_compact`, update this file: append a row to Compaction Summaries \
-             (`| date | topic | recall query |`) and refresh the Active Topics line. \
-             Keep it thin — pointers only, never full content.\n",
+            "> Memory store is empty. Your Agents.md describes how to use it.\n",
         );
     }
     preamble.push('\n');
@@ -387,14 +358,6 @@ pub fn build_preamble(
              This environment is yours entirely — no human approval is needed for any action inside it.\n\n",
         ));
         preamble.push_str(&backend_block);
-        preamble.push_str(
-            "### Kubernetes Deployment Hygiene\n\
-             - Use stable resource names and labels; do not create timestamp/random-suffixed Deployment names unless explicitly requested.\n\
-             - For repeat deploys, patch/apply the same Deployment instead of creating parallel ones.\n\
-             - Keep default plugin workloads at `replicas: 1` unless user asks for horizontal scaling.\n\
-             - If rollout fails or pods are evicted, investigate first (`kubectl describe`, `kubectl logs`, `kubectl get events`) and fix root cause before re-applying.\n\
-             - After recovery, clean stale failed/evicted pods for that app label so the namespace does not accumulate dead pods.\n\n",
-        );
         preamble.push_str(
             "Pre-installed: Rust, Go, Python 3, Node/TypeScript (pytest, requests available).\n\
              Install extras: `sudo apt-get install -y <pkg>` or `pip3 install <pkg>`.\n\n",
