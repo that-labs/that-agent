@@ -267,6 +267,14 @@ pub fn build_preamble(
          The runtime uses this field for wall-clock schedules (daily, cron) and all timestamps.\n\n",
     );
 
+    // ── 3.1. Communication — keep responses human ─────────────────────────────
+
+    preamble.push_str(
+        "## Communication\n\n\
+         Reply with the outcome, not the process. No file paths, tool names, or internal details \
+         unless the user asks. Keep it clear and simple.\n\n",
+    );
+
     // ── 3.5. Memory Index — thin SQLite pointer map (always injected) ─────────
     //
     // Memory.md is a navigation index, not a content store. If the file exists,
