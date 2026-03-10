@@ -143,7 +143,10 @@ fn redact_secrets(s: &str) -> String {
                 .map(|i| i + 1)
                 .unwrap_or(0);
             let var_name = &out[var_start..abs_eq + suffix.len()];
-            if !var_name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+            if !var_name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            {
                 search_from = abs_eq + needle.len();
                 continue;
             }
@@ -219,14 +222,18 @@ mod redact_tests {
     fn pem_private_key() {
         let s = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3...\n-----END RSA PRIVATE KEY-----";
         let r = redact_secrets(s);
-        assert!(r.contains("-----BEGIN RSA PRIVATE KEY-----"), "header stripped: {r}");
+        assert!(
+            r.contains("-----BEGIN RSA PRIVATE KEY-----"),
+            "header stripped: {r}"
+        );
         assert!(!r.contains("MIIEpA"), "key material leaked: {r}");
         assert!(r.contains("***"), "no redaction: {r}");
     }
 
     #[test]
     fn pem_ec_key_inline() {
-        let s = r#"echo "-----BEGIN EC PRIVATE KEY-----\nMHQCAQ...stuff-----END EC PRIVATE KEY-----""#;
+        let s =
+            r#"echo "-----BEGIN EC PRIVATE KEY-----\nMHQCAQ...stuff-----END EC PRIVATE KEY-----""#;
         let r = redact_secrets(s);
         assert!(!r.contains("MHQCAQ"), "key material leaked: {r}");
     }

@@ -398,9 +398,15 @@ pub fn rebuild_history(entries: &[TranscriptEntry]) -> Vec<crate::agent_loop::Me
                 history.push(crate::agent_loop::Message::assistant(content));
             }
             TranscriptEvent::Restart {
-                last_task, last_tool, ..
+                last_task,
+                last_tool,
+                ..
             } => {
-                let ctx = InterruptedRun { run_id: String::new(), last_task: last_task.clone(), last_tool: last_tool.clone() };
+                let ctx = InterruptedRun {
+                    run_id: String::new(),
+                    last_task: last_task.clone(),
+                    last_tool: last_tool.clone(),
+                };
                 append_restart_marker(&mut history, &ctx);
             }
             _ => {}
@@ -453,10 +459,16 @@ pub fn rebuild_history_recent(
                 }
             }
             TranscriptEvent::Restart {
-                last_task, last_tool, ..
+                last_task,
+                last_tool,
+                ..
             } => {
                 // Persisted restart marker — inject as a synthetic pair.
-                let ctx = InterruptedRun { run_id: String::new(), last_task: last_task.clone(), last_tool: last_tool.clone() };
+                let ctx = InterruptedRun {
+                    run_id: String::new(),
+                    last_task: last_task.clone(),
+                    last_tool: last_tool.clone(),
+                };
                 let (user_msg, asst_msg) = restart_marker_pair(&ctx);
                 pairs.push((user_msg, asst_msg));
                 has_restart_event = true;
@@ -516,7 +528,8 @@ fn restart_marker_pair(ctx: &InterruptedRun) -> (String, String) {
     msg.push_str(" Assess the situation before continuing.]");
     (
         msg,
-        "Understood — I was interrupted. I'll check the current state before proceeding.".to_string(),
+        "Understood — I was interrupted. I'll check the current state before proceeding."
+            .to_string(),
     )
 }
 
@@ -563,7 +576,11 @@ fn find_interrupted_run(entries: &[TranscriptEntry]) -> Option<InterruptedRun> {
             _ => {}
         }
     }
-    if open > 0 { current } else { None }
+    if open > 0 {
+        current
+    } else {
+        None
+    }
 }
 
 /// Parse a session ID into a human-readable timestamp string.

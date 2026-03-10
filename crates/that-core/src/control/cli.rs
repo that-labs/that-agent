@@ -3,11 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(
-    name = "that-agent",
-    about = "Autonomous AI agent framework",
-    version
-)]
+#[command(name = "that-agent", about = "Autonomous AI agent framework", version)]
 pub struct Cli {
     /// Workspace directory (overrides config)
     #[arg(long, global = true)]

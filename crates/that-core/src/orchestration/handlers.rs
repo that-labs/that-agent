@@ -92,9 +92,7 @@ pub fn handle_session_command(ws: &WorkspaceConfig, command: SessionCommands) ->
                         last_task,
                         last_tool,
                     } => {
-                        let run = interrupted_run_id
-                            .as_deref()
-                            .unwrap_or("unknown");
+                        let run = interrupted_run_id.as_deref().unwrap_or("unknown");
                         println!("\n[{ts}] ── RESTART (interrupted run: {run}) ──");
                         if let Some(task) = last_task {
                             println!("  task: {task}");

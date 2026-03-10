@@ -48,8 +48,8 @@ pub fn create_checkpoint(file_path: &Path, create_branch: bool) -> Result<GitChe
     );
 
     // Get current branch name
-    let original_branch = git(&repo_path, &["branch", "--show-current"])
-        .unwrap_or_else(|_| "HEAD".to_string());
+    let original_branch =
+        git(&repo_path, &["branch", "--show-current"]).unwrap_or_else(|_| "HEAD".to_string());
     let original_branch = if original_branch.is_empty() {
         "HEAD".to_string()
     } else {
@@ -106,9 +106,8 @@ pub fn create_checkpoint(file_path: &Path, create_branch: bool) -> Result<GitChe
 /// Restore a checkpoint (pop stash, switch back to original branch).
 pub fn restore_checkpoint(checkpoint: &GitCheckpoint) -> Result<(), GitError> {
     if checkpoint.stash_created {
-        git(&checkpoint.repo_path, &["stash", "pop"]).map_err(|e| {
-            GitError::CommandFailed(format!("stash pop failed: {}", e))
-        })?;
+        git(&checkpoint.repo_path, &["stash", "pop"])
+            .map_err(|e| GitError::CommandFailed(format!("stash pop failed: {}", e)))?;
     }
 
     if let Some(ref branch) = checkpoint.safety_branch {
