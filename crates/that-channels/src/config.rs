@@ -13,6 +13,11 @@ impl AdapterType {
     pub const TUI: &'static str = "tui";
     pub const TELEGRAM: &'static str = "telegram";
     pub const HTTP: &'static str = "http";
+    pub const GATEWAY: &'static str = "gateway";
+
+    pub fn is_http(&self) -> bool {
+        matches!(self.as_str(), Self::HTTP | Self::GATEWAY)
+    }
 
     /// Normalize an adapter kind.
     pub fn new(value: impl Into<String>) -> Self {

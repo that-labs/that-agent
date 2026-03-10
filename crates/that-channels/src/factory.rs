@@ -87,7 +87,7 @@ impl ChannelFactoryRegistry {
             .filter(|s| !s.is_empty());
 
         for adapter_cfg in config.enabled_adapters() {
-            if adapter_cfg.adapter_type.as_str() == AdapterType::HTTP {
+            if adapter_cfg.adapter_type.is_http() {
                 has_http = true;
             }
             if mode == ChannelBuildMode::Headless && adapter_cfg.adapter_type.is_tui() {
@@ -169,7 +169,7 @@ impl ChannelFactoryRegistry {
             )))
         });
 
-        self.register_mut(AdapterType::HTTP, |cfg, id| {
+        let http_factory: FactoryFn = Arc::new(|cfg, id| {
             let bind_addr = cfg
                 .extra_value("bind_addr")
                 .and_then(|v| v.as_str())
@@ -190,6 +190,12 @@ impl ChannelFactoryRegistry {
                 request_timeout_secs,
             )))
         });
+        self.factories.insert(
+            AdapterType::from(AdapterType::HTTP),
+            Arc::clone(&http_factory),
+        );
+        self.factories
+            .insert(AdapterType::from(AdapterType::GATEWAY), http_factory);
     }
 }
 
