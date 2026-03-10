@@ -1,4 +1,4 @@
-//! Token budget engine for Anvil.
+//! Token budget engine for that-tools.
 //!
 //! Every command output passes through this pipeline:
 //! 1. Tool produces a typed result struct
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn test_render_markdown_index_status() {
         let value = serde_json::json!({
-            "path": ".anvil/index.db",
+            "path": ".that-tools/index.db",
             "total_files": 19,
             "total_symbols": 429,
             "total_refs": 780,

@@ -466,7 +466,7 @@ mod tests {
         fs::create_dir(tmp.path().join("src")).unwrap();
         fs::write(
             tmp.path().join("src").join("lib.rs"),
-            "//! Token budget engine for Anvil.\n\npub fn emit() {}\n",
+            "//! Token budget engine for that-tools.\n\npub fn emit() {}\n",
         )
         .unwrap();
 

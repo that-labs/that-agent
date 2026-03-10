@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "that-agent",
-    about = "Anvil-first autonomous agent powered by Rig.rs",
+    about = "Autonomous AI agent framework",
     version
 )]
 pub struct Cli {

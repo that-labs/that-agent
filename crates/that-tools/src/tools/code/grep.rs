@@ -1,6 +1,6 @@
 //! Code grep — keyword search with .gitignore awareness and token-budget output.
 //!
-//! Unlike raw grep, `anvil code grep` returns deduplicated, ranked results
+//! Unlike raw grep, `code grep` returns deduplicated, ranked results
 //! with structural context. Results are grouped by file, with surrounding
 //! context lines and symbol annotations.
 

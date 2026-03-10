@@ -18,7 +18,7 @@ The foundation — orchestration, tools, memory, channels, sandbox, eval — is 
 
 2. **Continuity survives restarts.** Sessions, memory, workspace files, and heartbeat state persist to disk. An agent can be stopped and restarted without losing context, identity, or scheduled work.
 
-3. **The sandbox is the trust boundary.** On the host, destructive tools default to Deny. In a sandbox (Docker or Kubernetes), the container/pod boundary is the safety perimeter, and destructive tools are elevated to Allow. There is no middle ground.
+3. **The sandbox is the trust boundary.** On the host, destructive tools default to Deny. In a sandbox (Kubernetes pod or Docker container), the boundary is the safety perimeter, and destructive tools are elevated to Allow. There is no middle ground.
 
 4. **Skills and plugins extend without recompilation.** New capabilities are added via markdown skill files and TOML plugin manifests at runtime. The framework discovers, validates, and injects them without code changes.
 
@@ -37,7 +37,7 @@ Seven workspace crates with strict ownership boundaries.
 | **that-tools** | Tool capabilities, dispatch API (`ToolRequest` -> `ToolResponse`), policy model (Allow/Prompt/Deny), memory engine, search engine, code analysis, filesystem execution | Orchestration, sessions, preamble |
 | **that-core** | Agent runtime, preamble building, skill discovery, plugin integration, session transcript lifecycle, sandbox coordination (delegates to that-sandbox). Run modes: task, chat, TUI, listen, eval, channel | Tool definitions, policy model |
 | **that-cli** | Unified binary. Dispatches orchestration commands or low-level tool invocations | Runtime logic — pure dispatch layer |
-| **that-sandbox** | Docker/Kubernetes sandbox lifecycle, `SandboxMode` enum, `BackendClient` dispatch, exec routing | No workspace dependencies |
+| **that-sandbox** | Kubernetes-native sandbox lifecycle with Docker fallback, `SandboxMode` enum, `BackendClient` dispatch, exec routing | No workspace dependencies |
 | **that-channels** | `Channel` trait, capability model, `ChannelRouter`, inbound routing, channel hook, notify tool. Adapters: Telegram, HTTP | No workspace dependencies. TuiChannel lives in that-core to avoid circular dep |
 | **that-plugins** | Agent-scoped plugin discovery/enablement, commands, activations, routines, emoji catalogs, runtime queue | No workspace dependencies except that-sandbox |
 | **that-eval** | Scenario TOML format, step runner, assertion engine, LLM judge, persisted reports | Agent runtime — delegates entirely to that-core |
@@ -124,7 +124,7 @@ Transient network and server errors trigger exponential backoff: 1s, 2s, 4s, 8s,
 
 ### Sessions
 
-Each session produces a JSONL transcript file. Session IDs follow the format `YYYYMMDD-HHMMSS-XXXX`. Transcript events: `run_start`, `user_message`, `assistant_message`, `tool_call`, `tool_result`, `run_end`, `compaction`, `usage`. Sessions support history reconstruction and, in channel mode, sender-to-session mapping.
+Each session produces a JSONL transcript file. Session IDs follow the format `YYYYMMDD-HHMMSS-XXXX`. Transcript events: `run_start`, `user_message`, `assistant_message`, `tool_call`, `tool_result`, `run_end`, `restart`, `compaction`, `usage`. Sessions support history reconstruction and, in channel mode, sender-to-session mapping.
 
 ### Memory
 

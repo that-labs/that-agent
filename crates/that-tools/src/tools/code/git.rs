@@ -1,10 +1,9 @@
-//! Git safety operations for Anvil.
+//! Git safety operations for that-tools.
 //!
 //! Provides checkpoint/restore functionality to protect against edit failures.
-//! Uses git2 for repository detection and status reads, and git CLI for
-//! write operations (stash, branch) for reliability.
+//! Uses git CLI for all repository operations.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
@@ -12,17 +11,26 @@ use thiserror::Error;
 pub enum GitError {
     #[error("not a git repository")]
     NotARepo,
-    #[error("git2 error: {0}")]
-    Git2(#[from] git2::Error),
     #[error("git command failed: {0}")]
     CommandFailed(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
 
+/// Run a git command in the given directory and return stdout on success.
+fn git(dir: &Path, args: &[&str]) -> Result<String, GitError> {
+    let output = Command::new("git").args(args).current_dir(dir).output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(GitError::CommandFailed(stderr))
+    }
+}
+
 /// A snapshot of git state that can be restored on failure.
 pub struct GitCheckpoint {
-    pub repo_path: std::path::PathBuf,
+    pub repo_path: PathBuf,
     pub original_branch: String,
     pub stash_created: bool,
     pub safety_branch: Option<String>,
@@ -34,28 +42,28 @@ pub struct GitCheckpoint {
 /// 2. If working tree is dirty, stash changes
 /// 3. If `create_branch` is true, create a safety branch
 pub fn create_checkpoint(file_path: &Path, create_branch: bool) -> Result<GitCheckpoint, GitError> {
-    // Discover the git repository
-    let repo = git2::Repository::discover(file_path)?;
-    let repo_path = repo.workdir().ok_or(GitError::NotARepo)?.to_path_buf();
+    // Discover the git repository root
+    let repo_path = PathBuf::from(
+        git(file_path, &["rev-parse", "--show-toplevel"]).map_err(|_| GitError::NotARepo)?,
+    );
 
     // Get current branch name
-    let head = repo.head()?;
-    let original_branch = head.shorthand().unwrap_or("HEAD").to_string();
+    let original_branch = git(&repo_path, &["branch", "--show-current"])
+        .unwrap_or_else(|_| "HEAD".to_string());
+    let original_branch = if original_branch.is_empty() {
+        "HEAD".to_string()
+    } else {
+        original_branch
+    };
 
     // Check if working tree is dirty
-    let statuses = repo.statuses(Some(
-        git2::StatusOptions::new()
-            .include_untracked(true)
-            .recurse_untracked_dirs(false),
-    ))?;
-
-    let is_dirty = !statuses.is_empty();
+    let porcelain = git(&repo_path, &["status", "--porcelain"]).unwrap_or_default();
+    let is_dirty = !porcelain.is_empty();
     let mut stash_created = false;
 
     if is_dirty {
-        // Use git CLI for stash (more reliable with edge cases)
         let output = Command::new("git")
-            .args(["stash", "push", "-m", "anvil: pre-edit safety stash"])
+            .args(["stash", "push", "-m", "that-tools: pre-edit safety stash"])
             .current_dir(&repo_path)
             .output()?;
 
@@ -75,17 +83,13 @@ pub fn create_checkpoint(file_path: &Path, create_branch: bool) -> Result<GitChe
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let branch_name = format!("anvil/edit-{}", timestamp);
-        let output = Command::new("git")
-            .args(["checkout", "-b", &branch_name])
-            .current_dir(&repo_path)
-            .output()?;
-        if output.status.success() {
-            Some(branch_name)
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("safety branch creation failed: {}", stderr);
-            None
+        let branch_name = format!("that-tools/edit-{}", timestamp);
+        match git(&repo_path, &["checkout", "-b", &branch_name]) {
+            Ok(_) => Some(branch_name),
+            Err(e) => {
+                tracing::warn!("safety branch creation failed: {}", e);
+                None
+            }
         }
     } else {
         None
@@ -102,39 +106,25 @@ pub fn create_checkpoint(file_path: &Path, create_branch: bool) -> Result<GitChe
 /// Restore a checkpoint (pop stash, switch back to original branch).
 pub fn restore_checkpoint(checkpoint: &GitCheckpoint) -> Result<(), GitError> {
     if checkpoint.stash_created {
-        let output = Command::new("git")
-            .args(["stash", "pop"])
-            .current_dir(&checkpoint.repo_path)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::CommandFailed(format!(
-                "stash pop failed: {}",
-                stderr
-            )));
-        }
+        git(&checkpoint.repo_path, &["stash", "pop"]).map_err(|e| {
+            GitError::CommandFailed(format!("stash pop failed: {}", e))
+        })?;
     }
 
     if let Some(ref branch) = checkpoint.safety_branch {
-        let output = Command::new("git")
-            .args(["checkout", &checkpoint.original_branch])
-            .current_dir(&checkpoint.repo_path)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::CommandFailed(format!(
+        git(
+            &checkpoint.repo_path,
+            &["checkout", &checkpoint.original_branch],
+        )
+        .map_err(|e| {
+            GitError::CommandFailed(format!(
                 "checkout back to {} failed: {}",
-                checkpoint.original_branch, stderr
-            )));
-        }
+                checkpoint.original_branch, e
+            ))
+        })?;
 
         // Delete the safety branch
-        let _ = Command::new("git")
-            .args(["branch", "-D", branch])
-            .current_dir(&checkpoint.repo_path)
-            .output();
+        let _ = git(&checkpoint.repo_path, &["branch", "-D", branch]);
     }
 
     Ok(())
@@ -143,7 +133,7 @@ pub fn restore_checkpoint(checkpoint: &GitCheckpoint) -> Result<(), GitError> {
 /// Check if a path is inside a git repository.
 #[allow(dead_code)]
 pub fn is_git_repo(path: &Path) -> bool {
-    git2::Repository::discover(path).is_ok()
+    git(path, &["rev-parse", "--show-toplevel"]).is_ok()
 }
 
 #[cfg(test)]
@@ -238,7 +228,7 @@ mod tests {
             .safety_branch
             .as_ref()
             .unwrap()
-            .starts_with("anvil/edit-"));
+            .starts_with("that-tools/edit-"));
 
         // Restore should switch back to original branch
         restore_checkpoint(&cp).unwrap();

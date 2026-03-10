@@ -1,7 +1,7 @@
-//! Session tracking for Anvil.
+//! Session tracking for that-tools.
 //!
 //! Lightweight per-session token accounting and compaction event tracking.
-//! State is persisted as JSON at `~/.local/share/anvil/sessions.json`
+//! State is persisted as JSON at `~/.local/share/that-agent/sessions.json`
 //! (configurable via `config.session.sessions_path`).
 
 use serde::{Deserialize, Serialize};

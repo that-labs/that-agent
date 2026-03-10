@@ -1,4 +1,4 @@
-//! Benchmarks for core Anvil operations.
+//! Benchmarks for core that-tools operations.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
@@ -10,7 +10,7 @@ fn bench_token_counting(c: &mut Criterion) {
 
     c.bench_function("count_tokens_short", |b| {
         b.iter(|| {
-            // We can't directly call anvil's count_tokens since it's not a library,
+            // We can't directly call that-tools' count_tokens since it's not a library,
             // but we benchmark the tiktoken tokenizer directly
             let bpe = tiktoken_rs::cl100k_base().unwrap();
             bpe.encode_ordinary(black_box(short_text)).len()

@@ -410,7 +410,7 @@ pub fn messages_to_anthropic(messages: &[Message], prompt_caching: bool) -> serd
 }
 
 /// Returns `true` when the credential is an Anthropic OAuth token
-/// (prefix `sk-ant-oat01-`) rather than a regular API key.
+/// (prefix `sk-ant-oat`) rather than a regular API key.
 fn is_oauth_token(token: &str) -> bool {
-    token.starts_with("sk-ant-oat01-")
+    token.starts_with("sk-ant-oat")
 }

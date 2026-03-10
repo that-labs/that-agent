@@ -431,13 +431,14 @@ pub async fn execute_agent_run_channel(
         gateway_url = gateway_url,
     );
     let channel_output_contract = format!(
-        "## Channel Output Contract\n\n\
-         - Produce one user-ready final message for this turn.\n\
-         - Follow formatting instructions for the active route (`{active}`) only.\n\
-         - Before finalizing, self-check channel syntax: no broken markdown, no unmatched code fences, and no stray escape artifacts (for example `\\(`, `\\-`, `\\:`) in user-visible text.\n\
-         - If channel-specific formatting is uncertain, prefer plain readable text over complex markdown.\n\
-         - Do not mention internal tools, prompt rules, or hidden reasoning.\n\
-         - Keep the response concise, legible on mobile, and directly actionable.",
+        "## Channel Output\n\n\
+         Your final message goes directly to the human on `{active}`.\n\
+         Your Communication Style (from Agents.md) applies here — follow it.\n\n\
+         - Produce one final message per turn. Follow formatting instructions for `{active}` only.\n\
+         - Self-check channel syntax before sending: no broken markdown, no unmatched fences, \
+         no stray escape artifacts.\n\
+         - When unsure about channel formatting, prefer plain readable text.\n\
+         - Keep it concise and legible on mobile.",
         active = active_channel,
     );
     // Keep the system message = stable preamble only so the prompt cache always hits.

@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
-# that-agent VPS installer
+# that-agent installer — cross-platform Kubernetes setup
 #
 # One-liner usage:
 #   curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
 #
 # Or download and run with flags:
-#   bash install.sh [--image <image:tag>] [--namespace <ns>] [--no-k3s] [--no-cilium] [--no-tailscale] [--no-k9s] [--no-subagents] [--cluster-admin]
+#   bash install.sh [--image <image:tag>] [--namespace <ns>] [--no-cilium] [--no-tailscale] [--no-k9s] [--no-subagents] [--cluster-admin] [--k3d] [--k3s]
 #
 # What this script does:
-#   1. Optionally installs k3s (lightweight Kubernetes) if not already present
+#   1. Detects platform and installs Kubernetes (k3s on Linux, k3d on macOS — or override with --k3s/--k3d)
 #   2. Prompts for agent name, description, and LLM API credentials
 #   3. Optionally configures a Telegram channel
 #   4. Generates a Kubernetes overlay for your agent
 #   5. Deploys to the local cluster
+#
+# Platform strategy:
+#   Linux VPS/server → k3s (single binary, containerd, no Docker needed)
+#   macOS            → k3d (runs k3s inside Docker — requires Docker Desktop)
+#   Linux desktop    → k3s by default, --k3d to use Docker instead
 
 set -euo pipefail
 
@@ -35,13 +40,15 @@ header(){ echo -e "\n${_BOLD}$*${_RESET}"; }
 # ── Defaults ────────────────────────────────────────────────────────────────
 AGENT_IMAGE="${AGENT_IMAGE:-ghcr.io/that-labs/that-agent:latest}"
 AGENT_NAMESPACE="${AGENT_NAMESPACE:-}"   # derived from agent name if not set
-INSTALL_K3S="${INSTALL_K3S:-true}"
 INSTALL_CILIUM="${INSTALL_CILIUM:-true}"
 INSTALL_TAILSCALE_OPERATOR="${INSTALL_TAILSCALE_OPERATOR:-true}"
 INSTALL_K9S="${INSTALL_K9S:-true}"
 ENABLE_SUBAGENTS="${ENABLE_SUBAGENTS:-true}"
 CLUSTER_ADMIN="${CLUSTER_ADMIN:-false}"
+FORCE_K3S="${FORCE_K3S:-false}"
+FORCE_K3D="${FORCE_K3D:-false}"
 KUBECTL="kubectl"
+K3D_CLUSTER_NAME="that-agent"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
 REPO_ROOT=""
 if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/../build.sh" ]]; then
@@ -49,93 +56,115 @@ if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/../build.sh" ]]; then
 fi
 OVERLAY_DIR=""              # set after we know the agent name
 
-# In-cluster registry — NodePort on the host so k3s containerd can pull,
-# ClusterIP DNS so BuildKit (inside pods) can push.
+# In-cluster registry (k3s path)
 REGISTRY_NODEPORT=30500
 REGISTRY_NAMESPACE="that-registry"
-# k3s image refs use this hostname; registries.yaml maps it → localhost:NodePort
+# k3d uses its own registry; these are set in install_k3d/install_registry
 REGISTRY_PULL_HOST="registry.localhost:5000"
-# BuildKit (running inside a pod) pushes via in-cluster DNS
 REGISTRY_PUSH_ENDPOINT="registry.${REGISTRY_NAMESPACE}.svc.cluster.local:5000"
+K3D_REGISTRY_NAME="that-registry"
+K3D_REGISTRY_PORT=5050  # 5000 is taken by macOS AirPlay Receiver
+
+# Resolved during cluster setup
+CLUSTER_TOOL=""  # "k3s" or "k3d"
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --image)      AGENT_IMAGE="$2";    shift 2 ;;
     --namespace)  AGENT_NAMESPACE="$2"; shift 2 ;;
-    --no-k3s)     INSTALL_K3S=false;   shift   ;;
+    --k3s)        FORCE_K3S=true;      shift   ;;
+    --k3d)        FORCE_K3D=true;      shift   ;;
     --no-cilium)  INSTALL_CILIUM=false; shift  ;;
     --no-tailscale) INSTALL_TAILSCALE_OPERATOR=false; shift ;;
     --no-k9s)     INSTALL_K9S=false;   shift   ;;
     --no-subagents) ENABLE_SUBAGENTS=false; shift ;;
     --cluster-admin) CLUSTER_ADMIN=true; shift ;;
     --help|-h)
-      echo "Usage: $0 [--image IMAGE:TAG] [--namespace NS] [--no-k3s] [--no-cilium] [--no-tailscale] [--no-k9s] [--no-subagents] [--cluster-admin]"
+      echo "Usage: $0 [--image IMAGE:TAG] [--namespace NS] [--k3s] [--k3d] [--no-cilium] [--no-tailscale] [--no-k9s] [--no-subagents] [--cluster-admin]"
       exit 0
       ;;
     *) die "Unknown option: $1" ;;
   esac
 done
 
-# ── Platform check ──────────────────────────────────────────────────────────
-case "$(uname -s)" in
-  Linux) ;;
-  *) die "This installer targets Linux VPS environments. For local dev, use k3d or Docker directly." ;;
+if [[ "${FORCE_K3S}" == "true" && "${FORCE_K3D}" == "true" ]]; then
+  die "Cannot use both --k3s and --k3d."
+fi
+
+# ── Platform detection ────────────────────────────────────────────────────────
+PLATFORM="$(uname -s)"
+case "${PLATFORM}" in
+  Linux|Darwin) ;;
+  *) die "Unsupported platform: ${PLATFORM}. This installer supports Linux and macOS." ;;
 esac
 
-# ── Require root or sudo ─────────────────────────────────────────────────────
-if [[ $EUID -ne 0 ]]; then
-  SUDO="sudo"
-  if ! command -v sudo &>/dev/null; then
-    die "Run as root or install sudo."
-  fi
+# Decide cluster tool
+if [[ "${FORCE_K3S}" == "true" ]]; then
+  CLUSTER_TOOL="k3s"
+elif [[ "${FORCE_K3D}" == "true" ]]; then
+  CLUSTER_TOOL="k3d"
+elif [[ "${PLATFORM}" == "Darwin" ]]; then
+  CLUSTER_TOOL="k3d"
 else
-  SUDO=""
+  # Linux — default to k3s (lean, no Docker dependency)
+  CLUSTER_TOOL="k3s"
 fi
 
-# ── Step 1: k3s ─────────────────────────────────────────────────────────────
-header "Step 1 — Kubernetes (k3s)"
+info "Platform: ${PLATFORM}, cluster tool: ${CLUSTER_TOOL}"
 
-if command -v k3s &>/dev/null && k3s kubectl get nodes &>/dev/null 2>&1; then
-  ok "k3s is already running."
-  KUBECTL="k3s kubectl"
-elif command -v kubectl &>/dev/null && kubectl get nodes &>/dev/null 2>&1; then
-  ok "kubectl found and cluster is reachable — skipping k3s install."
-  INSTALL_K3S=false
-elif [[ "${INSTALL_K3S}" == "true" ]]; then
-  info "Installing k3s…"
-  K3S_ARGS="--disable traefik --write-kubeconfig-mode 644"
-  if [[ "${INSTALL_CILIUM}" == "true" ]]; then
-    K3S_ARGS="${K3S_ARGS} --flannel-backend=none --disable-network-policy"
-  fi
-  curl -sfL https://get.k3s.io | $SUDO sh -s - ${K3S_ARGS}
-
-  # Give k3s a moment to start
-  info "Waiting for k3s node to be ready…"
-  local_timeout=60
-  while ! k3s kubectl get nodes &>/dev/null 2>&1; do
-    local_timeout=$((local_timeout - 1))
-    if [[ $local_timeout -le 0 ]]; then
-      die "k3s did not become ready in time. Check: journalctl -u k3s"
+# ── Require root/sudo (k3s on Linux) or Docker (k3d) ─────────────────────────
+SUDO=""
+if [[ "${CLUSTER_TOOL}" == "k3s" ]]; then
+  if [[ $EUID -ne 0 ]]; then
+    SUDO="sudo"
+    if ! command -v sudo &>/dev/null; then
+      die "Run as root or install sudo."
     fi
-    sleep 1
-  done
-  ok "k3s is ready."
-  KUBECTL="k3s kubectl"
-
-  # Make kubeconfig available at ~/.kube/config
-  mkdir -p "${HOME}/.kube"
-  $SUDO cp /etc/rancher/k3s/k3s.yaml "${HOME}/.kube/config"
-  $SUDO chown "$(id -u):$(id -g)" "${HOME}/.kube/config"
-  export KUBECONFIG="${HOME}/.kube/config"
-  KUBECTL="kubectl"
-  ok "Kubeconfig written to ${HOME}/.kube/config"
-else
-  die "No running Kubernetes cluster found. Remove --no-k3s to install k3s automatically."
+  fi
+elif [[ "${CLUSTER_TOOL}" == "k3d" ]]; then
+  if ! command -v docker &>/dev/null; then
+    die "k3d requires Docker. Install Docker Desktop (macOS) or Docker Engine (Linux) first."
+  fi
+  if ! docker info &>/dev/null 2>&1; then
+    die "Docker is installed but not running. Start Docker and try again."
+  fi
 fi
 
-# Ensure local-path is the default StorageClass so PVCs without an explicit
-# storageClassName bind automatically.
+# ── Step 1: Kubernetes cluster ───────────────────────────────────────────────
+header "Step 1 — Kubernetes (${CLUSTER_TOOL})"
+
+if command -v kubectl &>/dev/null && kubectl get nodes &>/dev/null 2>&1; then
+  ok "Existing cluster reachable — skipping cluster install."
+  # Detect which tool manages this cluster
+  if command -v k3s &>/dev/null && k3s kubectl get nodes &>/dev/null 2>&1; then
+    CLUSTER_TOOL="k3s"
+    KUBECTL="k3s kubectl"
+  else
+    KUBECTL="kubectl"
+  fi
+  # For k3d: ensure registry exists and set endpoints
+  if [[ "${CLUSTER_TOOL}" == "k3d" ]]; then
+    if ! docker ps --filter "name=^that-registry$" --format '{{.Names}}' | grep -q "that-registry"; then
+      info "k3d registry not found — creating…"
+      k3d registry create that-registry --port "0.0.0.0:${K3D_REGISTRY_PORT}" 2>/dev/null || true
+      # Connect registry to the k3d cluster network
+      K3D_NETWORK="k3d-${K3D_CLUSTER_NAME}"
+      docker network connect "${K3D_NETWORK}" "that-registry" 2>/dev/null || true
+      ok "Registry created at localhost:${K3D_REGISTRY_PORT}"
+    fi
+    REGISTRY_PULL_HOST="${K3D_REGISTRY_NAME}:${K3D_REGISTRY_PORT}"
+    REGISTRY_PUSH_ENDPOINT="${K3D_REGISTRY_NAME}:${K3D_REGISTRY_PORT}"
+  fi
+elif [[ "${CLUSTER_TOOL}" == "k3s" ]]; then
+  install_k3s
+elif [[ "${CLUSTER_TOOL}" == "k3d" ]]; then
+  install_k3d
+else
+  die "No running Kubernetes cluster found."
+fi
+
+# Ensure local-path is the default StorageClass
 info "Ensuring local-path is the default StorageClass…"
 ${KUBECTL} patch storageclass local-path \
   -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' \
@@ -145,20 +174,175 @@ ${KUBECTL} patch storageclass local-path \
 # ── Step 2: Cilium CNI ────────────────────────────────────────────────────────
 if [[ "${INSTALL_CILIUM}" == "true" ]]; then
   header "Step 2 — Cilium CNI"
+  install_cilium
+else
+  info "Skipping Cilium CNI (--no-cilium)."
+fi
 
+# ── Step 3: Tailscale Operator ────────────────────────────────────────────────
+if [[ "${INSTALL_TAILSCALE_OPERATOR}" == "true" ]]; then
+  header "Step 3 — Tailscale Operator"
+  install_tailscale
+else
+  info "Skipping Tailscale Operator (--no-tailscale)."
+fi
+
+# ── Step 4: K9s ──────────────────────────────────────────────────────────────
+if [[ "${INSTALL_K9S}" == "true" ]]; then
+  header "Step 4 — K9s"
+  install_k9s
+else
+  info "Skipping K9s (--no-k9s)."
+fi
+
+# ── Step 5: In-cluster image registry ───────────────────────────────────────
+header "Step 5 — In-cluster image registry"
+install_registry
+
+# ── Step 6: Gather configuration ────────────────────────────────────────────
+header "Step 6 — Agent configuration"
+gather_config
+
+# ── Step 7: Build or pull image ──────────────────────────────────────────────
+header "Step 7 — Container image"
+resolve_image
+
+# ── Step 8: Generate overlay ─────────────────────────────────────────────────
+header "Step 8 — Generating Kubernetes overlay"
+generate_overlay
+
+# ── Step 9: Deploy ────────────────────────────────────────────────────────────
+header "Step 9 — Deploying to cluster"
+deploy
+
+# ── Done ──────────────────────────────────────────────────────────────────────
+header "Done"
+echo ""
+ok "Agent '${AGENT_NAME}' deployed to namespace '${AGENT_NAMESPACE}'."
+echo ""
+echo "  Useful commands:"
+echo ""
+echo "    # Follow agent logs"
+echo "    ${KUBECTL} -n ${AGENT_NAMESPACE} logs -f deploy/that-agent"
+echo ""
+echo "    # Open a shell inside the agent pod"
+echo "    ${KUBECTL} -n ${AGENT_NAMESPACE} exec -it deploy/that-agent -- bash"
+echo ""
+echo "    # Restart the agent"
+echo "    ${KUBECTL} -n ${AGENT_NAMESPACE} rollout restart deploy/that-agent"
+echo ""
+echo "    # Remove the agent entirely"
+echo "    ${KUBECTL} delete namespace ${AGENT_NAMESPACE}"
+if [[ "${CLUSTER_TOOL}" == "k3d" ]]; then
+  echo ""
+  echo "    # Delete the entire k3d cluster"
+  echo "    k3d cluster delete ${K3D_CLUSTER_NAME}"
+fi
+echo ""
+echo "  Your overlay lives at: ${OVERLAY_DIR}"
+echo "  The secret.yaml in that directory contains your API key — keep it safe."
+echo ""
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Functions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+install_k3s() {
+  info "Installing k3s…"
+  K3S_ARGS="--disable traefik --write-kubeconfig-mode 644"
+  if [[ "${INSTALL_CILIUM}" == "true" ]]; then
+    K3S_ARGS="${K3S_ARGS} --flannel-backend=none --disable-network-policy"
+  fi
+  curl -sfL https://get.k3s.io | $SUDO sh -s - ${K3S_ARGS}
+
+  info "Waiting for k3s node to be ready…"
+  local retries=60
+  while ! k3s kubectl get nodes &>/dev/null 2>&1; do
+    retries=$((retries - 1))
+    [[ $retries -le 0 ]] && die "k3s did not become ready in time. Check: journalctl -u k3s"
+    sleep 1
+  done
+  ok "k3s is ready."
+
+  # Make kubeconfig available at ~/.kube/config
+  mkdir -p "${HOME}/.kube"
+  $SUDO cp /etc/rancher/k3s/k3s.yaml "${HOME}/.kube/config"
+  $SUDO chown "$(id -u):$(id -g)" "${HOME}/.kube/config"
+  export KUBECONFIG="${HOME}/.kube/config"
+  KUBECTL="kubectl"
+  ok "Kubeconfig written to ${HOME}/.kube/config"
+}
+
+install_k3d() {
+  # Install k3d binary if needed
+  if ! command -v k3d &>/dev/null; then
+    info "Installing k3d…"
+    curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+    ok "k3d installed."
+  else
+    ok "k3d already installed."
+  fi
+
+  # Check if cluster already exists
+  if k3d cluster list 2>/dev/null | grep -q "^${K3D_CLUSTER_NAME} "; then
+    ok "k3d cluster '${K3D_CLUSTER_NAME}' already exists."
+    k3d kubeconfig merge "${K3D_CLUSTER_NAME}" --kubeconfig-merge-default --kubeconfig-switch-context 2>/dev/null
+  else
+    info "Creating k3d cluster '${K3D_CLUSTER_NAME}' with local registry…"
+    K3D_ARGS=(
+      cluster create "${K3D_CLUSTER_NAME}"
+      --registry-create "${K3D_REGISTRY_NAME}:0.0.0.0:${K3D_REGISTRY_PORT}"
+      --k3s-arg "--disable=traefik@server:0"
+    )
+    if [[ "${INSTALL_CILIUM}" == "true" ]]; then
+      K3D_ARGS+=(
+        --k3s-arg "--flannel-backend=none@server:0"
+        --k3s-arg "--disable-network-policy@server:0"
+      )
+    fi
+    k3d "${K3D_ARGS[@]}"
+    ok "k3d cluster '${K3D_CLUSTER_NAME}' created with registry at localhost:${K3D_REGISTRY_PORT}."
+  fi
+
+  # Set registry endpoints for k3d — the native registry is auto-configured in all k3s nodes
+  REGISTRY_PULL_HOST="${K3D_REGISTRY_NAME}:${K3D_REGISTRY_PORT}"
+  REGISTRY_PUSH_ENDPOINT="${K3D_REGISTRY_NAME}:${K3D_REGISTRY_PORT}"
+
+  KUBECTL="kubectl"
+  local retries=30
+  while ! ${KUBECTL} get nodes &>/dev/null 2>&1; do
+    retries=$((retries - 1))
+    [[ $retries -le 0 ]] && die "k3d cluster not reachable. Check: k3d cluster list"
+    sleep 1
+  done
+  ok "Cluster is reachable."
+}
+
+install_cilium() {
   if command -v cilium &>/dev/null; then
     ok "Cilium CLI already installed."
   else
     info "Installing Cilium CLI…"
     CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
     CLI_ARCH="amd64"
-    if [[ "$(uname -m)" == "aarch64" ]]; then CLI_ARCH="arm64"; fi
+    case "$(uname -m)" in
+      aarch64|arm64) CLI_ARCH="arm64" ;;
+    esac
+    case "${PLATFORM}" in
+      Linux)  CLI_OS="linux"  ;;
+      Darwin) CLI_OS="darwin" ;;
+    esac
     curl -L --fail --remote-name-all \
-      "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz" \
-      "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz.sha256sum"
-    sha256sum --check "cilium-linux-${CLI_ARCH}.tar.gz.sha256sum"
-    $SUDO tar xzvfC "cilium-linux-${CLI_ARCH}.tar.gz" /usr/local/bin
-    rm -f "cilium-linux-${CLI_ARCH}.tar.gz" "cilium-linux-${CLI_ARCH}.tar.gz.sha256sum"
+      "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-${CLI_OS}-${CLI_ARCH}.tar.gz" \
+      "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-${CLI_OS}-${CLI_ARCH}.tar.gz.sha256sum"
+    if command -v sha256sum &>/dev/null; then
+      sha256sum --check "cilium-${CLI_OS}-${CLI_ARCH}.tar.gz.sha256sum"
+    elif command -v shasum &>/dev/null; then
+      shasum -a 256 -c "cilium-${CLI_OS}-${CLI_ARCH}.tar.gz.sha256sum"
+    fi
+    ${SUDO:-} tar xzvfC "cilium-${CLI_OS}-${CLI_ARCH}.tar.gz" /usr/local/bin
+    rm -f "cilium-${CLI_OS}-${CLI_ARCH}.tar.gz" "cilium-${CLI_OS}-${CLI_ARCH}.tar.gz.sha256sum"
     ok "Cilium CLI installed."
   fi
 
@@ -169,14 +353,9 @@ if [[ "${INSTALL_CILIUM}" == "true" ]]; then
     cilium install --wait
     ok "Cilium CNI is ready."
   fi
-else
-  info "Skipping Cilium CNI (--no-cilium)."
-fi
+}
 
-# ── Step 3: Tailscale Operator ────────────────────────────────────────────────
-if [[ "${INSTALL_TAILSCALE_OPERATOR}" == "true" ]]; then
-  header "Step 3 — Tailscale Operator"
-
+install_tailscale() {
   # Ensure Helm is available
   if ! command -v helm &>/dev/null; then
     info "Installing Helm…"
@@ -221,37 +400,48 @@ if [[ "${INSTALL_TAILSCALE_OPERATOR}" == "true" ]]; then
       --wait
     ok "Tailscale Operator installed."
   fi
-else
-  info "Skipping Tailscale Operator (--no-tailscale)."
-fi
+}
 
-# ── Step 4: K9s ──────────────────────────────────────────────────────────────
-if [[ "${INSTALL_K9S}" == "true" ]]; then
-  header "Step 4 — K9s"
-
+install_k9s() {
   if command -v k9s &>/dev/null; then
     ok "K9s already installed."
-  else
-    info "Installing K9s…"
-    K9S_ARCH="amd64"
-    if [[ "$(uname -m)" == "aarch64" ]]; then K9S_ARCH="arm64"; fi
-    K9S_VERSION=$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-    curl -L --fail -o /tmp/k9s.tar.gz \
-      "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_${K9S_ARCH}.tar.gz"
-    $SUDO tar xzf /tmp/k9s.tar.gz -C /usr/local/bin k9s
-    rm -f /tmp/k9s.tar.gz
-    ok "K9s ${K9S_VERSION} installed."
+    return
   fi
-else
-  info "Skipping K9s (--no-k9s)."
-fi
 
-# ── Step 5: In-cluster image registry ───────────────────────────────────────
-header "Step 5 — In-cluster image registry"
+  info "Installing K9s…"
+  K9S_ARCH="amd64"
+  case "$(uname -m)" in
+    aarch64|arm64) K9S_ARCH="arm64" ;;
+  esac
+  case "${PLATFORM}" in
+    Linux)  K9S_OS="Linux"  ;;
+    Darwin) K9S_OS="Darwin" ;;
+  esac
+  K9S_VERSION=$(curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+  curl -L --fail -o /tmp/k9s.tar.gz \
+    "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_${K9S_OS}_${K9S_ARCH}.tar.gz"
+  ${SUDO:-} tar xzf /tmp/k9s.tar.gz -C /usr/local/bin k9s
+  rm -f /tmp/k9s.tar.gz
+  ok "K9s ${K9S_VERSION} installed."
+}
 
-info "Deploying registry:2 into namespace '${REGISTRY_NAMESPACE}' (NodePort ${REGISTRY_NODEPORT})…"
+install_registry() {
+  # k3d already has a native registry created during cluster setup
+  if [[ "${CLUSTER_TOOL}" == "k3d" ]]; then
+    ok "Using k3d native registry at localhost:${K3D_REGISTRY_PORT} (in-cluster: ${REGISTRY_PULL_HOST})"
+    echo ""
+    echo "  Push images from your host:"
+    echo "    docker tag myimage:latest localhost:${K3D_REGISTRY_PORT}/myimage:latest"
+    echo "    docker push localhost:${K3D_REGISTRY_PORT}/myimage:latest"
+    echo ""
+    echo "  In-cluster pull address: ${REGISTRY_PULL_HOST}/myimage:latest"
+    echo ""
+    return
+  fi
 
-${KUBECTL} apply -f - <<EOF
+  info "Deploying registry:2 into namespace '${REGISTRY_NAMESPACE}' (NodePort ${REGISTRY_NODEPORT})…"
+
+  ${KUBECTL} apply -f - <<EOF
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -323,198 +513,200 @@ spec:
   type: NodePort
 EOF
 
-# Tell k3s containerd to resolve the pull hostname via the NodePort on the host.
-# BuildKit (inside pods) reaches the registry via in-cluster ClusterIP DNS.
-REGISTRIES_YAML="/etc/rancher/k3s/registries.yaml"
-info "Writing ${REGISTRIES_YAML} (maps ${REGISTRY_PULL_HOST} → http://localhost:${REGISTRY_NODEPORT})…"
-$SUDO tee "${REGISTRIES_YAML}" > /dev/null <<EOF
+  # k3s needs a registries.yaml to resolve the pull hostname
+  if [[ "${CLUSTER_TOOL}" == "k3s" ]]; then
+    REGISTRIES_YAML="/etc/rancher/k3s/registries.yaml"
+    info "Writing ${REGISTRIES_YAML} (maps ${REGISTRY_PULL_HOST} → http://localhost:${REGISTRY_NODEPORT})…"
+    $SUDO tee "${REGISTRIES_YAML}" > /dev/null <<EOF
 mirrors:
   "${REGISTRY_PULL_HOST}":
     endpoint:
       - "http://localhost:${REGISTRY_NODEPORT}"
 EOF
-
-info "Restarting k3s to apply registry mirror configuration…"
-$SUDO systemctl restart k3s
-local_timeout=60
-while ! ${KUBECTL} get nodes &>/dev/null 2>&1; do
-  local_timeout=$((local_timeout - 1))
-  [[ $local_timeout -le 0 ]] && die "k3s did not recover after restart. Check: journalctl -u k3s"
-  sleep 1
-done
-
-info "Waiting for registry pod to be ready…"
-${KUBECTL} -n "${REGISTRY_NAMESPACE}" rollout status deploy/registry --timeout=120s
-ok "Registry ready — pull host: ${REGISTRY_PULL_HOST}, push endpoint: ${REGISTRY_PUSH_ENDPOINT}"
-
-# ── Step 6: Gather configuration ────────────────────────────────────────────
-header "Step 6 — Agent configuration"
-
-echo ""
-echo "  This installer will create a long-lived autonomous agent running on your cluster."
-echo "  The description you provide will be used to shape the agent's identity and"
-echo "  character during its first-run bootstrap."
-echo ""
-
-# Agent name
-while true; do
-  read -rp "  Agent name (lowercase, no spaces) [default: my-agent]: " AGENT_NAME < /dev/tty
-  AGENT_NAME="${AGENT_NAME:-my-agent}"
-  if [[ "${AGENT_NAME}" =~ ^[a-z][a-z0-9-]*$ ]]; then
-    break
+    info "Restarting k3s to apply registry mirror configuration…"
+    $SUDO systemctl restart k3s
+    local retries=60
+    while ! ${KUBECTL} get nodes &>/dev/null 2>&1; do
+      retries=$((retries - 1))
+      [[ $retries -le 0 ]] && die "k3s did not recover after restart. Check: journalctl -u k3s"
+      sleep 1
+    done
   fi
-  warn "Name must start with a letter and contain only lowercase letters, digits, and hyphens."
-done
 
-# Agent description — used as the bootstrap prompt
-echo ""
-echo "  Describe your agent in a few sentences. What is its purpose? What should it"
-echo "  focus on? What tone or personality do you want it to have?"
-echo "  (This is passed to the LLM at first boot to generate Soul.md and Identity.md.)"
-echo ""
-read -rp "  Agent description: " AGENT_DESCRIPTION < /dev/tty
-if [[ -z "${AGENT_DESCRIPTION}" ]]; then
-  AGENT_DESCRIPTION="A general-purpose autonomous agent that helps with software development, research, and task automation."
-  warn "No description provided. Using default."
-fi
+  info "Waiting for registry pod to be ready…"
+  ${KUBECTL} -n "${REGISTRY_NAMESPACE}" rollout status deploy/registry --timeout=120s
+  ok "Registry ready — pull host: ${REGISTRY_PULL_HOST}, push endpoint: ${REGISTRY_PUSH_ENDPOINT}"
+}
 
-# LLM key — auto-detect provider from key prefix, or pick up from env
-LLM_API_KEY="${ANTHROPIC_API_KEY:-${CLAUDE_CODE_OAUTH_TOKEN:-${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-}}}}"
-if [[ -n "${LLM_API_KEY}" ]]; then
-  ok "Detected API key from environment."
-else
+gather_config() {
   echo ""
-  echo "  Paste your API key (Anthropic, Claude Code OAuth, OpenAI, or OpenRouter)."
-  echo "  The provider will be detected automatically from the key prefix."
+  echo "  This installer will create a long-lived autonomous agent running on your cluster."
+  echo "  The description you provide will be used to shape the agent's identity and"
+  echo "  character during its first-run bootstrap."
   echo ""
-  read -rsp "  API key: " LLM_API_KEY < /dev/tty
-  echo ""
-fi
-if [[ -z "${LLM_API_KEY}" ]]; then
-  die "API key is required."
-fi
 
-# Detect provider from key prefix
-detect_provider() {
-  local key="$1"
-  if   [[ "${key}" == sk-ant-oat01-* ]]; then echo "anthropic"   # Claude Code OAuth
-  elif [[ "${key}" == sk-ant-* ]];        then echo "anthropic"
-  elif [[ "${key}" == sk-or-* ]];         then echo "openrouter"
-  elif [[ "${key}" == sk-* ]];            then echo "openai"
-  else echo ""
+  # Agent name
+  while true; do
+    read -rp "  Agent name (lowercase, no spaces) [default: my-agent]: " AGENT_NAME < /dev/tty
+    AGENT_NAME="${AGENT_NAME:-my-agent}"
+    if [[ "${AGENT_NAME}" =~ ^[a-z][a-z0-9-]*$ ]]; then
+      break
+    fi
+    warn "Name must start with a letter and contain only lowercase letters, digits, and hyphens."
+  done
+
+  # Agent description — used as the bootstrap prompt
+  echo ""
+  echo "  Describe your agent in a few sentences. What is its purpose? What should it"
+  echo "  focus on? What tone or personality do you want it to have?"
+  echo "  (This is passed to the LLM at first boot to generate Soul.md and Identity.md.)"
+  echo ""
+  read -rp "  Agent description: " AGENT_DESCRIPTION < /dev/tty
+  if [[ -z "${AGENT_DESCRIPTION}" ]]; then
+    AGENT_DESCRIPTION="A general-purpose autonomous agent that helps with software development, research, and task automation."
+    warn "No description provided. Using default."
+  fi
+
+  # LLM key — auto-detect provider from key prefix, or pick up from env
+  LLM_API_KEY="${ANTHROPIC_API_KEY:-${CLAUDE_CODE_OAUTH_TOKEN:-${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-}}}}"
+  if [[ -n "${LLM_API_KEY}" ]]; then
+    ok "Detected API key from environment."
+  else
+    echo ""
+    echo "  Paste your API key (Anthropic, Claude Code OAuth, OpenAI, or OpenRouter)."
+    echo "  The provider will be detected automatically from the key prefix."
+    echo ""
+    read -rsp "  API key: " LLM_API_KEY < /dev/tty
+    echo ""
+  fi
+  if [[ -z "${LLM_API_KEY}" ]]; then
+    die "API key is required."
+  fi
+
+  # Detect provider from key prefix
+  detect_provider() {
+    local key="$1"
+    if   [[ "${key}" == sk-ant-oat* ]];   then echo "anthropic"   # Claude Code OAuth
+    elif [[ "${key}" == sk-ant-* ]];        then echo "anthropic"
+    elif [[ "${key}" == sk-or-* ]];         then echo "openrouter"
+    elif [[ "${key}" == sk-* ]];            then echo "openai"
+    else echo ""
+    fi
+  }
+
+  LLM_PROVIDER="$(detect_provider "${LLM_API_KEY}")"
+  if [[ -z "${LLM_PROVIDER}" ]]; then
+    die "Could not detect provider from key prefix. Expected sk-ant-*, sk-or-*, or sk-*."
+  fi
+  ok "Provider: ${LLM_PROVIDER}"
+
+  # Model default
+  case "${LLM_PROVIDER}" in
+    anthropic)  DEFAULT_MODEL="claude-sonnet-4-6" ;;
+    openai)     DEFAULT_MODEL="gpt-5.2-codex"     ;;
+    openrouter) DEFAULT_MODEL=""                   ;;
+  esac
+  echo ""
+  read -rp "  Model override (leave blank for default: ${DEFAULT_MODEL:-provider default}): " AGENT_MODEL < /dev/tty
+  AGENT_MODEL="${AGENT_MODEL:-${DEFAULT_MODEL}}"
+
+  # Telegram (optional)
+  echo ""
+  read -rp "  Telegram bot token (optional, press Enter to skip): " TELEGRAM_BOT_TOKEN < /dev/tty
+  if [[ -n "${TELEGRAM_BOT_TOKEN}" ]]; then
+    read -rp "  Telegram chat ID: " TELEGRAM_CHAT_ID < /dev/tty
+    if [[ -z "${TELEGRAM_CHAT_ID}" ]]; then
+      warn "No chat ID provided — Telegram channel will not be configured."
+      TELEGRAM_BOT_TOKEN=""
+      TELEGRAM_CHAT_ID=""
+    fi
+  else
+    TELEGRAM_CHAT_ID=""
+  fi
+
+  # Namespace
+  if [[ -z "${AGENT_NAMESPACE}" ]]; then
+    AGENT_NAMESPACE="that-${AGENT_NAME}"
+  fi
+
+  # Overlay output directory
+  OVERLAY_DIR="${HOME}/.that-agent-install/${AGENT_NAME}"
+
+  echo ""
+  ok "Configuration collected."
+  echo ""
+  echo "  Agent name:   ${AGENT_NAME}"
+  echo "  Namespace:    ${AGENT_NAMESPACE}"
+  echo "  Cluster:      ${CLUSTER_TOOL}"
+  echo "  Provider:     ${LLM_PROVIDER}"
+  echo "  Model:        ${AGENT_MODEL:-<provider default>}"
+  echo "  Telegram:     ${TELEGRAM_BOT_TOKEN:+configured}${TELEGRAM_BOT_TOKEN:-not configured}"
+  echo "  Image:        ${AGENT_IMAGE}"
+  echo "  Overlay dir:  ${OVERLAY_DIR}"
+  echo ""
+  read -rp "  Proceed with deployment? [Y/n]: " CONFIRM < /dev/tty
+  case "${CONFIRM:-y}" in
+    [Yy]*) ;;
+    *) info "Aborted."; exit 0 ;;
+  esac
+}
+
+resolve_image() {
+  if [[ -n "${REPO_ROOT}" && -f "${REPO_ROOT}/build.sh" ]] && command -v docker &>/dev/null; then
+    echo ""
+    read -rp "  Local repo detected. Build image from source? [y/N]: " BUILD_LOCAL < /dev/tty
+    case "${BUILD_LOCAL:-n}" in
+      [Yy]*)
+        info "Building that-agent image from source…"
+        bash "${REPO_ROOT}/build.sh"
+        BUILT_IMAGE="that-agent:latest"
+        if [[ "${CLUSTER_TOOL}" == "k3s" ]] && command -v k3s &>/dev/null; then
+          info "Importing image into k3s containerd…"
+          docker save "${BUILT_IMAGE}" | $SUDO k3s ctr images import -
+          ok "Image imported: ${BUILT_IMAGE}"
+        elif [[ "${CLUSTER_TOOL}" == "k3d" ]]; then
+          info "Pushing image to k3d registry…"
+          docker tag "${BUILT_IMAGE}" "localhost:${K3D_REGISTRY_PORT}/${BUILT_IMAGE}"
+          docker push "localhost:${K3D_REGISTRY_PORT}/${BUILT_IMAGE}"
+          BUILT_IMAGE="${REGISTRY_PULL_HOST}/${BUILT_IMAGE}"
+          ok "Image pushed: ${BUILT_IMAGE}"
+        fi
+        AGENT_IMAGE="${BUILT_IMAGE}"
+        ;;
+      *)
+        info "Using image: ${AGENT_IMAGE}"
+        ;;
+    esac
+  else
+    info "Using image: ${AGENT_IMAGE}"
   fi
 }
 
-LLM_PROVIDER="$(detect_provider "${LLM_API_KEY}")"
-if [[ -z "${LLM_PROVIDER}" ]]; then
-  die "Could not detect provider from key prefix. Expected sk-ant-*, sk-or-*, or sk-*."
-fi
-ok "Provider: ${LLM_PROVIDER}"
+generate_overlay() {
+  mkdir -p "${OVERLAY_DIR}"
 
-# Model default
-case "${LLM_PROVIDER}" in
-  anthropic)  DEFAULT_MODEL="claude-sonnet-4-6" ;;
-  openai)     DEFAULT_MODEL="gpt-5.2-codex"     ;;
-  openrouter) DEFAULT_MODEL=""                   ;;
-esac
-echo ""
-read -rp "  Model override (leave blank for default: ${DEFAULT_MODEL:-provider default}): " AGENT_MODEL < /dev/tty
-AGENT_MODEL="${AGENT_MODEL:-${DEFAULT_MODEL}}"
-
-# Telegram (optional)
-echo ""
-read -rp "  Telegram bot token (optional, press Enter to skip): " TELEGRAM_BOT_TOKEN < /dev/tty
-if [[ -n "${TELEGRAM_BOT_TOKEN}" ]]; then
-  read -rp "  Telegram chat ID: " TELEGRAM_CHAT_ID < /dev/tty
-  if [[ -z "${TELEGRAM_CHAT_ID}" ]]; then
-    warn "No chat ID provided — Telegram channel will not be configured."
-    TELEGRAM_BOT_TOKEN=""
-    TELEGRAM_CHAT_ID=""
+  # Ensure base manifests are available locally
+  BASE_REF="./base"
+  if [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}/deploy/k8s/base" ]]; then
+    cp -r "${REPO_ROOT}/deploy/k8s/base" "${OVERLAY_DIR}/base"
+    ok "Copied base manifests from local repo."
+  else
+    info "Downloading base manifests from GitHub…"
+    mkdir -p "${OVERLAY_DIR}/base"
+    LATEST_TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/that-labs/that-agent/releases/latest" | grep -oE '[^/]+$')
+    curl -fsSL "https://github.com/that-labs/that-agent/archive/refs/tags/${LATEST_TAG}.tar.gz" | \
+      tar -xz --strip-components=4 -C "${OVERLAY_DIR}/base" "that-agent-${LATEST_TAG#v}/deploy/k8s/base/"
+    ok "Base manifests downloaded."
   fi
-else
-  TELEGRAM_CHAT_ID=""
-fi
 
-# Namespace
-if [[ -z "${AGENT_NAMESPACE}" ]]; then
-  AGENT_NAMESPACE="that-${AGENT_NAME}"
-fi
-
-# Overlay output directory
-OVERLAY_DIR="${HOME}/.that-agent-install/${AGENT_NAME}"
-
-echo ""
-ok "Configuration collected."
-echo ""
-echo "  Agent name:   ${AGENT_NAME}"
-echo "  Namespace:    ${AGENT_NAMESPACE}"
-echo "  Provider:     ${LLM_PROVIDER}"
-echo "  Model:        ${AGENT_MODEL:-<provider default>}"
-echo "  Telegram:     ${TELEGRAM_BOT_TOKEN:+configured}${TELEGRAM_BOT_TOKEN:-not configured}"
-echo "  Image:        ${AGENT_IMAGE}"
-echo "  Overlay dir:  ${OVERLAY_DIR}"
-echo ""
-read -rp "  Proceed with deployment? [Y/n]: " CONFIRM < /dev/tty
-case "${CONFIRM:-y}" in
-  [Yy]*) ;;
-  *) info "Aborted."; exit 0 ;;
-esac
-
-# ── Step 7: Build or pull image ──────────────────────────────────────────────
-header "Step 7 — Container image"
-
-if [[ -n "${REPO_ROOT}" && -f "${REPO_ROOT}/build.sh" ]] && command -v docker &>/dev/null; then
-  echo ""
-  read -rp "  Local repo detected. Build image from source? [y/N]: " BUILD_LOCAL < /dev/tty
-  case "${BUILD_LOCAL:-n}" in
-    [Yy]*)
-      info "Building that-agent image from source…"
-      bash "${REPO_ROOT}/build.sh"
-      BUILT_IMAGE="that-agent:latest"
-      # Import into k3s if we're using k3s
-      if command -v k3s &>/dev/null; then
-        info "Importing image into k3s containerd…"
-        docker save "${BUILT_IMAGE}" | $SUDO k3s ctr images import -
-        ok "Image imported: ${BUILT_IMAGE}"
-      fi
-      AGENT_IMAGE="${BUILT_IMAGE}"
-      ;;
-    *)
-      info "Using image: ${AGENT_IMAGE}"
-      ;;
-  esac
-else
-  info "Using image: ${AGENT_IMAGE}"
-fi
-
-# ── Step 8: Generate overlay ─────────────────────────────────────────────────
-header "Step 8 — Generating Kubernetes overlay"
-
-mkdir -p "${OVERLAY_DIR}"
-
-# Ensure base manifests are available locally
-BASE_REF="./base"
-if [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}/deploy/k8s/base" ]]; then
-  cp -r "${REPO_ROOT}/deploy/k8s/base" "${OVERLAY_DIR}/base"
-  ok "Copied base manifests from local repo."
-else
-  info "Downloading base manifests from GitHub…"
-  mkdir -p "${OVERLAY_DIR}/base"
-  LATEST_TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/that-labs/that-agent/releases/latest" | grep -oE '[^/]+$')
-  curl -fsSL "https://github.com/that-labs/that-agent/archive/refs/tags/${LATEST_TAG}.tar.gz" | \
-    tar -xz --strip-components=4 -C "${OVERLAY_DIR}/base" "that-agent-${LATEST_TAG#v}/deploy/k8s/base/"
-  ok "Base manifests downloaded."
-fi
-
-# kustomization.yaml
-KUSTOMIZE_PATCHES="  - path: patch-configmap.yaml"
-
-if [[ "${ENABLE_SUBAGENTS}" == "true" ]]; then
-  KUSTOMIZE_PATCHES="${KUSTOMIZE_PATCHES}
+  # kustomization.yaml
+  KUSTOMIZE_PATCHES="  - path: patch-configmap.yaml"
+  if [[ "${ENABLE_SUBAGENTS}" == "true" ]]; then
+    KUSTOMIZE_PATCHES="${KUSTOMIZE_PATCHES}
   - path: patch-clusterrolebinding.yaml"
-fi
+  fi
 
-cat > "${OVERLAY_DIR}/kustomization.yaml" <<EOF
+  cat > "${OVERLAY_DIR}/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -534,18 +726,17 @@ images:
     newTag: ${AGENT_IMAGE##*:}
 EOF
 
-# namespace.yaml
-cat > "${OVERLAY_DIR}/namespace.yaml" <<EOF
+  # namespace.yaml
+  cat > "${OVERLAY_DIR}/namespace.yaml" <<EOF
 apiVersion: v1
 kind: Namespace
 metadata:
   name: ${AGENT_NAMESPACE}
 EOF
 
-# patch-clusterrolebinding.yaml — set the namespace on the ServiceAccount subject
-if [[ "${CLUSTER_ADMIN}" == "true" ]]; then
-  # Bind to built-in cluster-admin — full unrestricted access
-  cat > "${OVERLAY_DIR}/patch-clusterrolebinding.yaml" <<EOF
+  # patch-clusterrolebinding.yaml
+  if [[ "${CLUSTER_ADMIN}" == "true" ]]; then
+    cat > "${OVERLAY_DIR}/patch-clusterrolebinding.yaml" <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -559,9 +750,9 @@ roleRef:
   kind: ClusterRole
   name: cluster-admin
 EOF
-  warn "⚠  --cluster-admin: agent will have FULL cluster-admin privileges."
-else
-  cat > "${OVERLAY_DIR}/patch-clusterrolebinding.yaml" <<EOF
+    warn "⚠  --cluster-admin: agent will have FULL cluster-admin privileges."
+  else
+    cat > "${OVERLAY_DIR}/patch-clusterrolebinding.yaml" <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -575,10 +766,10 @@ roleRef:
   kind: ClusterRole
   name: that-agent-cluster
 EOF
-fi
+  fi
 
-# patch-configmap.yaml
-cat > "${OVERLAY_DIR}/patch-configmap.yaml" <<EOF
+  # patch-configmap.yaml
+  cat > "${OVERLAY_DIR}/patch-configmap.yaml" <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -600,19 +791,19 @@ data:
   THAT_CLUSTER_K9S: "${INSTALL_K9S}"
 EOF
 
-# secret.yaml — use the correct env var name for the runtime
-SECRET_API_KEY_VAR=""
-if [[ "${LLM_API_KEY}" == sk-ant-oat01-* ]]; then
-  SECRET_API_KEY_VAR="CLAUDE_CODE_OAUTH_TOKEN"
-else
-  case "${LLM_PROVIDER}" in
-    anthropic)   SECRET_API_KEY_VAR="ANTHROPIC_API_KEY" ;;
-    openai)      SECRET_API_KEY_VAR="OPENAI_API_KEY"    ;;
-    openrouter)  SECRET_API_KEY_VAR="OPENROUTER_API_KEY" ;;
-  esac
-fi
+  # secret.yaml
+  SECRET_API_KEY_VAR=""
+  if [[ "${LLM_API_KEY}" == sk-ant-oat* ]]; then
+    SECRET_API_KEY_VAR="CLAUDE_CODE_OAUTH_TOKEN"
+  else
+    case "${LLM_PROVIDER}" in
+      anthropic)   SECRET_API_KEY_VAR="ANTHROPIC_API_KEY" ;;
+      openai)      SECRET_API_KEY_VAR="OPENAI_API_KEY"    ;;
+      openrouter)  SECRET_API_KEY_VAR="OPENROUTER_API_KEY" ;;
+    esac
+  fi
 
-cat > "${OVERLAY_DIR}/secret.yaml" <<EOF
+  cat > "${OVERLAY_DIR}/secret.yaml" <<EOF
 apiVersion: v1
 kind: Secret
 metadata:
@@ -623,46 +814,21 @@ stringData:
   TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
   TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID}"
 EOF
-$SUDO chmod 600 "${OVERLAY_DIR}/secret.yaml"
+  chmod 600 "${OVERLAY_DIR}/secret.yaml"
 
-ok "Overlay written to ${OVERLAY_DIR}"
-
-# ── Step 9: Deploy ────────────────────────────────────────────────────────────
-header "Step 9 — Deploying to cluster"
-
-info "Applying manifests…"
-${KUBECTL} apply -k "${OVERLAY_DIR}"
-
-info "Waiting for rollout…"
-${KUBECTL} -n "${AGENT_NAMESPACE}" rollout status deploy/that-agent --timeout=120s || {
-  warn "Rollout did not complete in 120 s. Check pod status:"
-  echo "  ${KUBECTL} -n ${AGENT_NAMESPACE} get pods"
-  echo "  ${KUBECTL} -n ${AGENT_NAMESPACE} logs deploy/that-agent"
+  ok "Overlay written to ${OVERLAY_DIR}"
 }
 
-# ── Done ──────────────────────────────────────────────────────────────────────
-header "Done"
-echo ""
-ok "Agent '${AGENT_NAME}' deployed to namespace '${AGENT_NAMESPACE}'."
-echo ""
-echo "  Useful commands:"
-echo ""
-echo "    # Follow agent logs"
-echo "    ${KUBECTL} -n ${AGENT_NAMESPACE} logs -f deploy/that-agent"
-echo ""
-echo "    # Open a shell inside the agent pod"
-echo "    ${KUBECTL} -n ${AGENT_NAMESPACE} exec -it deploy/that-agent -- bash"
-echo ""
-echo "    # Restart the agent"
-echo "    ${KUBECTL} -n ${AGENT_NAMESPACE} rollout restart deploy/that-agent"
-echo ""
-echo "    # Remove the agent entirely"
-echo "    ${KUBECTL} delete namespace ${AGENT_NAMESPACE}"
-echo ""
-echo "  Your overlay lives at: ${OVERLAY_DIR}"
-echo "  The secret.yaml in that directory contains your API key — keep it safe."
-echo ""
+deploy() {
+  info "Applying manifests…"
+  ${KUBECTL} apply -k "${OVERLAY_DIR}"
 
+  info "Waiting for rollout…"
+  ${KUBECTL} -n "${AGENT_NAMESPACE}" rollout status deploy/that-agent --timeout=120s || {
+    warn "Rollout did not complete in 120 s. Check pod status:"
+    echo "  ${KUBECTL} -n ${AGENT_NAMESPACE} get pods"
+    echo "  ${KUBECTL} -n ${AGENT_NAMESPACE} logs deploy/that-agent"
+  }
 }
 
 main "$@"

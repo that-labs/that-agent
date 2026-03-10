@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>The autonomous agent that writes and deploys its own tools.</strong><br>
-  <strong>Rust. Production-ready. Grows with your business.</strong>
+  <strong>Kubernetes-native. Rust. Runs anywhere — laptop to production.</strong>
 </p>
 
 <p align="center">
@@ -14,21 +14,23 @@
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Built_with-Rust-orange.svg" alt="Rust" /></a>
   <a href="https://github.com/that-labs/that-agent/actions/workflows/ci.yml"><img src="https://github.com/that-labs/that-agent/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/that-labs/that-agent/pkgs/container/that-agent"><img src="https://img.shields.io/badge/Docker-ghcr.io-blue?logo=docker" alt="Docker" /></a>
-  <a href="https://crates.io/crates/that-cli"><img src="https://img.shields.io/crates/v/that-cli.svg" alt="crates.io" /></a>
+
   <a href="https://discord.gg/Xqu6kRXW"><img src="https://img.shields.io/discord/1234567890?color=7289da&label=Discord&logo=discord&logoColor=white" alt="Discord" /></a>
 </p>
 
-Most agent frameworks configure tools for the agent. `that-agent` gives the agent a compiler and a deployment target — it authors, ships, and runs its own plugins at runtime without operator intervention.
+Most agent frameworks configure tools for the agent. `that-agent` gives the agent a Kubernetes namespace and a compiler — it authors, ships, and runs its own services at runtime without operator intervention.
 
 ```
-11 MB binary · <10 ms startup · self-authoring plugins · LLM-judged evals · cluster-aware fleet
+14 MB binary · 6 ms startup · 13 MB idle RSS · Kubernetes-native · self-authoring plugins · cluster-aware fleet
 ```
 
 ## The Idea
 
-Most frameworks hand an agent a fixed set of tools. `that-agent` gives the agent a compiler and a deployment target.
+Most frameworks hand an agent a fixed set of tools. `that-agent` gives the agent a Kubernetes namespace and a compiler.
 
 When the agent needs a new capability — an integration, a scheduled routine, a custom command — it authors a plugin, ships it to the cluster, and runs it. The operator writes nothing. The agent evolves through its own work. That is the loop this project exists to close.
+
+Kubernetes is the execution layer everywhere. On macOS, [k3d](https://k3d.io/) runs k3s inside Docker Desktop in seconds. On a VPS, [k3s](https://k3s.io/) runs directly on containerd — no Docker needed. In production, any conformant cluster works. The agent gets full access to the control plane, operators, and cluster API regardless of where it runs. Same binary, same manifests, same capabilities.
 
 The substrate beneath that loop is built for production: policy-governed tools, sandbox isolation, persistent memory, multi-channel routing, and a deterministic eval harness where an LLM judge scores behavioral regressions — not code paths, outcomes. Whether the agent runs a CLI task, holds a conversation on Telegram, or handles inbound webhooks, the same orchestration loop and policy gates are in play.
 
@@ -80,63 +82,75 @@ The agent runs with a persistent volume mounted at `/workspace`. Sub-agents are 
 
 ## 5-Minute Quickstart
 
-**Install:**
+The fastest path to a running agent — a single-node Kubernetes cluster with everything pre-configured:
 
 ```bash
-cargo install that-cli
+# Linux VPS — installs k3s (no Docker needed)
+curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
+
+# macOS — installs k3d (runs k3s inside Docker Desktop)
+curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
 ```
 
-Or pull the Docker image:
+The installer detects your platform automatically. On Linux it uses k3s (single binary, containerd). On macOS it uses k3d (k3s-in-Docker). Override with `--k3s` or `--k3d` on any platform. See [Get Started](#get-started) for details and flags.
+
+**Already have a cluster?**
 
 ```bash
-docker pull ghcr.io/that-labs/that-agent:latest
+cp -r deploy/k8s/overlays/example deploy/k8s/overlays/my-agent
+# edit namespace, configmap, secret
+kubectl apply -k deploy/k8s/overlays/my-agent
 ```
 
-**Configure:**
+**Just want to try it locally?**
 
 ```bash
+cargo install --git https://github.com/that-labs/that-agent that-cli
 echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
-```
-
-**Run a single task:**
-
-```bash
 that run "Create a hello-world Python script and verify it runs"
+that chat       # interactive session
+that listen     # autonomous mode with heartbeat
 ```
 
-Expected output:
+> **Tip:** `cargo run` and `docker run` work for local development, but the agent's full power — deploying services, managing workloads, extending its own gateway — requires a Kubernetes cluster.
 
-```
-[init] Agent bootstrapped
-[tool] fs_write → hello.py
-[tool] shell_exec → python hello.py
-[result] Hello, world!
-✓ Task complete
-```
+## Development Tiers
 
-**Start an interactive session:**
+The agent works at three levels. Each tier adds capabilities:
 
-```bash
-that chat
-```
+| Tier | What you need | What works |
+|------|---------------|------------|
+| **Host** (`cargo run`) | Rust toolchain | Agent loop, tools, memory, sessions, TUI, chat, run — everything except sandboxed execution |
+| **Docker** (`docker run`) | Docker | Same + sandboxed file and shell execution, fs isolation |
+| **Kubernetes** (`k3d` / `k3s` / any cluster) | Docker + k3d (macOS), k3s (Linux), or existing cluster | Full power — sandbox pods, plugins, sub-agents, in-cluster registry, BuildKit, gateway extension, eval harness with sandbox scenarios |
 
-> **Tip:** Add `--no-sandbox` to run directly on your host instead of inside a container.
+**Upgrade path:** The binary is the same everywhere — `THAT_SANDBOX_MODE` flips between host, Docker, and Kubernetes. Moving from local dev to a cluster means setting one environment variable and applying the same Kustomize overlay.
+
+**Evals in a cluster:** Scenarios with `sandbox = true` spin up sandbox pods, run assertions inside them, and tear them down — same as production. On k3d, this works identically to a remote cluster. Point `KUBECONFIG` at your k3d cluster and run `that eval`.
 
 ## Get Started
 
-### Fresh VPS — one command
+### One command — any platform
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/that-labs/that-agent/main/scripts/install.sh | bash
 ```
 
-The installer is interactive and sets up a production-ready single-node cluster with everything the agent needs. All infrastructure components are enabled by default and can be skipped with flags.
+The installer detects your platform and sets up a production-ready single-node cluster:
+
+| Platform | Cluster tool | Runtime | Prerequisites |
+|----------|-------------|---------|--------------|
+| **Linux VPS / server** | k3s | containerd (built-in) | None — single binary, no Docker |
+| **macOS** | k3d | Docker Desktop | Docker Desktop running |
+| **Linux desktop** | k3s (default) or k3d (`--k3d`) | containerd or Docker | None / Docker |
+
+Override the auto-detection with `--k3s` or `--k3d` on any platform. All infrastructure components are enabled by default and can be skipped with flags.
 
 #### What it installs
 
 | Step | Component | What it does | Skip flag |
 |------|-----------|-------------|-----------|
-| 1 | [k3s](https://k3s.io/) | Lightweight Kubernetes distribution | `--no-k3s` |
+| 1 | [k3s](https://k3s.io/) or [k3d](https://k3d.io/) | Lightweight Kubernetes (platform-detected) | `--k3s` / `--k3d` to override |
 | 2 | [Cilium](https://cilium.io/) | eBPF-based CNI with L3/L4/L7 network policies and [Hubble](https://docs.cilium.io/en/stable/observability/hubble/) flow observability | `--no-cilium` |
 | 3 | [Tailscale Operator](https://tailscale.com/kb/1236/kubernetes-operator) | Expose cluster services to your Tailnet — no public IPs, no port forwarding | `--no-tailscale` |
 | 4 | [K9s](https://k9scli.io/) | Terminal-based Kubernetes UI for cluster inspection | `--no-k9s` |
@@ -175,6 +189,9 @@ When Cilium is enabled, k3s is installed with `--flannel-backend=none --disable-
 # Skip Cilium and K9s, keep Tailscale
 bash install.sh --no-cilium --no-k9s
 
+# Force k3d on Linux (uses Docker instead of k3s)
+bash install.sh --k3d
+
 # Full cluster-admin for a single-user VPS
 bash install.sh --cluster-admin
 ```
@@ -202,7 +219,8 @@ TS_TAILNET_NAME=myteam \
 | `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client ID | prompted |
 | `TS_OAUTH_CLIENT_SECRET` | Tailscale OAuth client secret | prompted |
 | `TS_TAILNET_NAME` | Tailnet name (e.g. `myteam` from `myteam.ts.net`) | prompted |
-| `INSTALL_K3S` | Install k3s | `true` |
+| `FORCE_K3S` | Force k3s even on macOS | `false` |
+| `FORCE_K3D` | Force k3d even on Linux | `false` |
 | `INSTALL_CILIUM` | Install Cilium CNI | `true` |
 | `INSTALL_TAILSCALE_OPERATOR` | Install Tailscale Operator | `true` |
 | `INSTALL_K9S` | Install K9s | `true` |
@@ -220,6 +238,9 @@ kubectl -n that-<agent-name> exec -it deploy/that-agent -- that run chat --agent
 
 # Interactive cluster inspection
 k9s
+
+# Delete the k3d cluster (macOS / --k3d installs only)
+k3d cluster delete that-agent
 ```
 
 #### RBAC — what the agent can access
@@ -283,7 +304,19 @@ For single-user VPS setups where the agent is the sole operator of the cluster, 
 
 Manifests: [`deploy/k8s/base/role.yaml`](./deploy/k8s/base/role.yaml) (namespace), [`deploy/k8s/base/clusterrole.yaml`](./deploy/k8s/base/clusterrole.yaml) (cluster).
 
-### Docker
+### Existing Kubernetes cluster
+
+```bash
+cp -r deploy/k8s/overlays/example deploy/k8s/overlays/my-agent
+# edit namespace, configmap, secret
+kubectl apply -k deploy/k8s/overlays/my-agent
+```
+
+The default overlay pulls `ghcr.io/that-labs/that-agent:latest`. Same manifests work on a single node or across multiple regions. See [OPERATORS.md](./OPERATORS.md) for full configuration, environment variables, and observability setup.
+
+### Docker (local development)
+
+For quick local experimentation without a cluster:
 
 ```bash
 docker run -it --rm \
@@ -302,15 +335,7 @@ Two image variants are published to `ghcr.io/that-labs/that-agent`:
 | `latest` / `v*` | Slim — Python, Git, curl, ripgrep, kubectl, Docker CLI |
 | `latest-full` / `v*-full` | Full — adds Rust, Go, Node.js, TypeScript, Python dev packages |
 
-### Kubernetes
-
-```bash
-cp -r deploy/k8s/overlays/example deploy/k8s/overlays/my-agent
-# edit namespace, configmap, secret
-kubectl apply -k deploy/k8s/overlays/my-agent
-```
-
-The default overlay pulls `ghcr.io/that-labs/that-agent:latest`. Same manifests work on a single node or across multiple regions. See [OPERATORS.md](./OPERATORS.md) for full configuration, environment variables, and observability setup.
+> The agent runs and works in Docker, but without a cluster it can't deploy services, manage workloads, or interact with the Kubernetes control plane. For the full experience, use k3s or any conformant cluster.
 
 ### Pre-built binary
 
@@ -330,15 +355,13 @@ curl -fsSL https://github.com/that-labs/that-agent/releases/latest/download/that
 sudo mv that /usr/local/bin/
 ```
 
-### From crates.io
+### From source (via cargo)
 
 ```bash
-cargo install that-cli
-```
+# Install directly from GitHub
+cargo install --git https://github.com/that-labs/that-agent that-cli
 
-### From source
-
-```bash
+# Or clone and build locally
 cargo build --release
 # binary: ./target/release/that
 ```
@@ -352,7 +375,7 @@ cargo build --release
 - **Persistent memory** — SQLite-backed recall that survives restarts and session boundaries
 - **Full session continuity** — transcript reconstruction anchored at last compaction; no context loss on restart
 - **Policy-governed tools** — every tool call passes through an Allow / Prompt / Deny gate; configurable per tool and per deployment
-- **Sandboxed execution** — Docker and Kubernetes backends; destructive ops allowed inside the boundary, denied on host by default
+- **Sandboxed execution** — Kubernetes-native isolation with Docker fallback for local dev; destructive ops allowed inside the boundary, denied on host by default
 - **Multi-channel routing** — Telegram, HTTP, and TUI through a unified abstraction; new channels register at runtime without restart
 - **Heartbeat system** — autonomous listen mode with configurable wakeup cycles and scheduled routines
 
@@ -361,7 +384,7 @@ cargo build --release
 | # | Control | Status | How |
 |---|---------|--------|-----|
 | 1 | Tool policy gates | Done | Every call passes Allow / Prompt / Deny; configurable per tool |
-| 2 | Sandbox isolation | Done | Docker and Kubernetes backends; destructive tools deny on host by default |
+| 2 | Sandbox isolation | Done | Kubernetes-native with Docker fallback; destructive tools deny on host by default |
 | 3 | Workspace scoping | Done | File tools restricted to agent workspace unless explicitly widened |
 | 4 | Secrets via env | Done | No secrets in manifests; injected via Kubernetes secrets or `.env` |
 | 5 | Policy hierarchy | Done | Sub-agents cannot elevate beyond the main agent's policy ceiling |
@@ -401,7 +424,7 @@ that-eval -------> that-core + that-tools
 |---|---|
 | `that-core` | Orchestration runtime — agent loop, preamble, sessions, all execution paths |
 | `that-tools` | Capability plane — fs, code, memory, search, exec, human, cluster — with policy gates |
-| `that-sandbox` | Execution boundary — Docker and Kubernetes backends |
+| `that-sandbox` | Execution boundary — Kubernetes-native with Docker fallback |
 | `that-channels` | Channel router and adapters |
 | `that-plugins` | Runtime extension plane — commands, activations, routines |
 | `that-eval` | Behavioral scenario harness with LLM judge and structured reports |
@@ -443,7 +466,7 @@ that listen
 that run "Create a demo app and run its tests"
 ```
 
-Docker is the default backend. `THAT_SANDBOX_MODE=kubernetes` for cluster-based isolation. `--no-sandbox` to run directly on host.
+Kubernetes is the primary sandbox backend (`THAT_SANDBOX_MODE=kubernetes`). Docker is available for local development. `--no-sandbox` to run directly on host.
 
 ## Eval
 
@@ -461,12 +484,13 @@ Scenarios in `evals/scenarios/`. Each is a TOML file with a natural-language pro
 ```
 Language:     Rust
 Source files: ~148
-Tests:        517+
-Binary:       11 MB (release)
-Startup:      <10 ms
+Tests:        520+
+Binary:       14 MB (release, stripped)
+Startup:      ~6 ms (Linux), ~15 ms (macOS)
+Idle RSS:     ~13 MB
 Providers:    Anthropic, OpenAI, OpenRouter
 Channels:     Telegram, HTTP gateway, TUI
-Deployment:   single VPS · multi-region Kubernetes · Docker sandbox
+Runtime:      Kubernetes (k3d on macOS, k3s on Linux, any conformant cluster in production)
 ```
 
 ## Project Layout
@@ -499,4 +523,4 @@ MIT. See [LICENSE](./LICENSE).
 
 ---
 
-**that-agent** — The agent that builds itself. Start small. Scale anywhere.
+**that-agent** — The agent that builds itself. k3d on a laptop, k3s on a VPS, production on any cluster.

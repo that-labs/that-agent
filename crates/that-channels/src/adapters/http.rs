@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "pairing")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +19,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use dashmap::DashMap;
+#[cfg(feature = "pairing")]
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
@@ -87,12 +90,14 @@ struct InboundRequest {
 
 // ─── Pairing ─────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "pairing")]
 struct PairingState {
     code: String,
     token: String,
     used: bool,
 }
 
+#[cfg(feature = "pairing")]
 #[derive(Debug, Deserialize)]
 struct PairRequest {
     code: String,
@@ -111,15 +116,17 @@ struct HttpState {
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     /// The adapter ID used as channel_id in InboundMessages.
     adapter_id: String,
-    /// Bearer token for auth enforcement — always `Some` after startup.
+    /// Bearer token for auth enforcement. `None` means no auth (open gateway).
     auth_token: RwLock<Option<String>>,
     /// Pairing state for first-time token acquisition (None when pre-configured).
+    #[cfg(feature = "pairing")]
     pairing: Mutex<Option<PairingState>>,
     /// Request timeout in seconds.
     request_timeout_secs: u64,
     /// Path to the dynamic route registry file, if configured.
     route_registry_path: Option<PathBuf>,
     /// File path for persisting the bearer token across restarts.
+    #[cfg(feature = "pairing")]
     token_file: Option<PathBuf>,
 }
 
@@ -168,35 +175,38 @@ impl HttpAdapter {
         auth_token: Option<String>,
         request_timeout_secs: u64,
     ) -> Self {
-        // Derive a token file path for persisting paired tokens across restarts.
-        let token_file = dirs::home_dir().map(|h| {
-            let dir = h.join(".that-agent");
-            dir.join(format!("gateway_token_{id}"))
-        });
+        #[cfg(feature = "pairing")]
+        let (resolved_token, pairing, token_file) = {
+            let token_file = dirs::home_dir().map(|h| {
+                let dir = h.join(".that-agent");
+                dir.join(format!("gateway_token_{id}"))
+            });
 
-        let (resolved_token, pairing) = if let Some(tok) = auth_token {
-            // Pre-configured token — no pairing needed.
-            (Some(tok), None)
-        } else if let Some(tok) = token_file.as_deref().and_then(load_persisted_token) {
-            // Previously paired token found on disk — reuse it.
-            info!("Gateway restored paired token from disk");
-            (Some(tok), None)
-        } else {
-            // Generate pairing code + token; auth enforced after pairing.
-            let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32));
-            let token = Uuid::new_v4().to_string();
-            eprintln!(
-                "⚡ Gateway pairing code: {code}  →  POST /pair {{\"code\":\"{code}\"}} to get your bearer token"
-            );
-            (
-                None,
-                Some(PairingState {
-                    code,
-                    token,
-                    used: false,
-                }),
-            )
+            if let Some(tok) = auth_token {
+                (Some(tok), None, token_file)
+            } else if let Some(tok) = token_file.as_deref().and_then(load_persisted_token) {
+                info!("Gateway restored paired token from disk");
+                (Some(tok), None, token_file)
+            } else {
+                let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32));
+                let token = Uuid::new_v4().to_string();
+                eprintln!(
+                    "⚡ Gateway pairing code: {code}  →  POST /pair {{\"code\":\"{code}\"}} to get your bearer token"
+                );
+                (
+                    None,
+                    Some(PairingState {
+                        code,
+                        token,
+                        used: false,
+                    }),
+                    token_file,
+                )
+            }
         };
+
+        #[cfg(not(feature = "pairing"))]
+        let resolved_token = auth_token;
 
         let state = Arc::new(HttpState {
             active_requests: DashMap::new(),
@@ -205,9 +215,11 @@ impl HttpAdapter {
             shutdown_tx: Mutex::new(None),
             adapter_id: id.to_string(),
             auth_token: RwLock::new(resolved_token),
+            #[cfg(feature = "pairing")]
             pairing: Mutex::new(pairing),
             request_timeout_secs,
             route_registry_path: None,
+            #[cfg(feature = "pairing")]
             token_file,
         });
 
@@ -271,10 +283,10 @@ impl Channel for HttpAdapter {
         let adapter_id = self.id.clone();
 
         // Build the router.
-        // Health and pair endpoints are NOT wrapped with auth middleware.
-        let public_routes = Router::new()
-            .route("/health", get(handle_health))
-            .route("/pair", post(handle_pair));
+        // Health (and pair when enabled) are NOT wrapped with auth middleware.
+        let public_routes = Router::new().route("/health", get(handle_health));
+        #[cfg(feature = "pairing")]
+        let public_routes = public_routes.route("/pair", post(handle_pair));
 
         // Authenticated routes — auth middleware always applied.
         let api_routes = Router::new()
@@ -428,6 +440,7 @@ impl Channel for HttpAdapter {
 
 // ─── Token Persistence ───────────────────────────────────────────────────────
 
+#[cfg(feature = "pairing")]
 fn load_persisted_token(path: &Path) -> Option<String> {
     std::fs::read_to_string(path)
         .ok()
@@ -435,6 +448,7 @@ fn load_persisted_token(path: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+#[cfg(feature = "pairing")]
 fn persist_token(path: &Path, token: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -454,13 +468,23 @@ async fn auth_middleware(
     let guard = state.auth_token.read().await;
     let expected_token = match guard.as_deref() {
         Some(t) => t.to_owned(),
-        // Not yet paired — reject all authenticated endpoints until pairing completes.
         None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                "Gateway not yet paired. POST /pair with your pairing code first.",
-            )
-                .into_response();
+            // No token configured.
+            #[cfg(feature = "pairing")]
+            {
+                // Pairing enabled — reject until paired.
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    "Gateway not yet paired. POST /pair with your pairing code first.",
+                )
+                    .into_response();
+            }
+            #[cfg(not(feature = "pairing"))]
+            {
+                // No pairing, no token — open gateway (cluster-internal).
+                drop(guard);
+                return next.run(req).await;
+            }
         }
     };
     drop(guard);
@@ -490,6 +514,7 @@ async fn auth_middleware(
 // ─── Route Handlers ──────────────────────────────────────────────────────────
 
 /// POST /pair — exchange a pairing code for a bearer token.
+#[cfg(feature = "pairing")]
 async fn handle_pair(
     State(state): State<Arc<HttpState>>,
     Json(body): Json<PairRequest>,

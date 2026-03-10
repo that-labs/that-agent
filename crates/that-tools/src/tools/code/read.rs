@@ -1,4 +1,4 @@
-//! AST-aware code reading for Anvil.
+//! AST-aware code reading for that-tools.
 //!
 //! Unlike raw `cat`, `code read` returns structural context:
 //! line numbers, symbol annotations, and context-aware excerpts.
@@ -23,7 +23,7 @@ pub enum ReadError {
     Io(#[from] std::io::Error),
 }
 
-/// Result of an `anvil code read` command.
+/// Result of a `code read` command.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadResult {
     pub path: String,

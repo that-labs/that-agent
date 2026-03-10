@@ -1,6 +1,6 @@
 [package]
 name = "that-cli"
-description = "Unified CLI for agent orchestration and tool execution"
+description = "CLI for autonomous agent orchestration on Kubernetes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
-readme = "../../README.md"
+publish = false
 
 [[bin]]
 name = "that"
@@ -19,13 +19,14 @@ path = "src/main.rs"
 default = ["tui", "code-analysis"]
 tui = ["that-core/tui"]
 code-analysis = ["that-tools/code-analysis"]
+pairing = ["that-core/pairing"]
 
 [dependencies]
 # Workspace crates
-that-tools = { path = "../that-tools", version = "0.2.0", default-features = false }
-that-core = { path = "../that-core", version = "0.2.0", default-features = false }
-that-plugins = { path = "../that-plugins", version = "0.2.0" }
-that-eval = { path = "../that-eval", version = "0.2.0" }
+that-tools = { path = "../that-tools", default-features = false }
+that-core = { path = "../that-core", default-features = false }
+that-plugins = { path = "../that-plugins" }
+that-eval = { path = "../that-eval" }
 
 # Shared workspace dependencies
 clap = { workspace = true }

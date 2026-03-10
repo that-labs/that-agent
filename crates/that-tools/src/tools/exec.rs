@@ -1,4 +1,4 @@
-//! Shell execution tool for Anvil.
+//! Shell execution tool for that-tools.
 //!
 //! Provides governed command execution with timeout enforcement,
 //! process group management, optional streaming, and token-budget-limited output capture.

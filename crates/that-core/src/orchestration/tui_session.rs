@@ -214,6 +214,7 @@ pub async fn run_chat_tui(
                                                     // Direct resume by prefix
                                                     match session_mgr.find_session_by_prefix(prefix) {
                                                         Ok(Some(resume_id)) => {
+                                                            session_mgr.mark_restart_if_interrupted(&resume_id);
                                                             match session_mgr.read_transcript(&resume_id) {
                                                                 Ok(entries) => {
                                                                     let new_history = rebuild_history(&entries);
@@ -711,6 +712,7 @@ pub async fn run_chat_tui(
                                     tui::ModalKind::SessionResume => {
                                         // detail contains the session ID
                                         let resume_id = detail.clone();
+                                        session_mgr.mark_restart_if_interrupted(&resume_id);
                                         match session_mgr.read_transcript(&resume_id) {
                                             Ok(entries) => {
                                                 let new_history = rebuild_history(&entries);

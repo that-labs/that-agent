@@ -257,8 +257,8 @@ pub fn build_preamble(
 
     preamble.push_str(
         "## Communication\n\n\
-         By default, focus on the outcome rather than internal process. \
-         Your Soul.md and Agents.md may refine your voice and style — follow them.\n\n",
+         Your Soul.md defines your character. Your Agents.md defines how you talk to humans. \
+         Follow them — they are your voice, not suggestions.\n\n",
     );
 
     // ── 3.5. Memory Index — thin SQLite pointer map (always injected) ─────────

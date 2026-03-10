@@ -1275,6 +1275,15 @@ async fn run_agent_for_sender(
             // No in-memory state — check persistent index (handles restarts / crashes).
             let channel_index = session_mgr.load_channel_sessions();
             let (sid, hist) = if let Some(prior_sid) = channel_index.get(&sender_key) {
+                // Mark interrupted runs before rebuilding history so the
+                // Restart event is visible to rebuild_history_recent.
+                if let Some(run_id) = session_mgr.mark_restart_if_interrupted(prior_sid) {
+                    warn!(
+                        session = %prior_sid,
+                        interrupted_run = %run_id,
+                        "Detected interrupted run after restart"
+                    );
+                }
                 // Restore the last 10 turns (or from the last compaction) from disk.
                 let hist = session_mgr
                     .read_transcript(prior_sid)

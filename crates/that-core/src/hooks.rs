@@ -24,11 +24,13 @@ use crate::agent_loop::types::ToolDef;
 /// truncated raw JSON. Output is stripped of control characters.
 fn compact_args_preview(tool: &str, args_json: &str) -> String {
     let Ok(v) = serde_json::from_str::<JsonValue>(args_json) else {
-        return args_json
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(80)
-            .collect();
+        return redact_secrets(
+            &args_json
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(80)
+                .collect::<String>(),
+        );
     };
     let primary_keys: &[&str] = match tool {
         "shell_exec" => &["cmd", "command"],
@@ -44,18 +46,190 @@ fn compact_args_preview(tool: &str, args_json: &str) -> String {
         if let Some(val) = v.get(key).and_then(|v| v.as_str()) {
             let truncated: String = val.chars().filter(|c| !c.is_control()).take(80).collect();
             let ellipsis = if val.chars().count() > 80 { "…" } else { "" };
-            return format!("{key}={truncated}{ellipsis}");
+            return redact_secrets(&format!("{key}={truncated}{ellipsis}"));
         }
     }
     if let Some(obj) = v.as_object() {
         for (key, val) in obj {
             if let Some(s) = val.as_str() {
                 let truncated: String = s.chars().filter(|c| !c.is_control()).take(80).collect();
-                return format!("{key}={truncated}");
+                return redact_secrets(&format!("{key}={truncated}"));
             }
         }
     }
-    v.to_string().chars().take(80).collect()
+    redact_secrets(&v.to_string().chars().take(80).collect::<String>())
+}
+
+/// Redact values that look like secrets/tokens from channel-visible previews.
+///
+/// Detects common token prefixes (ghp_, github_pat_, sk-, xoxb-, etc.) and
+/// env-var assignment patterns (TOKEN=..., KEY=..., SECRET=...) and replaces
+/// the secret portion with `***`.
+fn redact_secrets(s: &str) -> String {
+    let mut out = s.to_string();
+    // Token prefixes: show the prefix + 4 chars, redact the rest.
+    for prefix in &[
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "sk-",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "whsec_",
+        "sk_live_",
+        "sk_test_",
+        "pk_live_",
+        "pk_test_",
+        "rk_live_",
+        "rk_test_",
+    ] {
+        while let Some(start) = out.find(prefix) {
+            let keep = start + prefix.len() + 4;
+            let end = out[start..]
+                .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.')
+                .map(|i| start + i)
+                .unwrap_or(out.len());
+            if end > keep {
+                out.replace_range(keep..end, "***");
+            } else {
+                break;
+            }
+        }
+    }
+    // PEM private keys: -----BEGIN <type> PRIVATE KEY-----
+    // Replace everything after the BEGIN header up to the END marker (or end of string).
+    {
+        let mut search_from = 0;
+        while let Some(rel) = out[search_from..].find("-----BEGIN ") {
+            let begin = search_from + rel;
+            let after_begin = begin + "-----BEGIN ".len();
+            if let Some(header_end) = out[after_begin..].find("-----") {
+                let content_start = after_begin + header_end + 5;
+                // Find the matching END marker or redact to end of string.
+                let content_end = out[content_start..]
+                    .find("-----END ")
+                    .map(|i| {
+                        let end_start = content_start + i;
+                        out[end_start..]
+                            .find("-----\n")
+                            .or_else(|| out[end_start..].find("-----"))
+                            .map(|j| end_start + j + 5)
+                            .unwrap_or(out.len())
+                    })
+                    .unwrap_or(out.len());
+                out.replace_range(content_start..content_end, "***");
+                search_from = content_start + 3;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // ENV_VAR=value patterns: redact the value after = for keys ending in
+    // TOKEN, KEY, SECRET, PASSWORD, CREDENTIALS.
+    for suffix in &["TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIALS"] {
+        // Scan for UPPER_CASE_SUFFIX= or SUFFIX="
+        let needle = format!("{suffix}=");
+        let mut search_from = 0;
+        while let Some(eq_pos) = out[search_from..].find(&needle) {
+            let abs_eq = search_from + eq_pos;
+            // Verify the char before suffix looks like an env var name
+            let var_start = out[..abs_eq]
+                .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let var_name = &out[var_start..abs_eq + suffix.len()];
+            if !var_name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+                search_from = abs_eq + needle.len();
+                continue;
+            }
+            let val_start = abs_eq + needle.len();
+            let (val_begin, quote) = if out[val_start..].starts_with(['"', '\'']) {
+                (val_start + 1, true)
+            } else {
+                (val_start, false)
+            };
+            let val_end = if quote {
+                out[val_begin..]
+                    .find(['"', '\''])
+                    .map(|i| val_begin + i)
+                    .unwrap_or(out.len())
+            } else {
+                out[val_begin..]
+                    .find(|c: char| c.is_whitespace() || c == ';' || c == '&')
+                    .map(|i| val_begin + i)
+                    .unwrap_or(out.len())
+            };
+            let keep = (val_begin + 4).min(val_end);
+            if val_end > keep {
+                out.replace_range(keep..val_end, "***");
+            }
+            search_from = keep + 3;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    #[test]
+    fn github_pat() {
+        // When inside GH_TOKEN="...", the env-var pattern fires — secret is still redacted.
+        let s = r#"command=GH_TOKEN="github_pat_73Az8vcYUDOm9qEGKQrHr1efBBBBBBBBBBBBBBBB" gh auth"#;
+        let r = redact_secrets(s);
+        assert!(!r.contains("BBBBB"), "secret leaked: {r}");
+        assert!(r.contains("***"), "no redaction: {r}");
+    }
+
+    #[test]
+    fn github_pat_bare() {
+        // Bare token without env-var wrapper.
+        let r = redact_secrets("token github_pat_73Az8vcYUDOm9qEGKQrHr1efBBBBB rest");
+        assert!(r.contains("github_pat_73Az***"), "got: {r}");
+        assert!(!r.contains("BBBBB"));
+    }
+
+    #[test]
+    fn sk_key() {
+        let r = redact_secrets("sk-proj-abcdef1234567890longkey");
+        assert!(r.contains("sk-proj***"), "got: {r}");
+        assert!(!r.contains("1234567890"));
+    }
+
+    #[test]
+    fn env_var_token() {
+        let r = redact_secrets("MY_API_TOKEN=supersecretvalue123 next");
+        assert!(r.contains("MY_API_TOKEN=supe***"), "got: {r}");
+        assert!(!r.contains("secretvalue"));
+    }
+
+    #[test]
+    fn no_false_positive() {
+        let s = "path=/workspace/src/main.rs";
+        assert_eq!(redact_secrets(s), s);
+    }
+
+    #[test]
+    fn pem_private_key() {
+        let s = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0Z3...\n-----END RSA PRIVATE KEY-----";
+        let r = redact_secrets(s);
+        assert!(r.contains("-----BEGIN RSA PRIVATE KEY-----"), "header stripped: {r}");
+        assert!(!r.contains("MIIEpA"), "key material leaked: {r}");
+        assert!(r.contains("***"), "no redaction: {r}");
+    }
+
+    #[test]
+    fn pem_ec_key_inline() {
+        let s = r#"echo "-----BEGIN EC PRIVATE KEY-----\nMHQCAQ...stuff-----END EC PRIVATE KEY-----""#;
+        let r = redact_secrets(s);
+        assert!(!r.contains("MHQCAQ"), "key material leaked: {r}");
+    }
 }
 
 fn tool_result_is_error(result_json: &str) -> bool {

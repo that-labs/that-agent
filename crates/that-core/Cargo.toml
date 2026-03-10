@@ -1,6 +1,6 @@
 [package]
 name = "that-core"
-description = "Orchestration runtime for autonomous agent sessions, skills, and multi-turn loops"
+description = "Orchestration runtime for Kubernetes-native autonomous agent sessions, skills, and multi-turn loops"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,14 +9,12 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
-readme = "../../README.md"
-
-[package.metadata.docs.rs]
-all-features = true
+publish = false
 
 [features]
 default = ["tui"]
 tui = ["dep:ratatui", "dep:tui-textarea", "dep:crossterm", "dep:arboard"]
+pairing = ["that-channels/pairing"]
 
 [dependencies]
 # Workspace deps
@@ -39,10 +37,10 @@ chrono-tz = { workspace = true }
 clap = { workspace = true }
 
 # Local deps
-that-tools = { path = "../that-tools", version = "0.2.0" }
-that-channels = { path = "../that-channels", version = "0.2.0" }
-that-plugins = { path = "../that-plugins", version = "0.2.0" }
-that-sandbox = { path = "../that-sandbox", version = "0.2.0" }
+that-tools = { path = "../that-tools" }
+that-channels = { path = "../that-channels" }
+that-plugins = { path = "../that-plugins" }
+that-sandbox = { path = "../that-sandbox" }
 
 # Async utilities
 futures = "0.3"
