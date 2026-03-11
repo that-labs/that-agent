@@ -208,63 +208,6 @@ If blocked, explicitly state the blocker and one concrete next step.\n\
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::should_use_channel_empty_response_fallback;
-    use that_channels::ToolLogEvent;
-
-    #[test]
-    fn empty_response_after_channel_notify_still_uses_fallback() {
-        let tool_events = vec![
-            ToolLogEvent::Call {
-                name: "channel_notify".into(),
-                args: r#"{"message":"checkpoint"}"#.into(),
-            },
-            ToolLogEvent::Result {
-                name: "channel_notify".into(),
-                result: r#"{"sent":true}"#.into(),
-                is_error: false,
-            },
-        ];
-
-        assert!(should_use_channel_empty_response_fallback(
-            "",
-            false,
-            &tool_events
-        ));
-    }
-
-    #[test]
-    fn empty_response_after_successful_terminal_channel_send_skips_fallback() {
-        let tool_events = vec![ToolLogEvent::Result {
-            name: "channel_send_message".into(),
-            result: r#"{"sent":true}"#.into(),
-            is_error: false,
-        }];
-
-        assert!(!should_use_channel_empty_response_fallback(
-            "",
-            false,
-            &tool_events
-        ));
-    }
-
-    #[test]
-    fn empty_response_after_failed_terminal_channel_send_uses_fallback() {
-        let tool_events = vec![ToolLogEvent::Result {
-            name: "channel_send_message".into(),
-            result: r#"{"error":"boom"}"#.into(),
-            is_error: true,
-        }];
-
-        assert!(should_use_channel_empty_response_fallback(
-            "",
-            false,
-            &tool_events
-        ));
-    }
-}
-
 /// Append volatile runtime metadata to the tail of the user message so it
 /// doesn't invalidate the shared system-prompt cache prefix.
 pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
@@ -547,4 +490,61 @@ pub fn append_memory_bootstrap_reminder(task: &str, history_len: usize) -> Strin
          default to POSIX shell (`#!/bin/sh` and `set -eu`; avoid bash-only features).\n\
          </system-reminder>"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_use_channel_empty_response_fallback;
+    use that_channels::ToolLogEvent;
+
+    #[test]
+    fn empty_response_after_channel_notify_still_uses_fallback() {
+        let tool_events = vec![
+            ToolLogEvent::Call {
+                name: "channel_notify".into(),
+                args: r#"{"message":"checkpoint"}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "channel_notify".into(),
+                result: r#"{"sent":true}"#.into(),
+                is_error: false,
+            },
+        ];
+
+        assert!(should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn empty_response_after_successful_terminal_channel_send_skips_fallback() {
+        let tool_events = vec![ToolLogEvent::Result {
+            name: "channel_send_message".into(),
+            result: r#"{"sent":true}"#.into(),
+            is_error: false,
+        }];
+
+        assert!(!should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn empty_response_after_failed_terminal_channel_send_uses_fallback() {
+        let tool_events = vec![ToolLogEvent::Result {
+            name: "channel_send_message".into(),
+            result: r#"{"error":"boom"}"#.into(),
+            is_error: true,
+        }];
+
+        assert!(should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
 }
