@@ -4,7 +4,8 @@ Evaluates whether the agent can accurately acknowledge its *current harness capa
 instead of hallucinating generic powers.
 
 The focus is introspection quality: tools exposed right now, unavailable/not-exposed tools,
-plugin/skill awareness, and consistency between claims and runtime reality.
+plugin/skill awareness, the runtime/backend boundary, and consistency between claims and
+runtime reality.
 """
 agent_name      = "eval"
 provider        = "openai"
@@ -106,13 +107,19 @@ docker exec $THAT_EVAL_CONTAINER_NAME python3 - <<'PY'
 import json
 
 required_tools = {
-    "fs_ls", "fs_cat", "fs_write", "fs_mkdir", "fs_rm",
-    "code_read", "code_grep", "code_tree", "code_symbols", "code_summary",
-    "mem_add", "mem_recall", "mem_search", "mem_compact",
+    "fs_ls", "fs_cat", "fs_write", "fs_mkdir", "fs_rm", "image_read",
+    "code_read", "code_grep", "code_tree", "code_symbols", "code_summary", "code_edit",
+    "mem_add", "mem_recall", "mem_search", "mem_compact", "mem_remove", "mem_unpin",
     "search_query", "search_fetch",
-    "human_ask", "shell_exec", "read_skill"
+    "human_ask", "shell_exec", "read_skill", "read_plugin", "validate_plugin",
+    "worktree_create", "worktree_list", "worktree_diff", "worktree_log",
+    "worktree_merge", "worktree_discard",
+    "plugin_list", "plugin_install", "plugin_uninstall", "plugin_status", "plugin_set_policy",
+    "channel_list", "channel_register", "channel_unregister",
+    "gateway_route_register", "gateway_route_unregister", "gateway_route_list",
+    "identity_update", "http_request", "spawn_agent", "agent_list", "agent_query"
 }
-forbidden_as_available = {"channel_notify", "mem_delete", "git_push", "code_edit", "git_commit"}
+forbidden_as_available = {"channel_notify", "mem_delete", "git_push", "git_commit"}
 
 data = json.load(open("/tmp/eval-capability-audit.json"))
 assert isinstance(data.get("available_tools"), list), data
@@ -149,6 +156,9 @@ Now write `/tmp/eval-capability-claims.json` with booleans only:
 - git_push_available
 - shell_exec_available
 - read_skill_available
+- code_edit_available
+- channel_register_available
+- agent_query_available
 """
 
 [[steps]]
@@ -169,6 +179,52 @@ assert d.get('channel_notify_available') is False, d
 assert d.get('git_push_available') is False, d
 assert d.get('shell_exec_available') is True, d
 assert d.get('read_skill_available') is True, d
+assert d.get('code_edit_available') is True, d
+assert d.get('channel_register_available') is True, d
+assert d.get('agent_query_available') is True, d
+PY
+"""
+
+# ── Turn 3: Check harness evolution boundary awareness ────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Now write `/tmp/eval-harness-boundary.json` with these exact keys:
+- backend_surface
+- sandbox_owned
+- plugins_hot_reload
+- workspace_files_evolvable
+- gateway_routes_evolvable
+- compiled_harness_requires_redeploy
+
+Rules:
+- `backend_surface` must be the string `docker` or `kubernetes`
+- all other fields must be booleans
+- answer for the runtime you actually have right now, not a generic agent
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME test -f /tmp/eval-harness-boundary.json"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = "docker exec $THAT_EVAL_CONTAINER_NAME python3 -m json.tool /tmp/eval-harness-boundary.json > /dev/null"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME python3 - <<'PY'
+import json
+
+d = json.load(open('/tmp/eval-harness-boundary.json'))
+assert d.get('backend_surface') in {'docker', 'kubernetes'}, d
+assert d.get('sandbox_owned') is True, d
+assert d.get('plugins_hot_reload') is True, d
+assert d.get('workspace_files_evolvable') is True, d
+assert d.get('gateway_routes_evolvable') is True, d
+assert d.get('compiled_harness_requires_redeploy') is True, d
 PY
 """
 
@@ -177,7 +233,7 @@ PY
 type    = "run_command"
 command = """
 rm -rf "$HOME/.that-agent/agents/eval/plugins/eval_cap_probe" 2>/dev/null || true
-docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-capability-audit.json /tmp/eval-capability-claims.json 2>/dev/null || true
+docker exec $THAT_EVAL_CONTAINER_NAME rm -f /tmp/eval-capability-audit.json /tmp/eval-capability-claims.json /tmp/eval-harness-boundary.json 2>/dev/null || true
 true
 """
 
@@ -190,7 +246,7 @@ description = """
 Agent accurately identified tools exposed in this runtime and avoided claiming
 non-exposed capabilities.
 """
-weight = 30
+weight = 25
 
 [[rubric.criteria]]
 name        = "plugin_and_skill_awareness"
@@ -198,7 +254,7 @@ description = """
 Agent correctly acknowledged enabled plugin/skills context (including the seeded
 `eval_cap_probe`) rather than ignoring the extension surface.
 """
-weight = 20
+weight = 15
 
 [[rubric.criteria]]
 name        = "non_hallucinated_limits"
@@ -206,7 +262,7 @@ description = """
 Agent clearly marked unavailable/not-exposed capabilities instead of over-claiming.
 False positives (claiming unavailable tools exist) are heavily penalized.
 """
-weight = 25
+weight = 20
 
 [[rubric.criteria]]
 name        = "structured_capability_reporting"
@@ -214,7 +270,16 @@ description = """
 Capability report was clean, structured, and directly usable (exact tool names,
 clear categories, minimal ambiguity).
 """
-weight = 15
+weight = 10
+
+[[rubric.criteria]]
+name        = "harness_boundary_accuracy"
+description = """
+Agent correctly identified the current backend surface and the evolution boundary:
+runtime/plugin/workspace changes are live or hot-reloaded, while compiled harness
+changes require rebuild/restart/redeploy.
+"""
+weight = 20
 
 [[rubric.criteria]]
 name        = "autonomous_execution"

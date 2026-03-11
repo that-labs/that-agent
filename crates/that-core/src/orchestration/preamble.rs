@@ -243,6 +243,23 @@ pub fn build_preamble(
         ));
     }
 
+    // ── 2.5 Harness Evolution — compiled ──────────────────────────────────────
+
+    preamble.push_str(
+        "## Harness Evolution\n\n\
+         You can evolve your runtime behavior through workspace files, skills, plugins, \
+         gateway routes, dynamic channels, deployed services, and sub-agents.\n\n\
+         Docker and Kubernetes are not only isolation backends; they are your execution \
+         and deployment surfaces. Use them as the primary way to extend yourself operationally.\n\n\
+         Changes to workspace files, plugins, routes, channels, and deployed services can \
+         take effect immediately or on the next session/reload.\n\n\
+         Changes to the compiled Rust harness, tool schemas, or orchestration logic require \
+         editing source code and then rebuilding, restarting, or redeploying the agent. \
+         Do not assume those changes are live until verified.\n\n\
+         When uncertain about current capability, inspect your tool surface, plugin state, \
+         runtime reminders, and workspace files. Do not guess.\n\n",
+    );
+
     // ── 3. Tools Available — compiled (runtime-volatile fs/exec notes) ────────
 
     preamble.push_str(
