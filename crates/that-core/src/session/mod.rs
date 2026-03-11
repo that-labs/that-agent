@@ -55,6 +55,17 @@ pub enum TranscriptEvent {
     #[serde(rename = "compaction")]
     Compaction { summary: String },
 
+    #[serde(rename = "restart")]
+    Restart {
+        interrupted_run_id: Option<String>,
+        /// The task/prompt that was running when the process was interrupted.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_task: Option<String>,
+        /// The last tool the agent called before the interruption.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_tool: Option<String>,
+    },
+
     #[serde(rename = "usage")]
     Usage {
         input_tokens: u64,
@@ -335,6 +346,26 @@ impl SessionManager {
             .unwrap_or_default()
     }
 
+    /// If the given session has an interrupted run (RunStart without RunEnd),
+    /// append a `Restart` marker and return the interrupted run ID.
+    pub fn mark_restart_if_interrupted(&self, session_id: &str) -> Option<String> {
+        let entries = self.read_transcript(session_id).ok()?;
+        let interrupted = find_interrupted_run(&entries)?;
+        let _ = self.append(
+            session_id,
+            &TranscriptEntry {
+                timestamp: chrono::Utc::now(),
+                run_id: new_run_id(),
+                event: TranscriptEvent::Restart {
+                    interrupted_run_id: Some(interrupted.run_id.clone()),
+                    last_task: interrupted.last_task,
+                    last_tool: interrupted.last_tool,
+                },
+            },
+        );
+        Some(interrupted.run_id)
+    }
+
     /// Persist a sender-key → session-ID mapping so context can be restored after a restart.
     pub fn save_channel_session(&self, sender_key: &str, session_id: &str) {
         let path = self.state_dir.join("channel_sessions.json");
@@ -366,8 +397,24 @@ pub fn rebuild_history(entries: &[TranscriptEntry]) -> Vec<crate::agent_loop::Me
             TranscriptEvent::AssistantMessage { content } => {
                 history.push(crate::agent_loop::Message::assistant(content));
             }
+            TranscriptEvent::Restart {
+                last_task,
+                last_tool,
+                ..
+            } => {
+                let ctx = InterruptedRun {
+                    run_id: String::new(),
+                    last_task: last_task.clone(),
+                    last_tool: last_tool.clone(),
+                };
+                append_restart_marker(&mut history, &ctx);
+            }
             _ => {}
         }
+    }
+    // Catch not-yet-persisted interruptions (no Restart event written yet).
+    if let Some(ctx) = find_interrupted_run(entries) {
+        append_restart_marker(&mut history, &ctx);
     }
     history
 }
@@ -397,9 +444,10 @@ pub fn rebuild_history_recent(
         (None, entries)
     };
 
-    // Collect complete user→assistant pairs from the tail.
+    // Collect complete user→assistant pairs from the tail, and track restart events.
     let mut pairs: Vec<(String, String)> = Vec::new();
     let mut pending_user: Option<String> = None;
+    let mut has_restart_event = false;
     for entry in tail {
         match &entry.event {
             TranscriptEvent::UserMessage { content } => {
@@ -409,6 +457,21 @@ pub fn rebuild_history_recent(
                 if let Some(user) = pending_user.take() {
                     pairs.push((user, content.clone()));
                 }
+            }
+            TranscriptEvent::Restart {
+                last_task,
+                last_tool,
+                ..
+            } => {
+                // Persisted restart marker — inject as a synthetic pair.
+                let ctx = InterruptedRun {
+                    run_id: String::new(),
+                    last_task: last_task.clone(),
+                    last_tool: last_tool.clone(),
+                };
+                let (user_msg, asst_msg) = restart_marker_pair(&ctx);
+                pairs.push((user_msg, asst_msg));
+                has_restart_event = true;
             }
             _ => {}
         }
@@ -435,7 +498,89 @@ pub fn rebuild_history_recent(
         history.push(crate::agent_loop::Message::assistant(assistant));
     }
 
+    // Detect not-yet-persisted interrupted runs (no Restart event written yet).
+    if !has_restart_event {
+        if let Some(ctx) = find_interrupted_run(tail) {
+            append_restart_marker(&mut history, &ctx);
+        }
+    }
+
     history
+}
+
+/// Build the restart awareness message pair (user, assistant) from an interrupted run context.
+fn restart_marker_pair(ctx: &InterruptedRun) -> (String, String) {
+    let mut msg = String::from(
+        "[System: the previous run was interrupted by a process restart. \
+         Any in-progress work may be incomplete.",
+    );
+    if let Some(task) = &ctx.last_task {
+        let preview: String = task.chars().take(200).collect();
+        msg.push_str(&format!(" You were working on: \"{preview}\""));
+        if task.chars().count() > 200 {
+            msg.push_str("...");
+        }
+        msg.push('.');
+    }
+    if let Some(tool) = &ctx.last_tool {
+        msg.push_str(&format!(" The last tool you called was: {tool}."));
+    }
+    msg.push_str(" Assess the situation before continuing.]");
+    (
+        msg,
+        "Understood — I was interrupted. I'll check the current state before proceeding."
+            .to_string(),
+    )
+}
+
+/// Append a restart awareness message pair to the history so the LLM knows
+/// it was interrupted and what it was doing at the time.
+fn append_restart_marker(history: &mut Vec<crate::agent_loop::Message>, ctx: &InterruptedRun) {
+    let (user_msg, asst_msg) = restart_marker_pair(ctx);
+    history.push(crate::agent_loop::Message::user(user_msg));
+    history.push(crate::agent_loop::Message::assistant(asst_msg));
+}
+
+/// Context about an interrupted run.
+struct InterruptedRun {
+    run_id: String,
+    last_task: Option<String>,
+    last_tool: Option<String>,
+}
+
+/// Returns context about the last interrupted run, if any.
+fn find_interrupted_run(entries: &[TranscriptEntry]) -> Option<InterruptedRun> {
+    let mut current: Option<InterruptedRun> = None;
+    let mut open = 0i32;
+    for entry in entries {
+        match &entry.event {
+            TranscriptEvent::RunStart { task } => {
+                current = Some(InterruptedRun {
+                    run_id: entry.run_id.clone(),
+                    last_task: Some(task.clone()),
+                    last_tool: None,
+                });
+                open += 1;
+            }
+            TranscriptEvent::RunEnd { .. } | TranscriptEvent::Restart { .. } => {
+                open = (open - 1).max(0);
+                if open == 0 {
+                    current = None;
+                }
+            }
+            TranscriptEvent::ToolCall { tool, .. } if open > 0 => {
+                if let Some(ref mut c) = current {
+                    c.last_tool = Some(tool.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    if open > 0 {
+        current
+    } else {
+        None
+    }
 }
 
 /// Parse a session ID into a human-readable timestamp string.

@@ -1,4 +1,4 @@
-//! Human-in-the-loop system for Anvil.
+//! Human-in-the-loop system for that-tools.
 //!
 //! Dual-mode: interactive terminal prompts via dialoguer,
 //! or file-based JSON queue for headless operation.

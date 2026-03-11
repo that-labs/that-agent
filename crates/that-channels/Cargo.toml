@@ -9,10 +9,11 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
-readme = "../../README.md"
+publish = false
 
-[package.metadata.docs.rs]
-all-features = true
+[features]
+default = []
+pairing = []
 
 [dependencies]
 # Workspace deps

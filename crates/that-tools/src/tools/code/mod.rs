@@ -1,4 +1,4 @@
-//! Code analysis tools for Anvil.
+//! Code analysis tools for that-tools.
 //!
 //! Structural code comprehension using tree-sitter AST parsing.
 //! Agents get *structure* instead of raw text — AST-aware reading,

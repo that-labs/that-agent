@@ -1,4 +1,4 @@
-//! Daemon mode for long-lived Anvil sessions (feature-gated).
+//! Daemon mode for long-lived that-tools sessions (feature-gated).
 //!
 //! Provides a persistent process that accepts tool requests via
 //! Unix socket / named pipe using JSON-RPC protocol.

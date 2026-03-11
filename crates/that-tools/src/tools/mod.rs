@@ -1,4 +1,4 @@
-//! Tool modules for Anvil.
+//! Tool modules for that-tools.
 //!
 //! Each tool pillar (code, fs, search, memory, human) is a separate module
 //! providing agent-optimized operations with token budget enforcement.

@@ -9,10 +9,7 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
-readme = "../../README.md"
-
-[package.metadata.docs.rs]
-all-features = true
+publish = false
 
 [dependencies]
 # Workspace-managed dependencies
@@ -47,7 +44,6 @@ rayon = "1"
 libc = "0.2"
 similar = "2"
 diffy = "0.4"
-git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
 rusqlite = { version = "0.34", features = ["bundled"] }
 petgraph = "0.8"
 sha2 = "0.10"

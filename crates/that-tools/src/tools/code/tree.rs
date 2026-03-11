@@ -1,4 +1,4 @@
-//! Repository tree mapping for Anvil.
+//! Repository tree mapping for that-tools.
 //!
 //! Generates compact, token-efficient directory trees with .gitignore awareness.
 //! The `--ranked` flag (Phase 2: PageRank) will order files by architectural importance.
@@ -83,7 +83,7 @@ pub fn code_tree(
     if ranked {
         #[cfg(feature = "code-analysis")]
         {
-            // Find the actual project root (directory containing .anvil/) instead of
+            // Find the actual project root (directory containing .that-tools/) instead of
             // looking at the tree root which may be a subdirectory.
             let project_root =
                 crate::index::find_tools_root(root).unwrap_or_else(|| root.to_path_buf());

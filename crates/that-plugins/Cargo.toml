@@ -1,6 +1,6 @@
 [package]
 name = "that-plugins"
-description = "Agent-scoped plugin registry with commands, activations, and routines"
+description = "Cluster-aware plugin registry for autonomous agent services on Kubernetes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,7 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
-readme = "../../README.md"
-
-[package.metadata.docs.rs]
-all-features = true
+publish = false
 
 [dependencies]
 serde = { workspace = true }
@@ -23,4 +20,4 @@ dirs = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
 async-trait = "0.1"
-that-sandbox = { path = "../that-sandbox", version = "0.2.0" }
+that-sandbox = { path = "../that-sandbox" }

@@ -20,6 +20,11 @@ pub enum InboundAttachment {
         mime_type: String,
         duration_secs: Option<u32>,
     },
+    Document {
+        data: Vec<u8>,
+        mime_type: String,
+        filename: Option<String>,
+    },
 }
 
 /// Events emitted by the agent during a run, broadcast to all active channels.

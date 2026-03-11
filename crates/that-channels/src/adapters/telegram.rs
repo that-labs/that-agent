@@ -1258,6 +1258,29 @@ impl Channel for TelegramAdapter {
                     }
                 }
 
+                // Document (zip, pdf, txt, etc.).
+                if let Some(file_id) = update["message"]["document"]["file_id"].as_str() {
+                    let mime = update["message"]["document"]["mime_type"]
+                        .as_str()
+                        .unwrap_or("application/octet-stream")
+                        .to_string();
+                    let filename = update["message"]["document"]["file_name"]
+                        .as_str()
+                        .map(String::from);
+                    match self.download_file(file_id).await {
+                        Ok(data) => {
+                            attachments.push(InboundAttachment::Document {
+                                data,
+                                mime_type: mime,
+                                filename,
+                            });
+                        }
+                        Err(e) => {
+                            warn!(channel = %self.id, "Failed to download document: {e:#}");
+                        }
+                    }
+                }
+
                 // Skip if both text and attachments are empty.
                 if text.is_empty() && attachments.is_empty() {
                     debug!(

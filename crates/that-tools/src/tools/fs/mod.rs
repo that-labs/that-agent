@@ -1,8 +1,8 @@
-//! File system tools for Anvil.
+//! File system tools for that-tools.
 //!
 //! Token-aware file operations that minimize context waste.
-//! `anvil fs ls` returns minimal JSON arrays instead of verbose ls output.
-//! `anvil fs cat` returns budget-limited file content.
+//! `fs ls` returns minimal JSON arrays instead of verbose ls output.
+//! `fs cat` returns budget-limited file content.
 
 pub mod image;
 
@@ -38,14 +38,14 @@ pub struct FsEntry {
     pub size: Option<u64>,
 }
 
-/// Result of an `anvil fs ls` command.
+/// Result of an `fs ls` command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LsResult {
     pub entries: Vec<FsEntry>,
     pub total: usize,
 }
 
-/// Result of an `anvil fs cat` command.
+/// Result of an `fs cat` command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatResult {
     pub path: String,
@@ -152,7 +152,7 @@ pub fn cat(path: &Path, max_tokens: Option<usize>) -> Result<BudgetedOutput, FsE
     Ok(output::emit_json(&result, max_tokens))
 }
 
-/// Result of an `anvil fs write` command.
+/// Result of an `fs write` command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteResult {
     pub path: String,
@@ -162,14 +162,14 @@ pub struct WriteResult {
     pub dry_run: bool,
 }
 
-/// Result of an `anvil fs mkdir` command.
+/// Result of an `fs mkdir` command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MkdirResult {
     pub path: String,
     pub created: bool,
 }
 
-/// Result of an `anvil fs rm` command.
+/// Result of an `fs rm` command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RmResult {
     pub path: String,

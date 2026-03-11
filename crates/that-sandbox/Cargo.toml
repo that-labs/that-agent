@@ -1,6 +1,6 @@
 [package]
 name = "that-sandbox"
-description = "Docker and Kubernetes execution boundary for sandboxed agent operations"
+description = "Kubernetes execution boundary for sandboxed autonomous agent operations"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,7 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
-readme = "../../README.md"
-
-[package.metadata.docs.rs]
-all-features = true
+publish = false
 
 [dependencies]
 anyhow = { workspace = true }

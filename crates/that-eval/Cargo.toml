@@ -9,10 +9,7 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
-readme = "../../README.md"
-
-[package.metadata.docs.rs]
-all-features = true
+publish = false
 
 [[bin]]
 name = "that-eval"
@@ -20,8 +17,8 @@ path = "src/main.rs"
 
 [dependencies]
 # Local crates
-that-core    = { path = "../that-core", version = "0.2.0" }
-that-tools   = { path = "../that-tools", version = "0.2.0" }
+that-core    = { path = "../that-core" }
+that-tools   = { path = "../that-tools" }
 
 # Workspace deps
 clap       = { workspace = true }
