@@ -1370,6 +1370,29 @@ async fn run_agent_for_sender(
             that_channels::InboundAttachment::Image { data, mime_type } => {
                 images.push((data.clone(), mime_type.clone()));
             }
+            that_channels::InboundAttachment::Document {
+                data,
+                mime_type,
+                filename,
+            } => {
+                let fname = filename.as_deref().unwrap_or("attachment.bin").to_string();
+                let dir = std::env::temp_dir().join("that-agent-docs");
+                let _ = std::fs::create_dir_all(&dir);
+                let dest = dir.join(&fname);
+                match std::fs::write(&dest, data) {
+                    Ok(()) => {
+                        enriched_task = format!(
+                            "[Document received: {} ({}) saved to {}]\n\n{enriched_task}",
+                            fname,
+                            mime_type,
+                            dest.display()
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Failed to save document attachment: {e:#}");
+                    }
+                }
+            }
         }
     }
 

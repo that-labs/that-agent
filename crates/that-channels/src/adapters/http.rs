@@ -811,10 +811,16 @@ async fn handle_inbound(
                 mime_type: att.mime_type.clone(),
                 duration_secs: None,
             }
-        } else {
+        } else if att.mime_type.starts_with("image/") {
             InboundAttachment::Image {
                 data,
                 mime_type: att.mime_type.clone(),
+            }
+        } else {
+            InboundAttachment::Document {
+                data,
+                mime_type: att.mime_type.clone(),
+                filename: None,
             }
         };
         attachments.push(attachment);
