@@ -4,7 +4,7 @@ description: Build practical agent plugins (commands, skills, routines, activati
 metadata:
   bootstrap: true
   always: false
-  version: 1.2.2
+  version: 1.2.3
 ---
 
 # that-plugins
@@ -35,6 +35,33 @@ Do not mix concerns:
 Runtime-managed state files under plugins root:
 - `.plugin-state.toml`
 - `.plugin-runtime.toml`
+
+## Scaffold Rule
+
+When creating a new plugin, prefer the built-in scaffold command:
+
+```bash
+that --agent <agent-name> plugin create <plugin-id>
+```
+
+Do not hand-create the top-level plugin directory structure with ad-hoc shell shortcuts when the
+CLI scaffold is available.
+
+If you must create missing subdirectories manually, create each path explicitly:
+
+```bash
+mkdir -p skills
+mkdir -p scripts
+mkdir -p deploy/k8s
+mkdir -p state
+mkdir -p artifacts
+```
+
+Do not use shell brace expansion for plugin scaffolding. A malformed command can create literal
+directories containing `{`, `}`, or `,`, which corrupts the plugin layout.
+
+After scaffolding, verify that the plugin root contains only the expected directories and that no
+malformed directory names were created.
 
 ## Runtime Backends
 
@@ -194,6 +221,7 @@ After changes, verify all:
 8. Disable behavior is correct: plugin disabled in state and files retained.
 9. Durable plugin facts are stored via `mem_add` (plugin id, purpose, commands/skills/routines touched, deploy/runtime notes).
 10. For Kubernetes deploys: no stale failed/evicted pods remain for this plugin label after rollout.
+11. Plugin root contains no malformed scaffold directories (for example names containing `{`, `}`, or `,`).
 
 ## Practical Constraints
 

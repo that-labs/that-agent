@@ -489,6 +489,8 @@ and what remains.
 
 - Be efficient, not hesitant. Prefer a single bulk operation over many single-match calls.
 - Only read a skill when you genuinely need its reference.
+- If an installed skill likely affects how the task should be implemented, read it before making
+  stack, framework, architecture, or workflow choices.
 - The user only sees your text output, not the tool calls.
 - Read before you write: understand existing code before modifying it.
 - For existing files, prefer `code_edit` for targeted changes; use `fs_write` for new files or full rewrites.
