@@ -23,6 +23,7 @@ pub mod types;
 
 mod anthropic;
 mod openai;
+mod openai_compatible;
 mod openrouter;
 
 pub use hook::{HookAction, LoopHook, NoopHook};
@@ -595,7 +596,33 @@ async fn complete_once_inner(
                 }
             });
         }
-        other => return Err(anyhow::anyhow!("Unsupported provider: {other}")),
+        other => {
+            let entry = crate::provider_registry::find_registered_provider(other)
+                .ok_or_else(|| anyhow::anyhow!("Unsupported provider: {other}"))?;
+            match entry.transport.as_str() {
+                "openai_chat" => {
+                    let tools: Vec<ToolDef> = vec![];
+                    tokio::spawn({
+                        let api_key = api_key.to_string();
+                        let model = model.to_string();
+                        let system = system.to_string();
+                        let messages = messages.clone();
+                        async move {
+                            let _ = openai_compatible::stream_turn(
+                                &entry, &api_key, &model, &system, &messages, &tools, max_tokens,
+                                tx,
+                            )
+                            .await;
+                        }
+                    });
+                }
+                transport => {
+                    return Err(anyhow::anyhow!(
+                        "Unsupported provider transport '{transport}' for {other}"
+                    ));
+                }
+            }
+        }
     }
 
     let mut text = String::new();
@@ -691,7 +718,22 @@ async fn run_turn(
                     )
                     .await
                 }
-                other => Err(anyhow::anyhow!("Unsupported provider: {other}")),
+                other => {
+                    let entry = crate::provider_registry::find_registered_provider(other)
+                        .ok_or_else(|| anyhow::anyhow!("Unsupported provider: {other}"))?;
+                    match entry.transport.as_str() {
+                        "openai_chat" => {
+                            openai_compatible::stream_turn(
+                                &entry, &api_key, &model, &system, &messages, &tools, max_tokens,
+                                tx,
+                            )
+                            .await
+                        }
+                        transport => Err(anyhow::anyhow!(
+                            "Unsupported provider transport '{transport}' for {other}"
+                        )),
+                    }
+                }
             }
         })
     };

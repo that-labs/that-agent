@@ -1029,6 +1029,41 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                 "required": ["id"]
             }),
         },
+        ToolDef {
+            name: "provider_list".into(),
+            description: "List dynamically registered inference providers available for /models.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
+            name: "provider_register".into(),
+            description: "Register a new OpenAI-compatible inference provider at runtime. \
+                Use the provider id later in /models and set the API key in the referenced env var.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Unique provider id, for example groq" },
+                    "base_url": { "type": "string", "description": "OpenAI-compatible API base URL, for example https://api.groq.com/openai/v1" },
+                    "api_key_env": { "type": "string", "description": "Environment variable name that holds the provider API key" },
+                    "models": { "type": "array", "items": { "type": "string" }, "description": "Suggested models to show in /models" },
+                    "transport": { "type": "string", "enum": ["openai_chat"], "description": "Provider transport type. Only openai_chat is supported right now." }
+                },
+                "required": ["id", "base_url", "api_key_env"]
+            }),
+        },
+        ToolDef {
+            name: "provider_unregister".into(),
+            description: "Remove a dynamically registered inference provider.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Provider id to unregister" }
+                },
+                "required": ["id"]
+            }),
+        },
         // ── Dynamic gateway route tools ──────────────────────────────────────
         ToolDef {
             name: "gateway_route_register".into(),
@@ -1952,6 +1987,75 @@ async fn dispatch_inner(
             if let Some(r) = router.as_ref() {
                 r.remove_channel(&args.id).await;
             }
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
+        "provider_list" => {
+            let registry = crate::provider_registry::DynamicProviderRegistry::from_default_path()
+                .ok_or_else(|| ToolError("provider registry unavailable".into()))?;
+            let providers = registry.list().map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "providers": providers }))
+        }
+        "provider_register" => {
+            #[derive(Deserialize)]
+            struct Args {
+                id: String,
+                base_url: String,
+                api_key_env: String,
+                #[serde(default)]
+                models: Vec<String>,
+                #[serde(default = "default_provider_transport")]
+                transport: String,
+            }
+            fn default_provider_transport() -> String {
+                "openai_chat".into()
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            if args.transport != "openai_chat" {
+                return Err(ToolError(
+                    "unsupported transport: only openai_chat is supported right now".into(),
+                ));
+            }
+            let id = crate::provider_registry::normalize_provider_id(&args.id)
+                .ok_or_else(|| ToolError("invalid provider id".into()))?;
+            if matches!(id.as_str(), "openai" | "anthropic" | "openrouter") {
+                return Err(ToolError("cannot override a built-in provider".into()));
+            }
+            let registry = crate::provider_registry::DynamicProviderRegistry::from_default_path()
+                .ok_or_else(|| ToolError("provider registry unavailable".into()))?;
+            registry
+                .register(crate::provider_registry::ProviderEntry {
+                    id: id.clone(),
+                    transport: args.transport,
+                    base_url: args.base_url.trim().to_string(),
+                    api_key_env: args.api_key_env.trim().to_string(),
+                    models: args
+                        .models
+                        .into_iter()
+                        .map(|model| model.trim().to_string())
+                        .filter(|model| !model.is_empty())
+                        .collect(),
+                    registered_at: chrono::Utc::now().to_rfc3339(),
+                })
+                .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({
+                "id": id,
+                "transport": "openai_chat",
+                "status": "ok"
+            }))
+        }
+        "provider_unregister" => {
+            #[derive(Deserialize)]
+            struct Args {
+                id: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let registry = crate::provider_registry::DynamicProviderRegistry::from_default_path()
+                .ok_or_else(|| ToolError("provider registry unavailable".into()))?;
+            registry
+                .unregister(&args.id)
+                .map_err(|e| ToolError(e.to_string()))?;
             Ok(serde_json::json!({ "status": "ok" }))
         }
         // ── Dynamic gateway route tools ──────────────────────────────────────

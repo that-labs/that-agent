@@ -20,6 +20,7 @@ pub mod hooks;
 pub mod model_catalog;
 pub mod observability;
 pub mod orchestration;
+pub mod provider_registry;
 pub mod sandbox;
 pub mod session;
 pub mod skills;

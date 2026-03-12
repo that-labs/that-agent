@@ -131,13 +131,83 @@ fn channel_model_status(agent: &AgentDef, prefs: &ChannelPreferences) -> String 
     )
 }
 
-fn provider_menu_text(agent: &AgentDef, prefs: &ChannelPreferences, providers: &[&str]) -> String {
+fn channel_config_slug(sender_key: &str) -> String {
+    let slug: String = sender_key
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if slug.is_empty() {
+        "default".into()
+    } else {
+        slug
+    }
+}
+
+fn effective_channel_config_host_path(
+    agent_name: &str,
+    sender_key: &str,
+) -> Option<std::path::PathBuf> {
+    let file_name = format!("{}.toml", channel_config_slug(sender_key));
+    dirs::home_dir().map(|home| {
+        home.join(".that-agent")
+            .join("state")
+            .join("channel-configs")
+            .join(agent_name)
+            .join(file_name)
+    })
+}
+
+fn effective_channel_config_visible_path(
+    agent_name: &str,
+    sender_key: &str,
+    sandbox: bool,
+) -> Option<String> {
+    let file_name = format!("{}.toml", channel_config_slug(sender_key));
+    if sandbox {
+        Some(format!(
+            "/home/agent/.that-agent/state/channel-configs/{agent_name}/{file_name}"
+        ))
+    } else {
+        effective_channel_config_host_path(agent_name, sender_key)
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+}
+
+fn persist_effective_channel_config(
+    agent: &AgentDef,
+    sender_key: &str,
+    sandbox: bool,
+) -> Option<String> {
+    let path = effective_channel_config_host_path(&agent.name, sender_key)?;
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let text = toml::to_string_pretty(agent).ok()?;
+    std::fs::write(&path, text).ok()?;
+    effective_channel_config_visible_path(&agent.name, sender_key, sandbox)
+}
+
+fn remove_effective_channel_config(agent_name: &str, sender_key: &str) {
+    if let Some(path) = effective_channel_config_host_path(agent_name, sender_key) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn provider_menu_text(
+    agent: &AgentDef,
+    prefs: &ChannelPreferences,
+    providers: &[String],
+) -> String {
     let mut text = format!(
         "{}\n\nAvailable providers:\n",
         channel_model_status(agent, prefs)
     );
     for provider in providers {
-        let marker = if *provider == active_provider(agent, prefs) {
+        let marker = if provider == active_provider(agent, prefs) {
             "✓"
         } else {
             "•"
@@ -169,7 +239,7 @@ fn model_menu_text(agent: &AgentDef, prefs: &ChannelPreferences, provider: &str)
 fn provider_menu_markup(
     agent: &AgentDef,
     prefs: &ChannelPreferences,
-    providers: &[&str],
+    providers: &[String],
 ) -> Option<that_channels::ReplyMarkup> {
     if providers.is_empty() {
         return None;
@@ -179,10 +249,10 @@ fn provider_menu_markup(
         let row = chunk
             .iter()
             .map(|provider| that_channels::InlineButton {
-                text: if *provider == active_provider(agent, prefs) {
+                text: if provider == active_provider(agent, prefs) {
                     format!("✓ {provider}")
                 } else {
-                    (*provider).to_string()
+                    provider.to_string()
                 },
                 callback_data: format!("/models {provider}"),
             })
@@ -213,11 +283,11 @@ fn model_menu_markup(
             .iter()
             .map(|model| that_channels::InlineButton {
                 text: if provider == active_provider(agent, prefs)
-                    && *model == active_model(agent, prefs)
+                    && model == active_model(agent, prefs)
                 {
                     format!("✓ {model}")
                 } else {
-                    (*model).to_string()
+                    model.to_string()
                 },
                 callback_data: format!("/models {provider} {model}"),
             })
@@ -266,6 +336,7 @@ async fn handle_models_command(
     target: &that_channels::OutboundTarget,
     agent: &AgentDef,
     current_prefs: &ChannelPreferences,
+    sandbox: bool,
     args: &str,
 ) {
     let providers = available_providers();
@@ -299,6 +370,7 @@ async fn handle_models_command(
                 map.remove(sender_key);
             }
             session_mgr.save_channel_preferences(sender_key, &prefs);
+            remove_effective_channel_config(&agent.name, sender_key);
             let message = format!(
                 "Model reset. This conversation now uses the agent default: {} / {}.",
                 agent.provider, agent.model
@@ -318,7 +390,7 @@ async fn handle_models_command(
                     .await;
                 return;
             };
-            if !providers.contains(&provider) {
+            if !providers.iter().any(|candidate| candidate == &provider) {
                 let message = format!("Provider '{provider}' is not configured on this agent.");
                 router
                     .notify_channel(channel_id, &message, Some(target))
@@ -329,8 +401,8 @@ async fn handle_models_command(
                 router,
                 channel_id,
                 target,
-                model_menu_text(agent, current_prefs, provider),
-                model_menu_markup(agent, current_prefs, provider),
+                model_menu_text(agent, current_prefs, &provider),
+                model_menu_markup(agent, current_prefs, &provider),
             )
             .await;
         }
@@ -345,7 +417,7 @@ async fn handle_models_command(
                     .await;
                 return;
             };
-            if !providers.contains(&provider) {
+            if !providers.iter().any(|candidate| candidate == &provider) {
                 let message = format!("Provider '{provider}' is not configured on this agent.");
                 router
                     .notify_channel(channel_id, &message, Some(target))
@@ -372,9 +444,18 @@ async fn handle_models_command(
                 map.insert(sender_key.to_string(), prefs.clone());
             }
             session_mgr.save_channel_preferences(sender_key, &prefs);
-            let message = format!(
-                "Model for this conversation set to {provider} / {model}. New runs will use it."
-            );
+            let effective_agent = apply_channel_preferences(agent, &prefs);
+            let message = if let Some(path) =
+                persist_effective_channel_config(&effective_agent, sender_key, sandbox)
+            {
+                format!(
+                    "Model for this conversation set to {provider} / {model}. New runs will use it. Effective runtime config: {path}"
+                )
+            } else {
+                format!(
+                    "Model for this conversation set to {provider} / {model}. New runs will use it."
+                )
+            };
             router
                 .notify_channel(channel_id, &message, Some(target))
                 .await;
@@ -874,6 +955,7 @@ pub async fn run_listen(
                         skill_roots_hb.clone(),
                         None,
                         None,
+                        None,
                     )
                     .await;
                 }
@@ -928,6 +1010,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&channel_registry_hb)),
                         Some(Arc::clone(&route_registry_hb)),
                         skill_roots_hb.clone(),
+                        None,
                         None,
                         None,
                     )
@@ -1081,6 +1164,16 @@ pub async fn run_listen(
                         prefs.get(&sender_key).cloned().unwrap_or_default()
                     };
                     let effective_agent = apply_channel_preferences(&agent, &channel_prefs);
+                    let effective_config_path = if channel_prefs.is_default() {
+                        remove_effective_channel_config(&agent.name, &sender_key);
+                        None
+                    } else {
+                        persist_effective_channel_config(
+                            &effective_agent,
+                            &sender_key,
+                            container.is_some(),
+                        )
+                    };
 
                     if !plugin_activations.is_empty() {
                         let slash_command = parsed_slash.as_ref().map(|(cmd, _)| cmd.as_str());
@@ -1142,6 +1235,7 @@ pub async fn run_listen(
                                     &outbound_target,
                                     &agent,
                                     &channel_prefs,
+                                    container.is_some(),
                                     &args,
                                 )
                                 .await;
@@ -1293,7 +1387,7 @@ pub async fn run_listen(
                                         sessions,
                                         std::sync::Arc::clone(&channel_index_lock),
                                         session_mgr,
-                                        agent,
+                                        effective_agent.clone(),
                                         container,
                                         preamble,
                                         router,
@@ -1305,6 +1399,7 @@ pub async fn run_listen(
                                         Some(Arc::clone(&route_registry)),
                                         skill_roots,
                                         None,
+                                        effective_config_path.clone(),
                                     )
                                     .await;
                                     return;
@@ -1327,7 +1422,7 @@ pub async fn run_listen(
                                         sessions,
                                         std::sync::Arc::clone(&channel_index_lock),
                                         session_mgr,
-                                        agent,
+                                        effective_agent.clone(),
                                         container,
                                         preamble,
                                         router,
@@ -1339,6 +1434,7 @@ pub async fn run_listen(
                                         Some(Arc::clone(&route_registry)),
                                         skill_roots,
                                         None,
+                                        effective_config_path.clone(),
                                     )
                                     .await;
                                     return;
@@ -1380,6 +1476,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&route_registry)),
                         skill_roots,
                         msg.callback_url,
+                        effective_config_path,
                     )
                     .await;
                 })
@@ -1426,6 +1523,7 @@ async fn run_agent_for_sender_tracked(
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
     callback_url: Option<String>,
+    effective_config_path: Option<String>,
 ) {
     let active_run_id = run_seq.fetch_add(1, Ordering::Relaxed);
     let sender_key_for_task = sender_key.clone();
@@ -1455,6 +1553,7 @@ async fn run_agent_for_sender_tracked(
             route_registry,
             skill_roots,
             callback_url,
+            effective_config_path,
             Some(steering_for_task),
         )
         .await;
@@ -1507,6 +1606,7 @@ async fn run_agent_for_sender(
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
     callback_url: Option<String>,
+    effective_config_path: Option<String>,
     steering: Option<SteeringQueue>,
 ) {
     struct TypingTaskGuard(Option<tokio::task::JoinHandle<()>>);
@@ -1768,6 +1868,7 @@ async fn run_agent_for_sender(
         route_registry,
         skill_roots,
         steering_for_run,
+        effective_config_path,
     )
     .await;
 
@@ -1904,5 +2005,24 @@ async fn run_agent_for_sender(
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{channel_config_slug, effective_channel_config_visible_path};
+
+    #[test]
+    fn channel_config_slug_normalizes_sender_keys() {
+        assert_eq!(channel_config_slug("telegram:123/abc"), "telegram_123_abc");
+    }
+
+    #[test]
+    fn sandbox_effective_config_path_uses_state_dir() {
+        let path = effective_channel_config_visible_path("demo", "telegram:123", true).unwrap();
+        assert_eq!(
+            path,
+            "/home/agent/.that-agent/state/channel-configs/demo/telegram_123.toml"
+        );
     }
 }

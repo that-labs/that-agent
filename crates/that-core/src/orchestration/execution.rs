@@ -32,9 +32,15 @@ pub fn api_key_for_provider(provider: &str) -> Result<String> {
             .context("Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY"),
         "openai" => std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set"),
         "openrouter" => std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set"),
-        other => Err(anyhow::anyhow!(
-            "Unsupported provider: {other}. Use 'anthropic', 'openai', or 'openrouter'."
-        )),
+        other => {
+            let entry = crate::provider_registry::find_registered_provider(other).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unsupported provider: {other}. Use 'anthropic', 'openai', 'openrouter', or register a dynamic provider."
+                )
+            })?;
+            std::env::var(&entry.api_key_env)
+                .with_context(|| format!("{} not set", entry.api_key_env))
+        }
     }
 }
 
@@ -419,6 +425,59 @@ pub async fn route_channel_event(
     }
 }
 
+fn resolved_agent_config_path(agent_name: &str, sandbox: bool) -> String {
+    let use_preferred = dirs::home_dir()
+        .map(|home| {
+            let preferred = home
+                .join(".that-agent")
+                .join("agents")
+                .join(agent_name)
+                .join("config.toml");
+            let legacy = home
+                .join(".that-agent")
+                .join("agents")
+                .join(format!("{agent_name}.toml"));
+            preferred.exists() || !legacy.exists()
+        })
+        .unwrap_or(true);
+    if sandbox {
+        if use_preferred {
+            format!("/home/agent/.that-agent/agents/{agent_name}/config.toml")
+        } else {
+            format!("/home/agent/.that-agent/agents/{agent_name}.toml")
+        }
+    } else if let Some(home) = dirs::home_dir() {
+        let path = if use_preferred {
+            home.join(".that-agent")
+                .join("agents")
+                .join(agent_name)
+                .join("config.toml")
+        } else {
+            home.join(".that-agent")
+                .join("agents")
+                .join(format!("{agent_name}.toml"))
+        };
+        path.to_string_lossy().into_owned()
+    } else if use_preferred {
+        format!("~/.that-agent/agents/{agent_name}/config.toml")
+    } else {
+        format!("~/.that-agent/agents/{agent_name}.toml")
+    }
+}
+
+fn channel_config_env_lines(effective_config_path: Option<&str>, base_config_path: &str) -> String {
+    if let Some(effective_config_path) = effective_config_path {
+        format!(
+            "- `THAT_CONFIG_PATH={effective_config_path}` — effective runtime config for this conversation (includes any /models override)\n\
+             - `THAT_AGENT_CONFIG_PATH={base_config_path}` — base agent config on disk"
+        )
+    } else {
+        format!(
+            "- `THAT_CONFIG_PATH={base_config_path}` — this agent's channel and adapter configuration file"
+        )
+    }
+}
+
 /// Build and execute a single agent run using a [`that_channels::ChannelRouter`].
 ///
 /// This is the generic multi-channel equivalent of [`super::tui_session::execute_agent_run_tui`].
@@ -476,6 +535,7 @@ pub async fn execute_agent_run_channel(
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
     steering: Option<SteeringQueue>,
+    effective_config_path: Option<String>,
 ) -> Result<(String, Vec<that_channels::ToolLogEvent>)> {
     if let Some(sid) = session_id_for_trace {
         tracing::Span::current().record("session.id", sid);
@@ -510,21 +570,9 @@ pub async fn execute_agent_run_channel(
     } else {
         router.combined_format_instructions().await
     };
-    // Channel config lives in the agent's own TOML file.
-    // In sandbox mode ~/.that-agent is mounted at /home/agent/.that-agent,
-    // so use the container-visible path so fs_cat/fs_write work correctly.
-    let config_path = if container.is_some() {
-        format!("/home/agent/.that-agent/agents/{}.toml", agent.name)
-    } else {
-        dirs::home_dir()
-            .map(|h| {
-                h.join(".that-agent")
-                    .join("agents")
-                    .join(format!("{}.toml", agent.name))
-            })
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| format!("~/.that-agent/agents/{}.toml", agent.name))
-    };
+    let base_config_path = resolved_agent_config_path(&agent.name, container.is_some());
+    let config_env_lines =
+        channel_config_env_lines(effective_config_path.as_deref(), &base_config_path);
 
     let gateway_url = super::support::resolve_gateway_url();
     let channel_info = format!(
@@ -535,7 +583,7 @@ pub async fn execute_agent_run_channel(
          Channel env vars available at runtime:\n\
          - `THAT_CHANNEL_IDS={ids}`\n\
          - `THAT_CHANNEL_PRIMARY={primary}`\n\
-         - `THAT_CONFIG_PATH={config_path}` — this agent's channel and adapter configuration file\n\n\
+         {config_env_lines}\n\n\
          ## Gateway\n\n\
          Your HTTP gateway is always listening at `{gateway_url}`.\n\
          - `POST {gateway_url}/v1/inbound` — async fire-and-forget (returns 202). Triggers a background agent run. \
@@ -545,11 +593,13 @@ pub async fn execute_agent_run_channel(
          - `POST {gateway_url}/v1/notify` — zero-cost queue (returns 202). No LLM turn, batched into next heartbeat.\n\
          - `GET {gateway_url}/v1/schema` — introspection endpoint for bridge plugins at startup.\n\
          Use `channel_register` to hot-register a bridge and `channel_list` to see active bridges.\n\
+         Use `provider_register` to add an OpenAI-compatible inference provider at runtime. \
+         Once its API key env var is configured, it will show up in `/models`.\n\
          When building or deploying a bridge plugin, give it this gateway URL and configure it to use `/v1/inbound` (not `/v1/chat`).",
         ids = router.channel_ids().await,
         active = active_channel,
         primary = primary_id,
-        config_path = config_path,
+        config_env_lines = config_env_lines,
         gateway_url = gateway_url,
     );
     let channel_output_contract = format!(
@@ -832,7 +882,9 @@ pub async fn execute_agent_run_channel(
 
 #[cfg(test)]
 mod tests {
-    use super::build_channel_finalization_prompt;
+    use super::{
+        build_channel_finalization_prompt, channel_config_env_lines, resolved_agent_config_path,
+    };
 
     #[test]
     fn finalization_prompt_uses_user_task_and_recent_tool_results() {
@@ -856,5 +908,25 @@ mod tests {
         assert!(prompt.contains("Original user task: Ship it"));
         assert!(prompt.contains("shell_exec (ok): pods ready"));
         assert!(!prompt.contains("internal: true"));
+    }
+
+    #[test]
+    fn config_env_lines_include_effective_and_base_paths_when_overridden() {
+        let lines = channel_config_env_lines(
+            Some("/home/agent/.that-agent/state/channel-configs/demo/telegram_123.toml"),
+            "/home/agent/.that-agent/agents/demo/config.toml",
+        );
+
+        assert!(lines.contains(
+            "THAT_CONFIG_PATH=/home/agent/.that-agent/state/channel-configs/demo/telegram_123.toml"
+        ));
+        assert!(lines
+            .contains("THAT_AGENT_CONFIG_PATH=/home/agent/.that-agent/agents/demo/config.toml"));
+    }
+
+    #[test]
+    fn sandbox_agent_config_path_prefers_config_toml_layout() {
+        let path = resolved_agent_config_path("demo", true);
+        assert_eq!(path, "/home/agent/.that-agent/agents/demo/config.toml");
     }
 }

@@ -1,3 +1,7 @@
+use crate::provider_registry::{
+    find_registered_provider, load_registered_providers, normalize_provider_id,
+};
+
 pub const MODEL_OPTIONS: &[(&str, &str)] = &[
     ("anthropic", "claude-opus-4-6"),
     ("anthropic", "claude-sonnet-4-6"),
@@ -12,39 +16,57 @@ pub const MODEL_OPTIONS: &[(&str, &str)] = &[
 
 const PROVIDER_ORDER: &[&str] = &["openai", "anthropic", "openrouter"];
 
-pub fn normalize_provider(provider: &str) -> Option<&'static str> {
+pub fn normalize_provider(provider: &str) -> Option<String> {
     match provider.trim().to_ascii_lowercase().as_str() {
-        "openai" => Some("openai"),
-        "anthropic" => Some("anthropic"),
-        "openrouter" => Some("openrouter"),
-        _ => None,
+        "openai" => Some("openai".into()),
+        "anthropic" => Some("anthropic".into()),
+        "openrouter" => Some("openrouter".into()),
+        _ => normalize_provider_id(provider).filter(|id| find_registered_provider(id).is_some()),
     }
 }
 
-pub fn suggested_models(provider: &str) -> Vec<&'static str> {
-    MODEL_OPTIONS
-        .iter()
-        .filter_map(|(candidate_provider, model)| {
-            (*candidate_provider == provider).then_some(*model)
-        })
-        .collect()
+pub fn suggested_models(provider: &str) -> Vec<String> {
+    match provider {
+        "openai" | "anthropic" | "openrouter" => MODEL_OPTIONS
+            .iter()
+            .filter_map(|(candidate_provider, model)| {
+                (*candidate_provider == provider).then_some((*model).to_string())
+            })
+            .collect(),
+        _ => find_registered_provider(provider)
+            .map(|entry| entry.models)
+            .unwrap_or_default(),
+    }
 }
 
 pub fn provider_is_available(provider: &str) -> bool {
     match normalize_provider(provider) {
-        Some("anthropic") => has_env("CLAUDE_CODE_OAUTH_TOKEN") || has_env("ANTHROPIC_API_KEY"),
-        Some("openai") => has_env("OPENAI_API_KEY"),
-        Some("openrouter") => has_env("OPENROUTER_API_KEY"),
+        Some(provider) if provider == "anthropic" => {
+            has_env("CLAUDE_CODE_OAUTH_TOKEN") || has_env("ANTHROPIC_API_KEY")
+        }
+        Some(provider) if provider == "openai" => has_env("OPENAI_API_KEY"),
+        Some(provider) if provider == "openrouter" => has_env("OPENROUTER_API_KEY"),
+        Some(provider) => find_registered_provider(&provider)
+            .map(|entry| has_env(&entry.api_key_env))
+            .unwrap_or(false),
         _ => false,
     }
 }
 
-pub fn available_providers() -> Vec<&'static str> {
-    PROVIDER_ORDER
+pub fn available_providers() -> Vec<String> {
+    let mut providers: Vec<String> = PROVIDER_ORDER
         .iter()
-        .copied()
         .filter(|provider| provider_is_available(provider))
-        .collect()
+        .map(|provider| (*provider).to_string())
+        .collect();
+    let mut dynamic: Vec<String> = load_registered_providers()
+        .into_iter()
+        .filter(|entry| provider_is_available(&entry.id))
+        .map(|entry| entry.id)
+        .collect();
+    dynamic.sort();
+    providers.extend(dynamic);
+    providers
 }
 
 fn has_env(key: &str) -> bool {
@@ -60,13 +82,13 @@ mod tests {
     #[test]
     fn suggested_models_are_grouped_by_provider() {
         let openai = suggested_models("openai");
-        assert!(openai.contains(&"gpt-5.2-codex"));
-        assert!(!openai.contains(&"claude-sonnet-4-6"));
+        assert!(openai.contains(&"gpt-5.2-codex".to_string()));
+        assert!(!openai.contains(&"claude-sonnet-4-6".to_string()));
     }
 
     #[test]
     fn normalize_provider_rejects_unknown_values() {
-        assert_eq!(normalize_provider(" OpenAI "), Some("openai"));
-        assert_eq!(normalize_provider("unknown"), None);
+        assert_eq!(normalize_provider(" OpenAI "), Some("openai".into()));
+        assert_eq!(normalize_provider("__missing_provider__"), None);
     }
 }
