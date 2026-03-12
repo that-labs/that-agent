@@ -11,6 +11,34 @@ metadata:
 
 Use this skill when the user asks for plugin work: create, update, install, enable, disable, or debug plugins.
 
+## Strategic Role
+
+Plugins are the primary way the agent ecosystem grows.
+
+Use a plugin when the capability should persist beyond the current session, be reusable, expose commands
+or routines, run as its own service, or carry its own deploy/runtime contract. Do not leave durable
+agent capabilities trapped in ad-hoc shell scripts or one-off local edits when they should become a plugin.
+
+## Task Discipline (Required)
+
+Plugin work is always task-managed work.
+
+Before substantial plugin implementation or debugging:
+1. Read `Tasks.md`
+2. Create or update the relevant epic, story, and task entry
+3. Mark the active task `in-progress`
+
+During plugin work:
+1. Keep task status current
+2. Use `channel_notify` at meaningful checkpoints
+3. If the scope expands from a small fix into broader plugin work, expand the task structure before continuing
+
+After plugin work:
+1. Mark the task tree done so no stale `in-progress` entry remains
+2. Call `mem_add` with the plugin id, purpose, runtime/deploy shape, commands/skills/routines changed, and follow-up notes
+
+For plugin work that touches multiple concerns, read `task-manager` before proceeding.
+
 ## Scope Rules (Separation of Concerns)
 
 A plugin is always agent-scoped and isolated to:

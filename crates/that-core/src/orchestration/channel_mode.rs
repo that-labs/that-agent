@@ -8,8 +8,10 @@ use tracing::{debug, error, info, warn};
 use crate::agent_loop::{Message, SteeringQueue};
 use crate::config::{AgentDef, WorkspaceConfig};
 use crate::heartbeat;
+use crate::model_catalog::{available_providers, normalize_provider, suggested_models};
 use crate::session::{
-    new_run_id, rebuild_history_recent, RunStatus, SessionManager, TranscriptEntry, TranscriptEvent,
+    new_run_id, rebuild_history_recent, ChannelPreferences, RunStatus, SessionManager,
+    TranscriptEntry, TranscriptEvent,
 };
 
 use super::config::*;
@@ -40,6 +42,8 @@ pub(super) struct HotState {
 type ChannelSessions = Arc<
     tokio::sync::Mutex<std::collections::HashMap<String, (String, Vec<Message>, Arc<AtomicBool>)>>,
 >;
+type ChannelModelPrefs =
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, ChannelPreferences>>>;
 type PluginTaskEntry = (
     String,
     Option<String>,
@@ -94,6 +98,287 @@ pub(super) async fn stop_active_sender_run(
         true
     } else {
         false
+    }
+}
+
+fn apply_channel_preferences(agent: &AgentDef, prefs: &ChannelPreferences) -> AgentDef {
+    let mut effective = agent.clone();
+    if let (Some(provider), Some(model)) = (prefs.provider.as_deref(), prefs.model.as_deref()) {
+        effective.provider = provider.to_string();
+        effective.model = model.to_string();
+    }
+    effective
+}
+
+fn active_provider<'a>(agent: &'a AgentDef, prefs: &'a ChannelPreferences) -> &'a str {
+    prefs.provider.as_deref().unwrap_or(&agent.provider)
+}
+
+fn active_model<'a>(agent: &'a AgentDef, prefs: &'a ChannelPreferences) -> &'a str {
+    prefs.model.as_deref().unwrap_or(&agent.model)
+}
+
+fn channel_model_status(agent: &AgentDef, prefs: &ChannelPreferences) -> String {
+    let source = if prefs.is_default() {
+        "agent default"
+    } else {
+        "channel override"
+    };
+    format!(
+        "Current model for this conversation: {} / {} ({source}).",
+        active_provider(agent, prefs),
+        active_model(agent, prefs),
+    )
+}
+
+fn provider_menu_text(agent: &AgentDef, prefs: &ChannelPreferences, providers: &[&str]) -> String {
+    let mut text = format!(
+        "{}\n\nAvailable providers:\n",
+        channel_model_status(agent, prefs)
+    );
+    for provider in providers {
+        let marker = if *provider == active_provider(agent, prefs) {
+            "✓"
+        } else {
+            "•"
+        };
+        text.push_str(&format!("{marker} {provider}\n"));
+    }
+    text.push_str("\nUse /models <provider> to see suggested models, or /models reset to go back to the agent default.");
+    text
+}
+
+fn model_menu_text(agent: &AgentDef, prefs: &ChannelPreferences, provider: &str) -> String {
+    let mut text = format!(
+        "{}\n\nSuggested models for {provider}:\n",
+        channel_model_status(agent, prefs)
+    );
+    for model in suggested_models(provider) {
+        let marker =
+            if provider == active_provider(agent, prefs) && model == active_model(agent, prefs) {
+                "✓"
+            } else {
+                "•"
+            };
+        text.push_str(&format!("{marker} {model}\n"));
+    }
+    text.push_str("\nUse /models <provider> <model> to set a custom model.");
+    text
+}
+
+fn provider_menu_markup(
+    agent: &AgentDef,
+    prefs: &ChannelPreferences,
+    providers: &[&str],
+) -> Option<that_channels::ReplyMarkup> {
+    if providers.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for chunk in providers.chunks(2) {
+        let row = chunk
+            .iter()
+            .map(|provider| that_channels::InlineButton {
+                text: if *provider == active_provider(agent, prefs) {
+                    format!("✓ {provider}")
+                } else {
+                    (*provider).to_string()
+                },
+                callback_data: format!("/models {provider}"),
+            })
+            .collect::<Vec<_>>();
+        rows.push(row);
+    }
+    if !prefs.is_default() {
+        rows.push(vec![that_channels::InlineButton {
+            text: "Reset to default".into(),
+            callback_data: "/models reset".into(),
+        }]);
+    }
+    Some(that_channels::ReplyMarkup::InlineKeyboard(rows))
+}
+
+fn model_menu_markup(
+    agent: &AgentDef,
+    prefs: &ChannelPreferences,
+    provider: &str,
+) -> Option<that_channels::ReplyMarkup> {
+    let models = suggested_models(provider);
+    if models.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for chunk in models.chunks(2) {
+        let row = chunk
+            .iter()
+            .map(|model| that_channels::InlineButton {
+                text: if provider == active_provider(agent, prefs)
+                    && *model == active_model(agent, prefs)
+                {
+                    format!("✓ {model}")
+                } else {
+                    (*model).to_string()
+                },
+                callback_data: format!("/models {provider} {model}"),
+            })
+            .collect::<Vec<_>>();
+        rows.push(row);
+    }
+    rows.push(vec![that_channels::InlineButton {
+        text: "Back".into(),
+        callback_data: "/models".into(),
+    }]);
+    Some(that_channels::ReplyMarkup::InlineKeyboard(rows))
+}
+
+async fn send_channel_menu(
+    router: &Arc<that_channels::ChannelRouter>,
+    channel_id: &str,
+    target: &that_channels::OutboundTarget,
+    text: String,
+    reply_markup: Option<that_channels::ReplyMarkup>,
+) {
+    if let Some(reply_markup) = reply_markup {
+        let msg = that_channels::OutboundMessage {
+            text: text.clone(),
+            parse_mode: Some(that_channels::ParseMode::Plain),
+            reply_markup: Some(reply_markup),
+            reply_to_message_id: target.reply_to_message_id.clone(),
+        };
+        if router
+            .send_message(channel_id, msg, Some(target))
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
+    router.notify_channel(channel_id, &text, Some(target)).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_models_command(
+    router: &Arc<that_channels::ChannelRouter>,
+    session_mgr: &Arc<SessionManager>,
+    model_prefs: &ChannelModelPrefs,
+    sender_key: &str,
+    channel_id: &str,
+    target: &that_channels::OutboundTarget,
+    agent: &AgentDef,
+    current_prefs: &ChannelPreferences,
+    args: &str,
+) {
+    let providers = available_providers();
+    if providers.is_empty() {
+        router
+            .notify_channel(
+                channel_id,
+                "No provider API keys are configured. Set an API key first, then try /models again.",
+                Some(target),
+            )
+            .await;
+        return;
+    }
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    match parts.as_slice() {
+        [] => {
+            send_channel_menu(
+                router,
+                channel_id,
+                target,
+                provider_menu_text(agent, current_prefs, &providers),
+                provider_menu_markup(agent, current_prefs, &providers),
+            )
+            .await;
+        }
+        ["reset"] => {
+            let prefs = ChannelPreferences::default();
+            {
+                let mut map = model_prefs.lock().await;
+                map.remove(sender_key);
+            }
+            session_mgr.save_channel_preferences(sender_key, &prefs);
+            let message = format!(
+                "Model reset. This conversation now uses the agent default: {} / {}.",
+                agent.provider, agent.model
+            );
+            router
+                .notify_channel(channel_id, &message, Some(target))
+                .await;
+        }
+        [provider] => {
+            let Some(provider) = normalize_provider(provider) else {
+                router
+                    .notify_channel(
+                        channel_id,
+                        "Unknown provider. Use /models to pick from the configured providers.",
+                        Some(target),
+                    )
+                    .await;
+                return;
+            };
+            if !providers.contains(&provider) {
+                let message = format!("Provider '{provider}' is not configured on this agent.");
+                router
+                    .notify_channel(channel_id, &message, Some(target))
+                    .await;
+                return;
+            }
+            send_channel_menu(
+                router,
+                channel_id,
+                target,
+                model_menu_text(agent, current_prefs, provider),
+                model_menu_markup(agent, current_prefs, provider),
+            )
+            .await;
+        }
+        [provider, model_parts @ ..] => {
+            let Some(provider) = normalize_provider(provider) else {
+                router
+                    .notify_channel(
+                        channel_id,
+                        "Unknown provider. Use /models to pick from the configured providers.",
+                        Some(target),
+                    )
+                    .await;
+                return;
+            };
+            if !providers.contains(&provider) {
+                let message = format!("Provider '{provider}' is not configured on this agent.");
+                router
+                    .notify_channel(channel_id, &message, Some(target))
+                    .await;
+                return;
+            }
+            let model = model_parts.join(" ").trim().to_string();
+            if model.is_empty() {
+                router
+                    .notify_channel(
+                        channel_id,
+                        "Model name is required. Use /models <provider> first to see suggestions.",
+                        Some(target),
+                    )
+                    .await;
+                return;
+            }
+            let prefs = ChannelPreferences {
+                provider: Some(provider.to_string()),
+                model: Some(model.clone()),
+            };
+            {
+                let mut map = model_prefs.lock().await;
+                map.insert(sender_key.to_string(), prefs.clone());
+            }
+            session_mgr.save_channel_preferences(sender_key, &prefs);
+            let message = format!(
+                "Model for this conversation set to {provider} / {model}. New runs will use it."
+            );
+            router
+                .notify_channel(channel_id, &message, Some(target))
+                .await;
+        }
     }
 }
 
@@ -169,6 +454,8 @@ pub async fn run_listen(
 
     // Per-sender state: key = "channel_id:sender_id" → (session_id, history, show_work).
     let sessions: ChannelSessions = Arc::new(Mutex::new(HashMap::new()));
+    let model_prefs: ChannelModelPrefs =
+        Arc::new(Mutex::new(session_mgr.load_channel_preferences()));
     let channel_index_lock = Arc::new(Mutex::new(()));
     let plugin_runtime_lock = Arc::new(Mutex::new(()));
     // Queued __notify__ messages drained each heartbeat tick.
@@ -674,6 +961,7 @@ pub async fn run_listen(
             let container = container.clone();
             let session_mgr = Arc::clone(&session_mgr);
             let sessions = Arc::clone(&sessions);
+            let model_prefs = Arc::clone(&model_prefs);
             let channel_index_lock = Arc::clone(&channel_index_lock);
             let plugin_runtime_lock = Arc::clone(&plugin_runtime_lock);
             let hot = Arc::clone(&hot);
@@ -788,6 +1076,11 @@ pub async fn run_listen(
                             state.skill_roots.clone(),
                         )
                     };
+                    let channel_prefs = {
+                        let prefs = model_prefs.lock().await;
+                        prefs.get(&sender_key).cloned().unwrap_or_default()
+                    };
+                    let effective_agent = apply_channel_preferences(&agent, &channel_prefs);
 
                     if !plugin_activations.is_empty() {
                         let slash_command = parsed_slash.as_ref().map(|(cmd, _)| cmd.as_str());
@@ -839,6 +1132,21 @@ pub async fn run_listen(
                                     .await;
                                 return;
                             }
+                            "models" => {
+                                handle_models_command(
+                                    &router,
+                                    &session_mgr,
+                                    &model_prefs,
+                                    &sender_key,
+                                    &msg.channel_id,
+                                    &outbound_target,
+                                    &agent,
+                                    &channel_prefs,
+                                    &args,
+                                )
+                                .await;
+                                return;
+                            }
                             "clear" => {
                                 // Create a fresh session so the old transcript is abandoned.
                                 let new_sid = session_mgr
@@ -887,9 +1195,9 @@ pub async fn run_listen(
                                         drop(map);
                                         // LLM-generated summary of the conversation.
                                         let summary = build_compact_summary(
-                                            &agent.provider,
-                                            &agent.model,
-                                            &agent.name,
+                                            &effective_agent.provider,
+                                            &effective_agent.model,
+                                            &effective_agent.name,
                                             container.is_some(),
                                             &hist_clone,
                                         )
@@ -1060,7 +1368,7 @@ pub async fn run_listen(
                         sessions,
                         std::sync::Arc::clone(&channel_index_lock),
                         session_mgr,
-                        agent,
+                        effective_agent,
                         container,
                         preamble,
                         router,

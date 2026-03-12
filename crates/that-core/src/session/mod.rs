@@ -106,6 +106,20 @@ pub struct AggregatedUsage {
     pub session_count: usize,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelPreferences {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl ChannelPreferences {
+    pub fn is_default(&self) -> bool {
+        self.provider.is_none() && self.model.is_none()
+    }
+}
+
 /// Manages sessions and their JSONL transcripts.
 pub struct SessionManager {
     state_dir: PathBuf,
@@ -371,9 +385,33 @@ impl SessionManager {
         let path = self.state_dir.join("channel_sessions.json");
         let mut map = self.load_channel_sessions();
         map.insert(sender_key.to_string(), session_id.to_string());
-        if let Ok(json) = serde_json::to_string_pretty(&map) {
-            let _ = std::fs::write(&path, json);
+        let _ = that_channels::atomic_write_json(&path, &map);
+    }
+
+    /// Load persistent per-sender channel preferences such as model overrides.
+    pub fn load_channel_preferences(
+        &self,
+    ) -> std::collections::HashMap<String, ChannelPreferences> {
+        let path = self.state_dir.join("channel_preferences.json");
+        if !path.exists() {
+            return std::collections::HashMap::new();
         }
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Persist per-sender channel preferences.
+    pub fn save_channel_preferences(&self, sender_key: &str, prefs: &ChannelPreferences) {
+        let path = self.state_dir.join("channel_preferences.json");
+        let mut map = self.load_channel_preferences();
+        if prefs.is_default() {
+            map.remove(sender_key);
+        } else {
+            map.insert(sender_key.to_string(), prefs.clone());
+        }
+        let _ = that_channels::atomic_write_json(&path, &map);
     }
 
     fn session_path(&self, session_id: &str) -> PathBuf {

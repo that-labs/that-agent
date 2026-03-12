@@ -375,7 +375,8 @@ pub fn build_preamble(
         ));
         preamble.push_str(&backend_block);
         preamble.push_str(
-            "Pre-installed: Rust, Go, Python 3, Node/TypeScript (pytest, requests available).\n\
+            "Pre-installed: Python 3, bash, git, curl, wget, jq, ripgrep, fd, tree, vim, kubectl, Docker CLI, buildctl.\n\
+             If the workspace contains a `Dockerfile`, read it before describing or changing the runtime image.\n\
              Install extras: `sudo apt-get install -y <pkg>` or `pip3 install <pkg>`.\n\n",
         );
     } else if trusted_local {
@@ -406,7 +407,9 @@ pub fn build_preamble(
             "## Tasks\n\n\
              Your task backlog is organized as a folder hierarchy under your agent directory. \
              Read `Tasks.md` for the index, then navigate to individual epics and stories. \
-             Use the `task-manager` skill for the full authoring guide.\n\n\
+             For any complex or multi-step task, create or update the relevant task entry before deep work, \
+             keep status current while you work, clear stale `in-progress` markers when finished, \
+             send `channel_notify` updates at meaningful checkpoints, and write a `mem_add` summary of what was done.\n\n\
              **Current status**: {} in-progress, {} pending, {} done\n\n",
             s.in_progress, s.pending, s.done,
         ));
@@ -584,4 +587,29 @@ pub fn build_preamble(
     }
 
     preamble
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_preamble_mentions_vim_and_dockerfile() {
+        let agent = AgentDef::default();
+        let preamble = build_preamble(
+            Path::new("/workspace"),
+            &agent,
+            true,
+            &[],
+            &WorkspaceFiles::default(),
+            0,
+            "session",
+            &[],
+            None,
+            None,
+        );
+
+        assert!(preamble.contains("vim"));
+        assert!(preamble.contains("If the workspace contains a `Dockerfile`, read it"));
+    }
 }

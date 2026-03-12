@@ -17,6 +17,7 @@ pub mod control;
 pub mod default_skills;
 pub mod heartbeat;
 pub mod hooks;
+pub mod model_catalog;
 pub mod observability;
 pub mod orchestration;
 pub mod sandbox;
