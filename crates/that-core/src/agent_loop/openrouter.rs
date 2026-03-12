@@ -371,10 +371,10 @@ fn messages_to_chat_completions(
             } => {
                 let mut assistant_msg = serde_json::json!({
                     "role": "assistant",
+                    // Some routed providers reject assistant tool-call messages when
+                    // `content` is omitted entirely, even if tool_calls is present.
+                    "content": content,
                 });
-                if !content.is_empty() {
-                    assistant_msg["content"] = serde_json::Value::String(content.clone());
-                }
                 if !tool_calls.is_empty() {
                     let tc_json: Vec<serde_json::Value> = tool_calls
                         .iter()
@@ -503,7 +503,9 @@ fn format_http_error(
 
 #[cfg(test)]
 mod tests {
-    use super::format_http_error;
+    use super::{format_http_error, messages_to_chat_completions};
+    use crate::agent_loop::Message;
+    use crate::agent_loop::ToolCall;
 
     #[test]
     fn provider_error_adds_model_switch_hint() {
@@ -516,5 +518,22 @@ mod tests {
 
         assert!(err.contains("provider 'Stealth' failed"));
         assert!(err.contains("use /models to switch"));
+    }
+
+    #[test]
+    fn assistant_tool_call_messages_always_include_content() {
+        let messages = vec![Message::Assistant {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                call_id: "call_1".into(),
+                name: "shell_exec".into(),
+                args_json: r#"{"cmd":"pwd"}"#.into(),
+            }],
+        }];
+
+        let wire = messages_to_chat_completions("system", &messages, false);
+        assert_eq!(wire[1]["role"], "assistant");
+        assert_eq!(wire[1]["content"], "");
+        assert!(wire[1]["tool_calls"].is_array());
     }
 }
