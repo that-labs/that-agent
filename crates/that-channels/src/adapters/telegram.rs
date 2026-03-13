@@ -1188,11 +1188,24 @@ impl Channel for TelegramAdapter {
                 }
 
                 // Extract text: prefer caption (for photos/voice), fall back to text.
-                let text = update["message"]["caption"]
+                let raw_text = update["message"]["caption"]
                     .as_str()
                     .or_else(|| update["message"]["text"].as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .unwrap_or("");
+
+                // If this is a reply, prepend the quoted message as context so the
+                // agent knows what the user is referring to.
+                let text = if let Some(quoted) = update["message"]["reply_to_message"]["text"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                {
+                    let sender = update["message"]["reply_to_message"]["from"]["first_name"]
+                        .as_str()
+                        .unwrap_or("Someone");
+                    format!("[Replying to {sender}: \"{quoted}\"]\n\n{raw_text}")
+                } else {
+                    raw_text.to_string()
+                };
 
                 // Build attachments from photo, voice, and audio fields.
                 let mut attachments = Vec::new();
