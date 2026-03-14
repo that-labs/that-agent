@@ -3515,6 +3515,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "that-git-server"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "that-plugins"
 version = "0.2.0"
 dependencies = [

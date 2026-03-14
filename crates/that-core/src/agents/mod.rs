@@ -896,11 +896,100 @@ pub async fn workspace_collect(
         }))
     } else {
         let stderr = String::from_utf8_lossy(&merge.stderr).to_string();
+        // Abort the failed merge so the working tree is clean
+        let _ = tokio::process::Command::new("git")
+            .args(["-C", path, "merge", "--abort"])
+            .status()
+            .await;
+        // Try to fetch conflict details from the git server REST API
+        let conflicts = async {
+            reqwest::Client::new()
+                .get(format!("{git_svc}/api/repos/workspace/conflicts/{branch}"))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+        }.await;
+        let conflicting_files = conflicts
+            .as_ref()
+            .and_then(|c| c.get("conflicting_files"))
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
         Ok(serde_json::json!({
             "strategy": "merge",
             "merged": false,
             "error": stderr,
+            "conflicting_files": conflicting_files,
+            "hint": "Use agent_query to ask the worker to rebase against main and resolve conflicts in the listed files",
         }))
+    }
+}
+
+// ── Git Server REST Wrappers ─────────────────────────────────────────────────
+
+/// Query the git server for branch activity on a repo (branches, ahead/behind, last commit).
+pub async fn workspace_activity(repo: Option<&str>) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    let git_svc = git_server_url(&ns);
+    let repo_name = repo.unwrap_or("workspace");
+    let url = format!("{git_svc}/api/repos/{repo_name}/activity");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("git server unreachable: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("bad json: {e}"))
+    } else {
+        anyhow::bail!("git server {status}: {body}")
+    }
+}
+
+/// Get a unified diff of a worker's branch vs main, without cloning.
+pub async fn workspace_branch_diff(branch: &str, repo: Option<&str>) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    let git_svc = git_server_url(&ns);
+    let repo_name = repo.unwrap_or("workspace");
+    let url = format!("{git_svc}/api/repos/{repo_name}/diff/{branch}");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("git server unreachable: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        Ok(serde_json::json!({ "branch": branch, "diff": body }))
+    } else {
+        anyhow::bail!("git server {status}: {body}")
+    }
+}
+
+/// Analyze merge conflicts between a worker's branch and main.
+pub async fn workspace_conflicts(branch: &str, repo: Option<&str>) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    let git_svc = git_server_url(&ns);
+    let repo_name = repo.unwrap_or("workspace");
+    let url = format!("{git_svc}/api/repos/{repo_name}/conflicts/{branch}");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("git server unreachable: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if status.is_success() {
+        serde_json::from_str(&body).map_err(|e| anyhow::anyhow!("bad json: {e}"))
+    } else {
+        anyhow::bail!("git server {status}: {body}")
     }
 }
 

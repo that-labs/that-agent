@@ -30,3 +30,6 @@ data:
   THAT_AGENT_PARENT: ""
   THAT_AGENT_ROLE: ""
   RUST_LOG: "info"
+  # Git server — multi-agent coordination
+  THAT_GIT_WEBHOOK_URL: ""
+  THAT_GIT_AUTO_MERGE: "false"

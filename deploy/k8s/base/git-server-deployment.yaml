@@ -20,102 +20,26 @@ spec:
         - name: git-server
           image: ghcr.io/that-labs/that-agent:latest
           imagePullPolicy: Always
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              set -euo pipefail
-              mkdir -p /repos
-              export GIT_PROJECT_ROOT=/repos
-              export GIT_HTTP_EXPORT_ALL=1
-
-              # Find git-http-backend
-              for p in /usr/lib/git-core/git-http-backend /usr/libexec/git-core/git-http-backend; do
-                [ -x "$p" ] && GIT_BACKEND="$p" && break
-              done
-              [ -z "${GIT_BACKEND:-}" ] && echo "FATAL: git-http-backend not found" >&2 && exit 1
-              echo "git-http-backend: $GIT_BACKEND" >&2
-
-              exec python3 -u - "$GIT_BACKEND" <<'PYEOF'
-              import os, sys, subprocess
-              from http.server import HTTPServer, BaseHTTPRequestHandler
-
-              BACKEND = sys.argv[1]
-
-              class Handler(BaseHTTPRequestHandler):
-                  def do_GET(self):
-                      self._run_cgi()
-                  def do_POST(self):
-                      self._run_cgi()
-
-                  def _run_cgi(self):
-                      # Auto-init bare repo on first access
-                      repo_path = self.path.split("?")[0].split("/info/")[0].split("/git-")[0]
-                      repo_path = repo_path.rstrip("/")
-                      if repo_path.endswith(".git"):
-                          full = "/repos" + repo_path
-                          if not os.path.isdir(full):
-                              subprocess.run(["git", "init", "--bare", "--quiet", full])
-                              subprocess.run(["git", "-C", full, "config", "http.receivepack", "true"])
-
-                      env = {
-                          "GIT_PROJECT_ROOT": "/repos",
-                          "GIT_HTTP_EXPORT_ALL": "1",
-                          "REQUEST_METHOD": self.command,
-                          "PATH_INFO": self.path.split("?")[0],
-                          "QUERY_STRING": self.path.split("?")[1] if "?" in self.path else "",
-                          "SERVER_PROTOCOL": self.request_version,
-                          "REMOTE_ADDR": self.client_address[0],
-                          "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                      }
-                      ct = self.headers.get("Content-Type")
-                      if ct:
-                          env["CONTENT_TYPE"] = ct
-                      cl = self.headers.get("Content-Length")
-                      body = b""
-                      if cl:
-                          env["CONTENT_LENGTH"] = cl
-                          body = self.rfile.read(int(cl))
-
-                      proc = subprocess.run(
-                          [BACKEND], env=env, input=body, capture_output=True
-                      )
-
-                      # Parse CGI response: headers\n\nbody
-                      out = proc.stdout
-                      for sep in (b"\r\n\r\n", b"\n\n"):
-                          idx = out.find(sep)
-                          if idx >= 0:
-                              hdr_bytes = out[:idx]
-                              body_out = out[idx + len(sep):]
-                              break
-                      else:
-                          self.send_response(500)
-                          self.end_headers()
-                          self.wfile.write(b"CGI parse error")
-                          return
-
-                      status = 200
-                      headers = []
-                      for line in hdr_bytes.decode("utf-8", errors="replace").splitlines():
-                          if line.lower().startswith("status:"):
-                              status = int(line.split(":")[1].strip().split()[0])
-                          elif ":" in line:
-                              k, v = line.split(":", 1)
-                              headers.append((k.strip(), v.strip()))
-
-                      self.send_response(status)
-                      for k, v in headers:
-                          self.send_header(k, v)
-                      self.end_headers()
-                      self.wfile.write(body_out)
-
-                  def log_message(self, fmt, *args):
-                      sys.stderr.write(f"{self.client_address[0]} {fmt % args}\n")
-                      sys.stderr.flush()
-
-              print("Listening on 0.0.0.0:9418", file=sys.stderr, flush=True)
-              HTTPServer(("0.0.0.0", 9418), Handler).serve_forever()
-              PYEOF
+          command: ["that-git-server"]
+          env:
+            - name: THAT_GIT_REPO_ROOT
+              value: "/repos"
+            - name: THAT_GIT_BIND_ADDR
+              value: "0.0.0.0:9418"
+            - name: THAT_GIT_EXPIRY_HOURS
+              value: "24"
+            - name: THAT_GIT_WEBHOOK_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: that-agent-config
+                  key: THAT_GIT_WEBHOOK_URL
+                  optional: true
+            - name: THAT_GIT_AUTO_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: that-agent-config
+                  key: THAT_GIT_AUTO_MERGE
+                  optional: true
           ports:
             - containerPort: 9418
               name: git-http
@@ -125,10 +49,22 @@ spec:
           resources:
             requests:
               cpu: "50m"
-              memory: "64Mi"
+              memory: "32Mi"
             limits:
               cpu: "200m"
-              memory: "256Mi"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /api/repos
+              port: 9418
+            initialDelaySeconds: 3
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/repos
+              port: 9418
+            initialDelaySeconds: 1
+            periodSeconds: 5
       volumes:
         - name: git-repos
           emptyDir:

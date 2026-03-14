@@ -545,8 +545,12 @@ pub fn build_preamble(
              ### Coding tasks — sharing code with workers\n\
              - `workspace_share(path)` → pushes a git repo to the in-cluster git server\n\
              - `agent_run(name, task, workspace=true)` → worker clones the shared repo\n\
+             - `workspace_activity()` → check which workers have pushed, how far ahead/behind\n\
+             - `workspace_diff(branch)` → review a worker's changes without cloning\n\
              - `workspace_collect(path, worker)` → merge worker's changes back\n\
-             - Workers push to their own task branch — no conflicts between parallel workers\n\n\
+             - `workspace_conflicts(branch)` → on merge failure, see conflicting files and both diffs\n\
+             - Workers push to their own task branch — no conflicts between parallel workers\n\
+             - Load `read_skill git-workspace` for the full conflict resolution and progress monitoring guide\n\n\
              ### Limitations\n\
              - Children cannot spawn their own sub-agents (restricted RBAC)\n\
              - Ephemeral agents have resource limits\n\

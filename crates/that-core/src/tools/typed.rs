@@ -1225,6 +1225,43 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                 "required": ["path", "worker"]
             }),
         },
+        ToolDef {
+            name: "workspace_activity".into(),
+            description: "Check worker progress on the shared workspace — lists branches, ahead/behind \
+                counts vs main, and last commit per branch. Use to monitor parallel workers without cloning.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "repo": { "type": "string", "description": "Repo name (defaults to \"workspace\")" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "workspace_diff".into(),
+            description: "Get a unified diff of a worker's branch vs main, without cloning. \
+                Use to review worker output before collecting.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "branch": { "type": "string", "description": "Branch to diff, e.g. \"task/worker-1\"" },
+                    "repo": { "type": "string", "description": "Repo name (defaults to \"workspace\")" }
+                },
+                "required": ["branch"]
+            }),
+        },
+        ToolDef {
+            name: "workspace_conflicts".into(),
+            description: "Analyze merge conflicts between a worker's branch and main. Returns the list \
+                of conflicting files and both sides of the diff. Use when workspace_collect reports a merge failure.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "branch": { "type": "string", "description": "Branch to check, e.g. \"task/worker-1\"" },
+                    "repo": { "type": "string", "description": "Repo name (defaults to \"workspace\")" }
+                },
+                "required": ["branch"]
+            }),
+        },
     ]
 }
 
@@ -2462,6 +2499,32 @@ async fn dispatch_inner(
             )
             .await
             .map_err(|e| ToolError(e.to_string()))
+        }
+        "workspace_activity" => {
+            #[derive(Deserialize)]
+            struct Args { repo: Option<String> }
+            let args: Args = serde_json::from_str(args_json).unwrap_or(Args { repo: None });
+            crate::agents::workspace_activity(args.repo.as_deref())
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+        }
+        "workspace_diff" => {
+            #[derive(Deserialize)]
+            struct Args { branch: String, repo: Option<String> }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::workspace_branch_diff(&args.branch, args.repo.as_deref())
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+        }
+        "workspace_conflicts" => {
+            #[derive(Deserialize)]
+            struct Args { branch: String, repo: Option<String> }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::workspace_conflicts(&args.branch, args.repo.as_deref())
+                .await
+                .map_err(|e| ToolError(e.to_string()))
         }
         other => Err(ToolError(format!("unknown tool: {other}"))),
     }
