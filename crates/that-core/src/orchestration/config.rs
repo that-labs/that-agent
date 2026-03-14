@@ -355,6 +355,13 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
                     }
                     append_rbac_runtime_lines(&mut lines, Some(&k8s.namespace));
                     lines.push("multi_agent_enabled: true".to_string());
+                    lines.push(
+                        "multi_agent_hint: Use agent_run(name, task) to delegate work to \
+                         ephemeral K8s Jobs. Use spawn_agent(name, role) for persistent agents. \
+                         Use workspace_share before agent_run with workspace=true for coding tasks. \
+                         Do NOT use shell_exec to manually run agents or push to git servers."
+                            .to_string(),
+                    );
                     if let Some(img) = std::env::var("THAT_AGENT_IMAGE")
                         .ok()
                         .filter(|v| !v.trim().is_empty())
@@ -426,6 +433,13 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
             }
             append_rbac_runtime_lines(&mut lines, Some(&k8s.namespace));
             lines.push("multi_agent_enabled: true".to_string());
+            lines.push(
+                "multi_agent_hint: Use agent_run(name, task) to delegate work to \
+                 ephemeral K8s Jobs. Use spawn_agent(name, role) for persistent agents. \
+                 Use workspace_share before agent_run with workspace=true for coding tasks. \
+                 Do NOT use shell_exec to manually run agents or push to git servers."
+                    .to_string(),
+            );
             if let Some(img) = std::env::var("THAT_AGENT_IMAGE")
                 .ok()
                 .filter(|v| !v.trim().is_empty())

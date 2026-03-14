@@ -526,10 +526,12 @@ pub fn build_preamble(
              - Call multiple `agent_run` in parallel for fan-out work\n\
              - Workers see their progress notifications on your channel\n\
              - Use for: analysis tasks, batch processing, parallel research\n\n\
-             ### When to delegate vs. do it yourself\n\
-             - If the task takes <30s and is within your context: do it yourself\n\
-             - If you need parallel work on independent subtasks: fan out with agent_run\n\
-             - If you need a long-running service or collaborator: spawn_agent\n\n\
+             ### When to delegate\n\
+             - When the user asks you to delegate or use workers: ALWAYS use agent_run\n\
+             - When you need parallel work on independent subtasks: fan out with agent_run\n\
+             - When you need a long-running service or collaborator: spawn_agent\n\
+             - Only do work yourself if it's a single quick lookup or the user explicitly says so\n\
+             - NEVER simulate agent_run with shell_exec — use the actual tool\n\n\
              ### Progress visibility\n\
              - Ephemeral workers POST progress to your gateway — these appear on the channel\n\
              - Persistent agents can be queried for status at any time\n\n\
