@@ -1,4 +1,17 @@
+use std::hash::{Hash, Hasher};
 use std::path::Path;
+
+fn current_install_stamp() -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    env!("CARGO_PKG_VERSION").hash(&mut hasher);
+    for skill in DEFAULT_SKILLS {
+        if has_bootstrap_flag(skill.content) {
+            skill.name.hash(&mut hasher);
+            skill.content.hash(&mut hasher);
+        }
+    }
+    format!("{}:{:016x}", env!("CARGO_PKG_VERSION"), hasher.finish())
+}
 
 /// Check if a version marker file matches the current binary version.
 pub(crate) fn version_matches(marker: &Path) -> bool {
@@ -8,6 +21,16 @@ pub(crate) fn version_matches(marker: &Path) -> bool {
 /// Write the current binary version to a marker file.
 pub(crate) fn stamp_version(marker: &Path) {
     let _ = std::fs::write(marker, env!("CARGO_PKG_VERSION"));
+}
+
+/// Check if the install marker matches the current bundled skill payload.
+pub(crate) fn install_stamp_matches(marker: &Path) -> bool {
+    std::fs::read_to_string(marker).ok().as_deref() == Some(current_install_stamp().as_str())
+}
+
+/// Write the current install stamp to a marker file.
+pub(crate) fn stamp_install_state(marker: &Path) {
+    let _ = std::fs::write(marker, current_install_stamp());
 }
 
 /// Default skills bundled with that-agent.
@@ -69,7 +92,7 @@ pub fn install_default_skills(agent_name: &str) {
     };
 
     let marker = skills_dir.join(".installed-version");
-    if version_matches(&marker) {
+    if install_stamp_matches(&marker) {
         return;
     }
 
@@ -94,7 +117,7 @@ pub fn install_default_skills(agent_name: &str) {
 
     // Write version marker after successful install.
     let _ = std::fs::create_dir_all(&skills_dir);
-    stamp_version(&marker);
+    stamp_install_state(&marker);
 }
 
 /// Return true if the SKILL.md frontmatter contains `bootstrap: true` under `metadata:`.

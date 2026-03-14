@@ -22,3 +22,22 @@ pub fn log_event(state_dir: &Path, event: &str, detail: &str) {
         let _ = f.write_all(line.as_bytes());
     }
 }
+
+/// Appends a tool error as a JSON line to `{state_dir}/errors.jsonl`.
+pub fn log_error(state_dir: &Path, tool: &str, error: &str, context: &str) {
+    let path = state_dir.join("errors.jsonl");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let line = format!(
+            "{{\"ts\":\"{}\",\"tool\":{},\"error\":{},\"context\":{}}}\n",
+            Utc::now().to_rfc3339(),
+            serde_json::to_string(tool).unwrap_or_default(),
+            serde_json::to_string(error).unwrap_or_default(),
+            serde_json::to_string(context).unwrap_or_default(),
+        );
+        let _ = f.write_all(line.as_bytes());
+    }
+}

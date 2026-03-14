@@ -182,7 +182,7 @@ impl ChannelFactoryRegistry {
             let request_timeout_secs = cfg
                 .extra_value("request_timeout_secs")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(300);
+                .unwrap_or(60);
             Ok(Arc::new(HttpAdapter::new(
                 id,
                 &bind_addr,

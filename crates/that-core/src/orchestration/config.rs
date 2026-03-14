@@ -3,8 +3,8 @@ use crate::config::AgentDef;
 /// Maximum number of automatic retries on transient network / server errors.
 pub const MAX_NETWORK_RETRIES: u32 = 5;
 
-/// Initial backoff delay in ms; doubles each attempt (1 s -> 2 -> 4 -> 8 -> 16 s).
-pub const RETRY_BASE_DELAY_MS: u64 = 1_000;
+/// Initial backoff delay in ms; doubles each attempt (0.5 s -> 1 -> 2 -> 4 -> 8 s).
+pub const RETRY_BASE_DELAY_MS: u64 = 500;
 /// Warn when cache hit rate drops below this threshold on sizable prompts.
 pub const CACHE_HIT_WARN_THRESHOLD: f64 = 0.70;
 /// Fallback text used when the model completes without any final assistant text.
@@ -92,15 +92,13 @@ pub fn should_use_channel_empty_response_fallback(
         return false;
     }
 
-    // If the run already emitted an explicit channel_notify tool call, allow
-    // empty final text to avoid sending a duplicate fallback message.
-    let used_channel_notify = tool_events.iter().any(|ev| {
-        matches!(
-            ev,
-            that_channels::ToolLogEvent::Call { name, .. } if name == "channel_notify"
-        )
-    });
-    !used_channel_notify
+    // Mid-task notifications are not a substitute for the run's final user-facing
+    // answer. Only suppress the fallback when a terminal channel delivery tool
+    // already succeeded and produced its own outbound message, or when the agent
+    // deliberately sent its final answer via channel_notify as its last action.
+    !has_successful_terminal_channel_output(tool_events)
+        && !last_tool_was_answer(tool_events)
+        && !last_tool_was_channel_notify(tool_events)
 }
 
 pub fn summarize_tool_result_for_empty_response(
@@ -149,6 +147,49 @@ pub fn build_empty_channel_response_fallback(
     }
 }
 
+const TERMINAL_CHANNEL_TOOL_NAMES: &[&str] = &[
+    "channel_send_message",
+    "channel_send_file",
+    "channel_send_raw",
+];
+
+fn has_successful_terminal_channel_output(tool_events: &[that_channels::ToolLogEvent]) -> bool {
+    tool_events.iter().any(|ev| {
+        matches!(
+            ev,
+            that_channels::ToolLogEvent::Result {
+                name,
+                is_error: false,
+                ..
+            } if TERMINAL_CHANNEL_TOOL_NAMES.contains(&name.as_str())
+        )
+    })
+}
+
+/// Returns true when the last tool result in the event log is a successful
+/// `answer`. This signals the agent delivered its final answer via the
+/// dedicated answer tool, so no duplicate Done event is needed.
+pub fn last_tool_was_answer(tool_events: &[that_channels::ToolLogEvent]) -> bool {
+    last_tool_result_name(tool_events) == Some(("answer", false))
+}
+
+/// Returns true when the last tool result in the event log is a successful
+/// `channel_notify`. This signals the agent deliberately sent its final
+/// answer via the notification tool, so no fallback response is needed.
+pub fn last_tool_was_channel_notify(tool_events: &[that_channels::ToolLogEvent]) -> bool {
+    last_tool_result_name(tool_events) == Some(("channel_notify", false))
+}
+
+fn last_tool_result_name(tool_events: &[that_channels::ToolLogEvent]) -> Option<(&str, bool)> {
+    tool_events.iter().rev().find_map(|ev| {
+        if let that_channels::ToolLogEvent::Result { name, is_error, .. } = ev {
+            Some((name.as_str(), *is_error))
+        } else {
+            None
+        }
+    })
+}
+
 /// Memory tools are safe to re-invoke (idempotent intent); the model should
 /// still generate a user-facing confirmation after calling them.
 const MEMORY_TOOL_NAMES: &[&str] = &["mem_add", "mem_recall", "mem_compact"];
@@ -179,6 +220,10 @@ pub fn should_retry_empty_channel_response(
     if !text.trim().is_empty() {
         return false;
     }
+    // If the agent deliberately sent its final answer via answer or channel_notify, skip retry.
+    if last_tool_was_answer(tool_events) || last_tool_was_channel_notify(tool_events) {
+        return false;
+    }
     // Avoid re-running after side-effecting tool calls — but memory tools are
     // safe to re-invoke, so allow one retry to produce the user-facing response.
     tool_events.is_empty() || only_memory_tool_calls(tool_events)
@@ -197,6 +242,14 @@ If blocked, explicitly state the blocker and one concrete next step.\n\
 /// Append volatile runtime metadata to the tail of the user message so it
 /// doesn't invalidate the shared system-prompt cache prefix.
 pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
+    fn runtime_home_dir() -> std::path::PathBuf {
+        std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .ok()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
     fn append_rbac_runtime_lines(lines: &mut Vec<String>, namespace: Option<&str>) {
         let scope = std::env::var("THAT_RBAC_SCOPE")
             .ok()
@@ -232,6 +285,28 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
     }
 
     let mut lines = vec![format!("sandbox_enabled: {sandbox}")];
+    let home_dir = runtime_home_dir();
+    let persistent_home_dir = home_dir.join(".that-agent");
+    lines.push(format!("home_dir: {}", home_dir.display()));
+    lines.push(format!(
+        "task_workspace_dir: {}",
+        if sandbox { "/workspace" } else { "." }
+    ));
+    lines.push(format!(
+        "persistent_home_dir: {}",
+        persistent_home_dir.display()
+    ));
+    lines.push(format!(
+        "agent_home_dir: {}",
+        persistent_home_dir
+            .join("agents")
+            .join(agent_name)
+            .display()
+    ));
+    lines.push(format!(
+        "state_dir: {}",
+        persistent_home_dir.join("state").display()
+    ));
     if !sandbox {
         if trusted_local_sandbox_enabled() {
             lines.push("trusted_local_sandbox: true".to_string());
@@ -476,4 +551,186 @@ pub fn append_memory_bootstrap_reminder(task: &str, history_len: usize) -> Strin
          default to POSIX shell (`#!/bin/sh` and `set -eu`; avoid bash-only features).\n\
          </system-reminder>"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        last_tool_was_answer, should_retry_empty_channel_response,
+        should_use_channel_empty_response_fallback,
+    };
+    use that_channels::ToolLogEvent;
+
+    #[test]
+    fn empty_response_after_final_channel_notify_skips_fallback() {
+        // channel_notify as the last tool call = agent's deliberate final answer.
+        let tool_events = vec![
+            ToolLogEvent::Call {
+                name: "channel_notify".into(),
+                args: r#"{"message":"Done! Everything deployed."}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "channel_notify".into(),
+                result: r#"{"sent":true}"#.into(),
+                is_error: false,
+            },
+        ];
+
+        assert!(!should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn empty_response_after_mid_run_channel_notify_uses_fallback() {
+        // channel_notify followed by more tools = progress update, not final answer.
+        let tool_events = vec![
+            ToolLogEvent::Result {
+                name: "channel_notify".into(),
+                result: r#"{"sent":true}"#.into(),
+                is_error: false,
+            },
+            ToolLogEvent::Call {
+                name: "shell_exec".into(),
+                args: r#"{"cmd":"deploy"}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "shell_exec".into(),
+                result: "deployed".into(),
+                is_error: false,
+            },
+        ];
+
+        assert!(should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn empty_response_after_failed_channel_notify_uses_fallback() {
+        let tool_events = vec![ToolLogEvent::Result {
+            name: "channel_notify".into(),
+            result: r#"{"error":"send failed"}"#.into(),
+            is_error: true,
+        }];
+
+        assert!(should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn empty_response_after_successful_terminal_channel_send_skips_fallback() {
+        let tool_events = vec![ToolLogEvent::Result {
+            name: "channel_send_message".into(),
+            result: r#"{"sent":true}"#.into(),
+            is_error: false,
+        }];
+
+        assert!(!should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn empty_response_after_failed_terminal_channel_send_uses_fallback() {
+        let tool_events = vec![ToolLogEvent::Result {
+            name: "channel_send_message".into(),
+            result: r#"{"error":"boom"}"#.into(),
+            is_error: true,
+        }];
+
+        assert!(should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn last_tool_was_answer_detects_successful_answer() {
+        let tool_events = vec![
+            ToolLogEvent::Call {
+                name: "answer".into(),
+                args: r#"{"message":"Here is your result."}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "answer".into(),
+                result: r#"{"delivered":true}"#.into(),
+                is_error: false,
+            },
+        ];
+        assert!(last_tool_was_answer(&tool_events));
+    }
+
+    #[test]
+    fn empty_response_after_answer_skips_fallback() {
+        let tool_events = vec![
+            ToolLogEvent::Call {
+                name: "answer".into(),
+                args: r#"{"message":"Done."}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "answer".into(),
+                result: r#"{"delivered":true}"#.into(),
+                is_error: false,
+            },
+        ];
+        assert!(!should_use_channel_empty_response_fallback(
+            "",
+            false,
+            &tool_events
+        ));
+    }
+
+    #[test]
+    fn retry_skipped_when_last_tool_was_answer() {
+        let tool_events = vec![
+            ToolLogEvent::Call {
+                name: "answer".into(),
+                args: r#"{"message":"All done."}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "answer".into(),
+                result: r#"{"delivered":true}"#.into(),
+                is_error: false,
+            },
+        ];
+        assert!(!should_retry_empty_channel_response(
+            "",
+            false,
+            &tool_events,
+            0
+        ));
+    }
+
+    #[test]
+    fn retry_skipped_when_last_tool_was_channel_notify() {
+        let tool_events = vec![
+            ToolLogEvent::Call {
+                name: "channel_notify".into(),
+                args: r#"{"message":"All done."}"#.into(),
+            },
+            ToolLogEvent::Result {
+                name: "channel_notify".into(),
+                result: r#"{"sent":true}"#.into(),
+                is_error: false,
+            },
+        ];
+
+        assert!(!should_retry_empty_channel_response(
+            "",
+            false,
+            &tool_events,
+            0
+        ));
+    }
 }

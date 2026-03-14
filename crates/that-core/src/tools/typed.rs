@@ -319,12 +319,6 @@ pub struct MemAddArgs {
 #[derive(Debug, Deserialize)]
 pub struct MemRecallArgs {
     pub query: String,
-    pub limit: Option<usize>,
-    pub session_id: Option<String>,
-}
-#[derive(Debug, Deserialize)]
-pub struct MemSearchArgs {
-    pub query: String,
     pub tags: Option<Vec<String>>,
     pub limit: Option<usize>,
     pub session_id: Option<String>,
@@ -437,7 +431,7 @@ fn default_fetch_mode() -> String {
     "markdown".to_string()
 }
 fn default_shell_timeout() -> u64 {
-    60
+    5
 }
 
 fn resolve_agent_name(
@@ -577,7 +571,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             name: "code_read".into(),
             description: "Read source code with line numbers and optional symbol annotations. \
                 Prefer this over fs_cat for source files — it understands structure. \
-                Use line/end_line to read a specific range.".into(),
+                For large files, always use line/end_line to read a specific range — \
+                reading the full file may exceed result limits.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -652,8 +647,10 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "code_edit".into(),
             description: "Edit an existing file with surgical precision. \
-                Prefer this over fs_write when updating plugin/code/skill files in-place. \
-                Supported modes: search+replace or target_fn+new_body (AST node body replacement).".into(),
+                Prefer this over fs_write when updating any file type in-place. \
+                Two mutually exclusive modes: (1) search+replace — works on any file type, \
+                (2) target_fn+new_body — AST-aware body replacement for supported languages. \
+                Provide exactly one mode per call.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -687,26 +684,13 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "mem_recall".into(),
             description: "Recall information from persistent memory using semantic search. \
-                Returns entries ranked by relevance to the query.".into(),
+                Returns entries ranked by relevance. Optionally filter by tags.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tag filter" },
                     "limit": { "type": "integer", "description": "Max results (default: 10)" }
-                },
-                "required": ["query"]
-            }),
-        },
-        ToolDef {
-            name: "mem_search".into(),
-            description: "Search persistent memory by keyword and optional tag filters. \
-                Prefer mem_recall for semantic queries; use mem_search for tag-based lookup.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string" },
-                    "tags": { "type": "array", "items": { "type": "string" } },
-                    "limit": { "type": "integer" }
                 },
                 "required": ["query"]
             }),
@@ -726,8 +710,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "mem_remove".into(),
-            description: "Remove a specific memory entry by its ID. Use after mem_search or \
-                mem_recall to identify the entry to delete.".into(),
+            description: "Remove a specific memory entry by its ID. Use after mem_recall \
+                to identify the entry to delete.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -793,7 +777,11 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             name: "shell_exec".into(),
             description: format!(
                 "Execute a shell command and return stdout, stderr, and exit code. \
+                Default timeout: 5s — most commands finish instantly. \
+                Set a higher timeout_secs explicitly for builds, installs, or known slow ops. \
+                For long-running processes, redirect output to a file and manage it separately. \
                 Non-zero exit codes are returned as data — interpret them, do not panic. \
+                For large output, pipe through head/tail/grep to stay within result limits. \
                 {shell_mode_note}"
             ),
             parameters: serde_json::json!({
@@ -801,7 +789,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                 "properties": {
                     "command": { "type": "string", "description": "Shell command to execute" },
                     "cwd": { "type": "string", "description": "Working directory (local mode only)" },
-                    "timeout_secs": { "type": "integer", "default": 60 }
+                    "timeout_secs": { "type": "integer", "default": 5, "description": "Seconds before kill. Increase for builds/installs." }
                 },
                 "required": ["command"]
             }),
@@ -815,7 +803,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Skill name from the catalog (e.g. \"that-tools\", \"that-tools-code\")" },
+                    "name": { "type": "string", "description": "Skill name exactly as listed in the preamble skill catalog" },
                     "file": { "type": "string", "description": "File to read within the skill directory. Defaults to SKILL.md." }
                 },
                 "required": ["name"]
@@ -1029,6 +1017,41 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                 "required": ["id"]
             }),
         },
+        ToolDef {
+            name: "provider_list".into(),
+            description: "List dynamically registered inference providers available for /models.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
+            name: "provider_register".into(),
+            description: "Register a new OpenAI-compatible inference provider at runtime. \
+                Use the provider id later in /models and set the API key in the referenced env var.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Unique provider id, for example groq" },
+                    "base_url": { "type": "string", "description": "OpenAI-compatible API base URL, for example https://api.groq.com/openai/v1" },
+                    "api_key_env": { "type": "string", "description": "Environment variable name that holds the provider API key" },
+                    "models": { "type": "array", "items": { "type": "string" }, "description": "Suggested models to show in /models" },
+                    "transport": { "type": "string", "enum": ["openai_chat"], "description": "Provider transport type. Only openai_chat is supported right now." }
+                },
+                "required": ["id", "base_url", "api_key_env"]
+            }),
+        },
+        ToolDef {
+            name: "provider_unregister".into(),
+            description: "Remove a dynamically registered inference provider.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Provider id to unregister" }
+                },
+                "required": ["id"]
+            }),
+        },
         // ── Dynamic gateway route tools ──────────────────────────────────────
         ToolDef {
             name: "gateway_route_register".into(),
@@ -1088,7 +1111,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "http_request".into(),
             description: "Make an HTTP request to an external URL. Returns status code and response body. \
-                Useful for calling APIs or webhooks without spawning a shell process.".into(),
+                Default timeout: 30s. Follows redirects (max 10). HTTPS only validates certificates. \
+                Response body is capped — for large payloads, use shell_exec with curl and pipe through head.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1100,7 +1124,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                         "additionalProperties": { "type": "string" }
                     },
                     "body": { "type": "string", "description": "Optional request body" },
-                    "timeout_secs": { "type": "integer", "description": "Request timeout (default: 30)" }
+                    "timeout_secs": { "type": "integer", "description": "Request timeout in seconds (default: 15)" }
                 },
                 "required": ["method", "url"]
             }),
@@ -1542,16 +1566,18 @@ async fn dispatch_inner(
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             run_on_host(
                 config.clone(),
-                ToolRequest::MemRecall {
+                ToolRequest::MemSearch {
                     query: args.query,
+                    tags: args.tags,
                     limit: args.limit,
                     session_id: None,
                 },
             )
             .await
         }
+        // Legacy alias — routes to the same unified recall path.
         "mem_search" => {
-            let args: MemSearchArgs = serde_json::from_str(args_json)
+            let args: MemRecallArgs = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             run_on_host(
                 config.clone(),
@@ -1954,6 +1980,75 @@ async fn dispatch_inner(
             }
             Ok(serde_json::json!({ "status": "ok" }))
         }
+        "provider_list" => {
+            let registry = crate::provider_registry::DynamicProviderRegistry::from_default_path()
+                .ok_or_else(|| ToolError("provider registry unavailable".into()))?;
+            let providers = registry.list().map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "providers": providers }))
+        }
+        "provider_register" => {
+            #[derive(Deserialize)]
+            struct Args {
+                id: String,
+                base_url: String,
+                api_key_env: String,
+                #[serde(default)]
+                models: Vec<String>,
+                #[serde(default = "default_provider_transport")]
+                transport: String,
+            }
+            fn default_provider_transport() -> String {
+                "openai_chat".into()
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            if args.transport != "openai_chat" {
+                return Err(ToolError(
+                    "unsupported transport: only openai_chat is supported right now".into(),
+                ));
+            }
+            let id = crate::provider_registry::normalize_provider_id(&args.id)
+                .ok_or_else(|| ToolError("invalid provider id".into()))?;
+            if matches!(id.as_str(), "openai" | "anthropic" | "openrouter") {
+                return Err(ToolError("cannot override a built-in provider".into()));
+            }
+            let registry = crate::provider_registry::DynamicProviderRegistry::from_default_path()
+                .ok_or_else(|| ToolError("provider registry unavailable".into()))?;
+            registry
+                .register(crate::provider_registry::ProviderEntry {
+                    id: id.clone(),
+                    transport: args.transport,
+                    base_url: args.base_url.trim().to_string(),
+                    api_key_env: args.api_key_env.trim().to_string(),
+                    models: args
+                        .models
+                        .into_iter()
+                        .map(|model| model.trim().to_string())
+                        .filter(|model| !model.is_empty())
+                        .collect(),
+                    registered_at: chrono::Utc::now().to_rfc3339(),
+                })
+                .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({
+                "id": id,
+                "transport": "openai_chat",
+                "status": "ok"
+            }))
+        }
+        "provider_unregister" => {
+            #[derive(Deserialize)]
+            struct Args {
+                id: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let registry = crate::provider_registry::DynamicProviderRegistry::from_default_path()
+                .ok_or_else(|| ToolError("provider registry unavailable".into()))?;
+            registry
+                .unregister(&args.id)
+                .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "status": "ok" }))
+        }
         // ── Dynamic gateway route tools ──────────────────────────────────────
         "gateway_route_register" => {
             #[derive(Deserialize)]
@@ -2062,7 +2157,7 @@ async fn dispatch_inner(
                 .map_err(|_| ToolError(format!("invalid HTTP method: {}", args.method)))?;
             let mut req = reqwest::Client::new()
                 .request(method, &args.url)
-                .timeout(Duration::from_secs(args.timeout_secs.unwrap_or(30)));
+                .timeout(Duration::from_secs(args.timeout_secs.unwrap_or(15)));
             for (k, v) in args.headers.unwrap_or_default() {
                 req = req.header(k, v);
             }
@@ -2453,7 +2548,11 @@ mod tests {
             &ctx,
         )
         .await;
-        assert!(result.text.contains("trusted-local-shell"));
+        assert!(
+            result.text.contains("trusted-local-shell"),
+            "shell_exec result should contain output: {}",
+            result.text
+        );
         let _ = fs::remove_file(target);
     }
 

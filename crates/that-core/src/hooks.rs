@@ -239,10 +239,8 @@ mod redact_tests {
     }
 }
 
-fn tool_result_is_error(result_json: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(result_json) else {
-        return false;
-    };
+/// Check whether a pre-parsed JSON value represents a tool error.
+pub fn is_error_value(value: &serde_json::Value) -> bool {
     if value.get("error").is_some() {
         return true;
     }
@@ -366,6 +364,37 @@ pub fn channel_send_raw_tool_def() -> ToolDef {
                 }
             },
             "required": ["channel_id", "method", "payload"]
+        }),
+    }
+}
+
+/// Return the `answer` tool schema with dynamic formatting instructions.
+///
+/// The description includes the active channel's formatting guidance so the
+/// agent knows how to compose its final message. [`ChannelHook`] intercepts
+/// calls, sends a [`ChannelEvent::Done`], and returns a skip — dispatch() is
+/// never reached.
+pub fn channel_answer_tool_def(format_hint: &str) -> ToolDef {
+    let mut desc = String::from(
+        "Deliver your final answer to the human. This must be the last tool you call. \
+         Compose it as a message to a person: lead with the outcome, not the mechanics.",
+    );
+    if !format_hint.is_empty() {
+        desc.push(' ');
+        desc.push_str(format_hint);
+    }
+    ToolDef {
+        name: "answer".into(),
+        description: desc,
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The final answer message to deliver to the human."
+                }
+            },
+            "required": ["message"]
         }),
     }
 }
@@ -543,14 +572,12 @@ impl LoopHook for ChannelHook {
                     return HookAction::Skip { result_json };
                 }
 
-                let message = serde_json::from_str::<serde_json::Value>(args_json)
-                    .ok()
+                let parsed = serde_json::from_str::<serde_json::Value>(args_json).ok();
+                let message = parsed
+                    .as_ref()
                     .and_then(|v| v.get("message")?.as_str().map(String::from))
                     .unwrap_or_else(|| "The agent is asking for input.".into());
-
-                let timeout = serde_json::from_str::<serde_json::Value>(args_json)
-                    .ok()
-                    .and_then(|v| v.get("timeout")?.as_u64());
+                let timeout = parsed.as_ref().and_then(|v| v.get("timeout")?.as_u64());
 
                 let result_json = match self
                     .router
@@ -584,6 +611,30 @@ impl LoopHook for ChannelHook {
                     .to_string(),
                 };
                 HookAction::Skip { result_json }
+            }
+            "answer" => {
+                let message = serde_json::from_str::<serde_json::Value>(args_json)
+                    .ok()
+                    .and_then(|v| v.get("message")?.as_str().map(String::from))
+                    .unwrap_or_default();
+
+                if !message.is_empty() {
+                    let event = ChannelEvent::Done {
+                        text: message,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cached_input_tokens: 0,
+                        cache_write_tokens: 0,
+                    };
+                    if let Some(cid) = self.channel_id.as_deref() {
+                        let _ = self.router.send_to(cid, &event, self.target.as_ref()).await;
+                    } else {
+                        self.router.broadcast(&event).await;
+                    }
+                }
+                HookAction::Skip {
+                    result_json: r#"{"delivered":true}"#.to_string(),
+                }
             }
             "channel_notify" => {
                 let message = serde_json::from_str::<serde_json::Value>(args_json)
@@ -781,7 +832,9 @@ impl LoopHook for ChannelHook {
 
     async fn on_tool_result(&self, name: &str, call_id: &str, result_json: &str) {
         let result: String = result_json.chars().take(2000).collect();
-        let is_error = tool_result_is_error(result_json);
+        // Parse once for both error detection and logging.
+        let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok();
+        let is_error = parsed.as_ref().map(is_error_value).unwrap_or(false);
         debug!(tool = %name, is_error, result_chars = result_json.chars().count(), " ← {name}: {}", if is_error { "ERR" } else { "ok" });
 
         if let Some(tx) = &self.log_tx {

@@ -38,9 +38,14 @@ struct StreamEvent {
 /// Result of a shell command execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecResult {
+    /// Human-readable status: "SUCCESS", "FAILED (code 127)", "TIMED_OUT", etc.
+    #[serde(default)]
+    pub status: String,
     pub command: String,
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stdout: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr: String,
     pub elapsed_ms: u64,
     pub timed_out: bool,
@@ -254,9 +259,20 @@ pub fn exec_with_options(
     let budgeted_stderr =
         output::apply_budget_to_text(&raw_stderr, stderr_budget, CompactionStrategy::HeadTail);
 
+    let exit_code = exit_status.and_then(|s| s.code());
+    let status = if timed_out {
+        "TIMED_OUT".to_string()
+    } else {
+        match exit_code {
+            Some(0) => "SUCCESS".to_string(),
+            Some(code) => format!("FAILED ({code})"),
+            None => "KILLED".to_string(),
+        }
+    };
     let result = ExecResult {
+        status,
         command: command.to_string(),
-        exit_code: exit_status.and_then(|s| s.code()),
+        exit_code,
         stdout: budgeted_stdout.content,
         stderr: budgeted_stderr.content,
         elapsed_ms,
@@ -369,6 +385,7 @@ mod tests {
     #[test]
     fn test_exec_result_serialization() {
         let result = ExecResult {
+            status: "SUCCESS".to_string(),
             command: "echo test".to_string(),
             exit_code: Some(0),
             stdout: "test\n".to_string(),

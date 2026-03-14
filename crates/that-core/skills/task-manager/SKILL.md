@@ -2,8 +2,9 @@
 name: task-manager
 description: Guide for creating and managing hierarchical tasks using the folder-based epic/story/task structure. Use when planning multi-session work, tracking a project backlog, or organizing complex goals into actionable steps.
 metadata:
-  bootstrap: false
-  version: 1.0.0
+  bootstrap: true
+  always: false
+  version: 1.1.0
 ---
 
 # Task Manager
@@ -12,6 +13,22 @@ This skill describes how to create, navigate, and update the agent's folder-base
 The system lives in the agent directory under `tasks/` and uses a three-level hierarchy:
 **Epic → Story → Task**. Every file is a markdown document focused on intent — capturing
 *why* something matters, not just *what* to do.
+
+## When This Is Mandatory
+
+Use the task system for any work that is more than a trivial one-shot. If the task has multiple
+meaningful steps, touches multiple files/subsystems, may span more than one session, or needs
+checkpoint visibility, you must create or update task files before going deep into implementation.
+
+The minimum loop is:
+
+1. Read `Tasks.md` first
+2. Create or update the relevant epic/story/task entry
+3. Mark the active task `in-progress` before substantial work
+4. Keep status current while you work
+5. Use `channel_notify` at meaningful checkpoints so the human sees progress
+6. Mark the task tree done when finished so no stale `in-progress` entry remains
+7. Write a `mem_add` memory chunk summarizing what changed, what matters, and any follow-up
 
 ## Directory Structure
 
@@ -129,11 +146,13 @@ completing it has a clear, verifiable signal.
 1. Read `Tasks.md` to orient yourself at the start of a session
 2. Follow links to the relevant epic and story
 3. Update `**Status**: in-progress` when you begin work
-4. Check off `- [x]` items in acceptance criteria / definition of done as you complete them
-5. Update `**Status**: done` when the task is complete
-6. Update the parent story's task list checkbox
-7. Update the story `**Status**` once all tasks are done
-8. Update the epic similarly
+4. Send a short `channel_notify` update when you finish a milestone, hit a blocker, or change direction materially
+5. Check off `- [x]` items in acceptance criteria / definition of done as you complete them
+6. Update `**Status**: done` when the task is complete
+7. Update the parent story's task list checkbox
+8. Update the story `**Status**` once all tasks are done
+9. Update the epic similarly
+10. Store a `mem_add` chunk with the outcome, key decisions, important files, and next steps
 
 ### Resuming multi-session work
 
@@ -157,3 +176,9 @@ lives in the individual files.
 
 **Update as you go.** Stale task files are worse than no task files. Update status
 when work begins and when it completes.
+
+**Clear finished work.** When the work is done, close the task properly. Do not leave stale
+`in-progress` markers behind in `Tasks.md`, stories, or tasks.
+
+**Leave a durable breadcrumb.** After finishing meaningful work, add a concise `mem_add`
+summary so the next session can resume from facts instead of re-discovery.

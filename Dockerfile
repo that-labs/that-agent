@@ -51,6 +51,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y --no-install-recommends \
       coreutils bash git curl wget procps \
       jq ripgrep fd-find tree \
+      vim-tiny \
       kubernetes-client \
       ca-certificates \
       tini \

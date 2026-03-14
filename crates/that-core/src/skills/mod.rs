@@ -470,6 +470,8 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
         out.push_str(
             "**Before starting a task, scan this list and `read_skill(name)` any skill \
              whose description matches what you are about to do.** \
+             If an installed skill appears relevant to the problem domain, framework, or implementation \
+             style the user is asking for, read it before choosing libraries, architecture, or workflows. \
              The tool returns the skill body and lists any reference files available \
              for deeper progressive loading. \
              Call `read_skill` only once per skill per conversation — \

@@ -89,12 +89,6 @@ pub enum ToolRequest {
         #[serde(default)]
         session_id: Option<String>,
     },
-    MemRecall {
-        query: String,
-        limit: Option<usize>,
-        #[serde(default)]
-        session_id: Option<String>,
-    },
     MemSearch {
         query: String,
         tags: Option<Vec<String>>,
@@ -197,7 +191,6 @@ fn policy_name_for(request: &ToolRequest) -> &'static str {
         | ToolRequest::CodeSummary { .. } => "code_read",
         ToolRequest::CodeEdit { .. } => "code_edit",
         ToolRequest::MemAdd { .. }
-        | ToolRequest::MemRecall { .. }
         | ToolRequest::MemSearch { .. }
         | ToolRequest::MemUnpin { .. }
         | ToolRequest::MemRemove { .. } => "memory",
@@ -488,24 +481,6 @@ pub fn execute_tool(
             }
             Err(e) => ToolResponse::error(&e.to_string()),
         },
-        ToolRequest::MemRecall {
-            query,
-            limit,
-            session_id,
-        } => {
-            match crate::tools::memory::recall(
-                query,
-                limit.unwrap_or(5),
-                session_id.as_deref(),
-                &config.memory,
-            ) {
-                Ok(result) => {
-                    let budgeted = output::emit_json(&result, max_tokens);
-                    ToolResponse::from_budgeted(&budgeted)
-                }
-                Err(e) => ToolResponse::error(&e.to_string()),
-            }
-        }
         ToolRequest::MemSearch {
             query,
             tags,

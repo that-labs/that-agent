@@ -106,6 +106,8 @@ pub enum Status {
     Processing,
     Done,
     Skipped,
+    Blocked,
+    Failed,
     Unknown(String),
 }
 
@@ -117,6 +119,8 @@ impl std::fmt::Display for Status {
             Status::Processing => write!(f, "processing"),
             Status::Done => write!(f, "done"),
             Status::Skipped => write!(f, "skipped"),
+            Status::Blocked => write!(f, "blocked"),
+            Status::Failed => write!(f, "failed"),
             Status::Unknown(s) => write!(f, "{s}"),
         }
     }
@@ -130,6 +134,8 @@ impl From<&str> for Status {
             "processing" => Status::Processing,
             "done" => Status::Done,
             "skipped" => Status::Skipped,
+            "blocked" => Status::Blocked,
+            "failed" => Status::Failed,
             other => Status::Unknown(other.to_string()),
         }
     }
@@ -141,6 +147,8 @@ pub struct HeartbeatEntry {
     pub title: String,
     pub priority: Priority,
     pub schedule: Schedule,
+    /// Required for minute-level recurring schedules (`minutely`, sub-hourly cron).
+    pub human_approved: bool,
     pub status: Status,
     pub last_run: Option<DateTime<Local>>,
     /// Earliest time this entry may fire. Used for deferred/reminder entries.
@@ -244,6 +252,15 @@ pub fn parse_heartbeat(content: &str) -> Vec<HeartbeatEntry> {
             .get("schedule")
             .map(|v| Schedule::from(v.as_str()))
             .unwrap_or(Schedule::Once);
+        let human_approved = fields
+            .get("human_approved")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
         let status = fields
             .get("status")
             .map(|v| Status::from(v.as_str()))
@@ -265,6 +282,7 @@ pub fn parse_heartbeat(content: &str) -> Vec<HeartbeatEntry> {
             title,
             priority,
             schedule,
+            human_approved,
             status,
             last_run,
             not_before,
@@ -283,6 +301,9 @@ pub fn serialize_heartbeat(entries: &[HeartbeatEntry]) -> String {
         out.push_str(&format!("\n## {}\n", entry.title));
         out.push_str(&format!("priority: {}\n", entry.priority));
         out.push_str(&format!("schedule: {}\n", entry.schedule));
+        if entry.human_approved {
+            out.push_str("human_approved: true\n");
+        }
         out.push_str(&format!("status: {}\n", entry.status));
         if let Some(last_run) = &entry.last_run {
             out.push_str(&format!("last_run: {}\n", last_run.to_rfc3339()));
@@ -465,6 +486,10 @@ pub fn save_heartbeat_sandbox(
 /// Urgent entries dispatch immediately when first created (no `last_run` yet),
 /// then follow their configured schedule.
 pub fn is_entry_due(entry: &HeartbeatEntry, agent_tz: Option<&str>) -> bool {
+    if schedule_requires_human_approval(&entry.schedule) && !entry.human_approved {
+        return false;
+    }
+
     // ── not_before gate: absolute UTC comparison (timezone-irrelevant) ──
     if let Some(nb) = entry.not_before {
         if Utc::now() < nb.to_utc() {
@@ -517,6 +542,20 @@ pub fn is_entry_due(entry: &HeartbeatEntry, agent_tz: Option<&str>) -> bool {
         }
         Schedule::Unknown(_) => false,
     }
+}
+
+fn schedule_requires_human_approval(schedule: &Schedule) -> bool {
+    match schedule {
+        Schedule::Minutely => true,
+        Schedule::Cron(expr) => cron_is_subhourly(expr),
+        _ => false,
+    }
+}
+
+fn cron_is_subhourly(expr: &str) -> bool {
+    parse_cron_expression(expr)
+        .map(|parsed| parsed.minute.iter().filter(|slot| **slot).count() > 2)
+        .unwrap_or(false)
 }
 
 /// Convert a UTC instant to a `NaiveDate` in the agent's wall-clock timezone.
@@ -763,6 +802,7 @@ pub fn default_heartbeat_md() -> &'static str {
      Fields:
        priority:   urgent | high | normal | low
        schedule:   once | minutely | hourly | daily | weekly | cron: <expr>
+       human_approved: true when using `minutely` or sub-hourly cron, after explicit user approval
        status:     pending | running | done | skipped
        last_run:   ISO timestamp (written automatically each dispatch)
        not_before: ISO timestamp — entry will not fire until this time has passed
@@ -788,10 +828,17 @@ mod tests {
             title: "test".into(),
             priority: Priority::Normal,
             schedule,
+            human_approved: false,
             status: Status::Pending,
             last_run,
             not_before,
             body: String::new(),
+        }
+    }
+
+    fn approve_if_required(entry: &mut HeartbeatEntry) {
+        if schedule_requires_human_approval(&entry.schedule) {
+            entry.human_approved = true;
         }
     }
 
@@ -978,6 +1025,7 @@ mod tests {
     fn urgent_minutely_no_last_run_fires_immediately() {
         let mut entry = make_entry(Schedule::Minutely, None, None);
         entry.priority = Priority::Urgent;
+        entry.human_approved = true;
         assert!(is_entry_due(&entry, None));
     }
 
@@ -993,6 +1041,7 @@ mod tests {
         ] {
             let mut entry = make_entry(sched.clone(), None, Some(future));
             entry.priority = Priority::Urgent;
+            approve_if_required(&mut entry);
             assert!(
                 !is_entry_due(&entry, None),
                 "urgent {:?} should be blocked by not_before in future",
@@ -1012,6 +1061,7 @@ mod tests {
         ] {
             let mut entry = make_entry(sched.clone(), None, Some(past));
             entry.priority = Priority::Urgent;
+            approve_if_required(&mut entry);
             assert!(
                 is_entry_due(&entry, None),
                 "urgent {:?} should fire when not_before has passed",
@@ -1034,7 +1084,8 @@ mod tests {
             Schedule::Cron("* * * * *".into()),
         ];
         for sched in schedules {
-            let entry = make_entry(sched.clone(), None, Some(future));
+            let mut entry = make_entry(sched.clone(), None, Some(future));
+            approve_if_required(&mut entry);
             assert!(
                 !is_entry_due(&entry, None),
                 "{:?} should be blocked by not_before in future",
@@ -1054,7 +1105,8 @@ mod tests {
             Schedule::Weekly,
         ];
         for sched in schedules {
-            let entry = make_entry(sched.clone(), None, Some(past));
+            let mut entry = make_entry(sched.clone(), None, Some(past));
+            approve_if_required(&mut entry);
             assert!(
                 is_entry_due(&entry, None),
                 "{:?} should fire when not_before has passed and no last_run",
@@ -1068,14 +1120,16 @@ mod tests {
     #[test]
     fn minutely_not_due_within_60s() {
         let recent = Local::now() - Duration::seconds(30);
-        let entry = make_entry(Schedule::Minutely, Some(recent), None);
+        let mut entry = make_entry(Schedule::Minutely, Some(recent), None);
+        entry.human_approved = true;
         assert!(!is_entry_due(&entry, None));
     }
 
     #[test]
     fn minutely_due_after_60s() {
         let old = Local::now() - Duration::seconds(61);
-        let entry = make_entry(Schedule::Minutely, Some(old), None);
+        let mut entry = make_entry(Schedule::Minutely, Some(old), None);
+        entry.human_approved = true;
         assert!(is_entry_due(&entry, None));
     }
 
@@ -1170,5 +1224,47 @@ mod tests {
         assert!(is_entry_due(&entry, Some("US/Eastern")));
         assert!(is_entry_due(&entry, Some("Asia/Tokyo")));
         assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn minutely_requires_human_approval() {
+        let entry = make_entry(Schedule::Minutely, None, None);
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn subhourly_cron_requires_human_approval() {
+        let entry = make_entry(Schedule::Cron("*/5 * * * *".into()), None, None);
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn every_30_min_cron_does_not_require_human_approval() {
+        // 2 slots per hour — within the 30-min threshold
+        let entry = make_entry(Schedule::Cron("0,30 * * * *".into()), None, None);
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn every_20_min_cron_requires_human_approval() {
+        // 3 slots per hour — exceeds the 30-min threshold
+        let entry = make_entry(Schedule::Cron("0,20,40 * * * *".into()), None, None);
+        assert!(!is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn hourly_cron_does_not_require_human_approval() {
+        let entry = make_entry(Schedule::Cron("5 * * * *".into()), None, None);
+        assert!(is_entry_due(&entry, None));
+    }
+
+    #[test]
+    fn parse_and_serialize_human_approved_field() {
+        let md = "# Heartbeat\n\n## Task\npriority: normal\nschedule: minutely\nhuman_approved: true\nstatus: running\n\nDo stuff\n\n---\n";
+        let entries = parse_heartbeat(md);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].human_approved);
+        let serialized = serialize_heartbeat(&entries);
+        assert!(serialized.contains("human_approved: true"));
     }
 }

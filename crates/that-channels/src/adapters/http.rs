@@ -841,6 +841,7 @@ async fn handle_inbound(
         session_hint: None,
         attachments,
         callback_url: body.callback_url.clone(),
+        deferred: true,
         metadata: None,
     };
 
@@ -913,6 +914,7 @@ async fn handle_notify(
         session_hint: None,
         attachments: vec![],
         callback_url: None,
+        deferred: false,
         metadata: None,
     };
 
@@ -974,6 +976,7 @@ async fn push_inbound(
         session_hint: Some(request_id.to_string()),
         attachments: vec![],
         callback_url: None,
+        deferred: false,
         metadata: None,
     };
 

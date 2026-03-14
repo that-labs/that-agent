@@ -190,6 +190,8 @@ pub struct InboundMessage {
     pub session_hint: Option<String>,
     /// Callback URL for async response delivery (set by inbound webhook callers).
     pub callback_url: Option<String>,
+    /// When true, queued for next heartbeat tick instead of immediate agent run.
+    pub deferred: bool,
     /// Attachments received alongside the message (images, audio, etc.).
     pub attachments: Vec<InboundAttachment>,
     /// Platform-specific metadata (e.g. callback query info from Telegram).

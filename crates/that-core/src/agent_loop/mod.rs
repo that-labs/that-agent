@@ -23,6 +23,7 @@ pub mod types;
 
 mod anthropic;
 mod openai;
+mod openai_compatible;
 mod openrouter;
 
 pub use hook::{HookAction, LoopHook, NoopHook};
@@ -39,7 +40,7 @@ use crate::tools::typed::dispatch as dispatch_tool;
 /// Max seconds to wait for the next SSE/WS chunk before treating the stream as stalled.
 /// Applies to all providers (Anthropic, OpenRouter, OpenAI HTTP).
 /// Models with extended thinking may pause before the first token, so this is generous.
-pub(super) const STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
+pub(super) const STREAM_IDLE_TIMEOUT_SECS: u64 = 90;
 
 /// Max chars kept for tool args / result previews recorded on spans.
 const TRACE_PREVIEW_CHARS: usize = 400;
@@ -53,6 +54,17 @@ pub const STEERING_HINT_PREFIX: &str = "[hint]:";
 /// Shared type for the optional mid-run steering queue.
 pub type SteeringQueue = Arc<Mutex<Vec<String>>>;
 
+/// Captured loop state when a run fails after some turns already completed.
+///
+/// `messages` contains the fully checkpointed conversation history up to the
+/// last successfully completed tool/result step, so callers can retry without
+/// replaying side effects from earlier turns.
+pub struct InterruptedRun {
+    pub error: anyhow::Error,
+    pub messages: Vec<Message>,
+    pub usage: Usage,
+}
+
 /// Hard ceiling on tool result chars allowed into conversation context.
 /// ~8K tokens at ~4 chars/token. Generous for structured data, fatal for base64.
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
@@ -61,6 +73,8 @@ const BASE64_BLOB_MIN_LEN: usize = 1_000;
 /// Input-token threshold at which the orchestrator warns the agent to compact.
 /// At this point the context is large enough that a long response risks truncation.
 const CONTEXT_WARN_TOKENS: u32 = 150_000;
+/// Input-token threshold for mandatory compaction — context is critically full.
+const AUTO_COMPACT_TOKENS: u32 = 180_000;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -112,11 +126,44 @@ pub struct LoopConfig {
 /// Returns `(final_text, aggregated_usage)` on success.
 /// Errors on unsupported provider, API failures, or max turns exceeded.
 pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result<(String, Usage)> {
-    let mut messages: Vec<Message> = config.history.clone();
+    let mut messages = config.history.clone();
     messages.push(Message::User {
         content: task.into(),
         images: config.images.clone(),
     });
+    run_from_checkpoint(config, messages, hook)
+        .await
+        .map_err(|interrupted| interrupted.error)
+}
+
+/// Run the loop and preserve completed conversation state on failure.
+pub async fn run_with_checkpoint(
+    config: &LoopConfig,
+    task: &str,
+    hook: &dyn LoopHook,
+) -> std::result::Result<(String, Usage), InterruptedRun> {
+    let mut messages = config.history.clone();
+    messages.push(Message::User {
+        content: task.into(),
+        images: config.images.clone(),
+    });
+    run_from_checkpoint(config, messages, hook).await
+}
+
+/// Resume the loop from an exact checkpointed message chain.
+pub async fn resume_with_checkpoint(
+    config: &LoopConfig,
+    messages: Vec<Message>,
+    hook: &dyn LoopHook,
+) -> std::result::Result<(String, Usage), InterruptedRun> {
+    run_from_checkpoint(config, messages, hook).await
+}
+
+async fn run_from_checkpoint(
+    config: &LoopConfig,
+    mut messages: Vec<Message>,
+    hook: &dyn LoopHook,
+) -> std::result::Result<(String, Usage), InterruptedRun> {
     let mut total_usage = Usage::default();
     let mut pending_edit_verification: HashMap<String, String> = HashMap::new();
     let openai_session: Option<Arc<Mutex<openai::OpenAiWsState>>> =
@@ -201,9 +248,20 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
         );
 
         // Keep a clone so we can record post-await fields on the same span.
-        let (text, tool_calls, usage) = run_turn(config, &messages, hook, openai_session.clone())
-            .instrument(turn_span.clone())
-            .await?;
+        let (text, tool_calls, usage) =
+            match run_turn(config, &messages, hook, openai_session.clone())
+                .instrument(turn_span.clone())
+                .await
+            {
+                Ok(ok) => ok,
+                Err(error) => {
+                    return Err(InterruptedRun {
+                        error,
+                        messages,
+                        usage: total_usage,
+                    });
+                }
+            };
 
         let llm_output_preview = llm_output_preview(&text, &tool_calls);
         let completion = if text.is_empty() && !tool_calls.is_empty() {
@@ -376,6 +434,16 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
             let result_preview = truncate_chars(&result, TRACE_PREVIEW_CHARS);
             tool_span.record("output.value", result_preview.as_str());
             let is_error = is_tool_error_result(&result);
+            if is_error {
+                if let Some(ref sd) = config.tool_ctx.state_dir {
+                    crate::audit::log_error(
+                        sd,
+                        &tc.name,
+                        &result.chars().take(500).collect::<String>(),
+                        &tc.args_json,
+                    );
+                }
+            }
             let result_chars = result.chars().count();
             let status_str = if is_error {
                 let snippet = compact_oneliner(&result, 60);
@@ -403,7 +471,19 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
 
         // If context is getting large, warn the agent before its next turn so it
         // calls mem_compact proactively — preventing response truncation mid-tool-call.
-        if usage.input_tokens > CONTEXT_WARN_TOKENS {
+        if usage.input_tokens > AUTO_COMPACT_TOKENS {
+            warn!(
+                input_tokens = usage.input_tokens,
+                threshold = AUTO_COMPACT_TOKENS,
+                "Context critically full — injecting mandatory mem_compact"
+            );
+            messages.push(Message::user(
+                "<system-reminder>\ncontext_pressure: critical\n\
+                 Your context window is critically full. You MUST call mem_compact NOW as \
+                 your very first action this turn — no other tool calls before it. Failure \
+                 to compact will cause response truncation and lost work.\n</system-reminder>",
+            ));
+        } else if usage.input_tokens > CONTEXT_WARN_TOKENS {
             warn!(
                 input_tokens = usage.input_tokens,
                 threshold = CONTEXT_WARN_TOKENS,
@@ -420,7 +500,11 @@ pub async fn run(config: &LoopConfig, task: &str, hook: &dyn LoopHook) -> Result
         debug!(turn = current, "Loop turn complete, continuing");
     }
 
-    Err(anyhow::anyhow!("max turns ({}) reached", config.max_turns))
+    Err(InterruptedRun {
+        error: anyhow::anyhow!("max turns ({}) reached", config.max_turns),
+        messages,
+        usage: total_usage,
+    })
 }
 
 /// Convenience helper for a single non-tool-use LLM call (no loop, no hooks).
@@ -536,7 +620,33 @@ async fn complete_once_inner(
                 }
             });
         }
-        other => return Err(anyhow::anyhow!("Unsupported provider: {other}")),
+        other => {
+            let entry = crate::provider_registry::find_registered_provider(other)
+                .ok_or_else(|| anyhow::anyhow!("Unsupported provider: {other}"))?;
+            match entry.transport.as_str() {
+                "openai_chat" => {
+                    let tools: Vec<ToolDef> = vec![];
+                    tokio::spawn({
+                        let api_key = api_key.to_string();
+                        let model = model.to_string();
+                        let system = system.to_string();
+                        let messages = messages.clone();
+                        async move {
+                            let _ = openai_compatible::stream_turn(
+                                &entry, &api_key, &model, &system, &messages, &tools, max_tokens,
+                                tx,
+                            )
+                            .await;
+                        }
+                    });
+                }
+                transport => {
+                    return Err(anyhow::anyhow!(
+                        "Unsupported provider transport '{transport}' for {other}"
+                    ));
+                }
+            }
+        }
     }
 
     let mut text = String::new();
@@ -632,7 +742,22 @@ async fn run_turn(
                     )
                     .await
                 }
-                other => Err(anyhow::anyhow!("Unsupported provider: {other}")),
+                other => {
+                    let entry = crate::provider_registry::find_registered_provider(other)
+                        .ok_or_else(|| anyhow::anyhow!("Unsupported provider: {other}"))?;
+                    match entry.transport.as_str() {
+                        "openai_chat" => {
+                            openai_compatible::stream_turn(
+                                &entry, &api_key, &model, &system, &messages, &tools, max_tokens,
+                                tx,
+                            )
+                            .await
+                        }
+                        transport => Err(anyhow::anyhow!(
+                            "Unsupported provider transport '{transport}' for {other}"
+                        )),
+                    }
+                }
             }
         })
     };
@@ -811,7 +936,11 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 // ─── Tool result sanitization ────────────────────────────────────────────────
 
 /// Sanitize a tool result before it enters conversation history.
-/// Strips base64 blobs (useless to the LLM) and enforces a hard char ceiling.
+///
+/// Strips base64 blobs (useless to the LLM). When a result exceeds the char
+/// ceiling, returns a structured error directing the agent to re-call with
+/// narrower parameters (offsets, line ranges, limits) instead of silently
+/// feeding it truncated data that degrades reasoning.
 fn sanitize_tool_result(name: &str, result: &str) -> String {
     // Fast path: small result with no base64 — return as-is.
     if result.len() <= MAX_TOOL_RESULT_CHARS && !likely_contains_base64(result) {
@@ -834,30 +963,40 @@ fn sanitize_tool_result(name: &str, result: &str) -> String {
         if cleaned.len() <= MAX_TOOL_RESULT_CHARS {
             return cleaned;
         }
-        // Still too large — truncate.
-        let truncated = truncate_chars(&cleaned, MAX_TOOL_RESULT_CHARS);
-        tracing::warn!(tool = %name, original_chars = result.len(), "tool result truncated");
-        return serde_json::json!({
-            "truncated_result": truncated,
-            "original_chars": result.len(),
-            "note": "Result exceeded size limit and was truncated. Request smaller/specific data."
-        })
-        .to_string();
+        // Too large — return error with guidance instead of truncated garbage.
+        tracing::warn!(tool = %name, original_chars = result.len(), "tool result exceeded size limit");
+        return overflow_error(name, result.len());
     }
 
-    // Non-JSON — just truncate.
+    // Non-JSON and too large — same: error with guidance.
     if result.len() > MAX_TOOL_RESULT_CHARS {
-        let truncated = truncate_chars(result, MAX_TOOL_RESULT_CHARS);
-        tracing::warn!(tool = %name, original_chars = result.len(), "tool result truncated");
-        return serde_json::json!({
-            "truncated_result": truncated,
-            "original_chars": result.len(),
-            "note": "Result exceeded size limit and was truncated. Request smaller/specific data."
-        })
-        .to_string();
+        tracing::warn!(tool = %name, original_chars = result.len(), "tool result exceeded size limit");
+        return overflow_error(name, result.len());
     }
 
     result.to_string()
+}
+
+/// Build a structured error telling the agent to retry with narrower parameters.
+fn overflow_error(tool_name: &str, original_chars: usize) -> String {
+    let guidance = match tool_name {
+        "code_read" => "Re-call with `line` and `end_line` to read a specific range.",
+        "code_grep" => "Reduce `limit`, add `include`/`exclude` globs, or narrow the `path`.",
+        "shell_exec" => "Pipe output through `head`, `tail`, or `grep` to limit result size.",
+        "fs_cat" => "Use `code_read` with `line`/`end_line` instead for large files.",
+        "fs_ls" => "Reduce `max_depth` or target a more specific subdirectory.",
+        "code_tree" => "Reduce `depth` or target a more specific subdirectory.",
+        "mem_recall" => "Reduce `limit` or use a more specific `query`.",
+        "code_summary" => "Target a specific subdirectory instead of a broad path.",
+        _ => "Re-call with more specific parameters to reduce output size.",
+    };
+    serde_json::json!({
+        "error": "result_too_large",
+        "original_chars": original_chars,
+        "max_chars": MAX_TOOL_RESULT_CHARS,
+        "action_required": guidance,
+    })
+    .to_string()
 }
 
 /// Quick byte scan: does the string contain a run of 1000+ base64-alphabet chars?
@@ -913,23 +1052,10 @@ fn tool_arg_path(args_json: &str) -> Option<String> {
 }
 
 fn is_tool_error_result(result_json: &str) -> bool {
-    let value: serde_json::Value = match serde_json::from_str(result_json) {
-        Ok(v) => v,
-        Err(_) => return true,
-    };
-    if value.get("error").is_some() {
-        return true;
+    match serde_json::from_str::<serde_json::Value>(result_json) {
+        Ok(v) => crate::hooks::is_error_value(&v),
+        Err(_) => true,
     }
-    if value.get("timed_out").and_then(|v| v.as_bool()) == Some(true) {
-        return true;
-    }
-    if value.get("ok").and_then(|v| v.as_bool()) == Some(false) {
-        return true;
-    }
-    if let Some(code) = value.get("exit_code").and_then(|v| v.as_i64()) {
-        return code != 0;
-    }
-    false
 }
 
 fn edit_verification_guard_result(path: &str, previous_call_id: &str) -> String {

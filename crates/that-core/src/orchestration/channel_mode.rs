@@ -8,8 +8,10 @@ use tracing::{debug, error, info, warn};
 use crate::agent_loop::{Message, SteeringQueue};
 use crate::config::{AgentDef, WorkspaceConfig};
 use crate::heartbeat;
+use crate::model_catalog::{available_providers, normalize_provider, suggested_models};
 use crate::session::{
-    new_run_id, rebuild_history_recent, RunStatus, SessionManager, TranscriptEntry, TranscriptEvent,
+    new_run_id, rebuild_history_recent, ChannelPreferences, RunStatus, SessionManager,
+    TranscriptEntry, TranscriptEvent,
 };
 
 use super::config::*;
@@ -40,6 +42,8 @@ pub(super) struct HotState {
 type ChannelSessions = Arc<
     tokio::sync::Mutex<std::collections::HashMap<String, (String, Vec<Message>, Arc<AtomicBool>)>>,
 >;
+type ChannelModelPrefs =
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, ChannelPreferences>>>;
 type PluginTaskEntry = (
     String,
     Option<String>,
@@ -94,6 +98,368 @@ pub(super) async fn stop_active_sender_run(
         true
     } else {
         false
+    }
+}
+
+fn apply_channel_preferences(agent: &AgentDef, prefs: &ChannelPreferences) -> AgentDef {
+    let mut effective = agent.clone();
+    if let (Some(provider), Some(model)) = (prefs.provider.as_deref(), prefs.model.as_deref()) {
+        effective.provider = provider.to_string();
+        effective.model = model.to_string();
+    }
+    effective
+}
+
+fn active_provider<'a>(agent: &'a AgentDef, prefs: &'a ChannelPreferences) -> &'a str {
+    prefs.provider.as_deref().unwrap_or(&agent.provider)
+}
+
+fn active_model<'a>(agent: &'a AgentDef, prefs: &'a ChannelPreferences) -> &'a str {
+    prefs.model.as_deref().unwrap_or(&agent.model)
+}
+
+fn channel_model_status(agent: &AgentDef, prefs: &ChannelPreferences) -> String {
+    let source = if prefs.is_default() {
+        "agent default"
+    } else {
+        "channel override"
+    };
+    format!(
+        "Current model for this conversation: {} / {} ({source}).",
+        active_provider(agent, prefs),
+        active_model(agent, prefs),
+    )
+}
+
+fn channel_config_slug(sender_key: &str) -> String {
+    let slug: String = sender_key
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if slug.is_empty() {
+        "default".into()
+    } else {
+        slug
+    }
+}
+
+fn effective_channel_config_host_path(
+    agent_name: &str,
+    sender_key: &str,
+) -> Option<std::path::PathBuf> {
+    let file_name = format!("{}.toml", channel_config_slug(sender_key));
+    dirs::home_dir().map(|home| {
+        home.join(".that-agent")
+            .join("state")
+            .join("channel-configs")
+            .join(agent_name)
+            .join(file_name)
+    })
+}
+
+fn effective_channel_config_visible_path(
+    agent_name: &str,
+    sender_key: &str,
+    sandbox: bool,
+) -> Option<String> {
+    let file_name = format!("{}.toml", channel_config_slug(sender_key));
+    if sandbox {
+        Some(format!(
+            "/home/agent/.that-agent/state/channel-configs/{agent_name}/{file_name}"
+        ))
+    } else {
+        effective_channel_config_host_path(agent_name, sender_key)
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+}
+
+fn persist_effective_channel_config(
+    agent: &AgentDef,
+    sender_key: &str,
+    sandbox: bool,
+) -> Option<String> {
+    let path = effective_channel_config_host_path(&agent.name, sender_key)?;
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let text = toml::to_string_pretty(agent).ok()?;
+    std::fs::write(&path, text).ok()?;
+    effective_channel_config_visible_path(&agent.name, sender_key, sandbox)
+}
+
+fn remove_effective_channel_config(agent_name: &str, sender_key: &str) {
+    if let Some(path) = effective_channel_config_host_path(agent_name, sender_key) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn provider_menu_text(
+    agent: &AgentDef,
+    prefs: &ChannelPreferences,
+    providers: &[String],
+) -> String {
+    let mut text = format!(
+        "{}\n\nAvailable providers:\n",
+        channel_model_status(agent, prefs)
+    );
+    for provider in providers {
+        let marker = if provider == active_provider(agent, prefs) {
+            "✓"
+        } else {
+            "•"
+        };
+        text.push_str(&format!("{marker} {provider}\n"));
+    }
+    text.push_str("\nUse /models <provider> to see suggested models, or /models reset to go back to the agent default.");
+    text
+}
+
+fn model_menu_text(agent: &AgentDef, prefs: &ChannelPreferences, provider: &str) -> String {
+    let mut text = format!(
+        "{}\n\nSuggested models for {provider}:\n",
+        channel_model_status(agent, prefs)
+    );
+    for model in suggested_models(provider) {
+        let marker =
+            if provider == active_provider(agent, prefs) && model == active_model(agent, prefs) {
+                "✓"
+            } else {
+                "•"
+            };
+        text.push_str(&format!("{marker} {model}\n"));
+    }
+    text.push_str("\nUse /models <provider> <model> to set a custom model.");
+    text
+}
+
+fn provider_menu_markup(
+    agent: &AgentDef,
+    prefs: &ChannelPreferences,
+    providers: &[String],
+) -> Option<that_channels::ReplyMarkup> {
+    if providers.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for chunk in providers.chunks(2) {
+        let row = chunk
+            .iter()
+            .map(|provider| that_channels::InlineButton {
+                text: if provider == active_provider(agent, prefs) {
+                    format!("✓ {provider}")
+                } else {
+                    provider.to_string()
+                },
+                callback_data: format!("/models {provider}"),
+            })
+            .collect::<Vec<_>>();
+        rows.push(row);
+    }
+    if !prefs.is_default() {
+        rows.push(vec![that_channels::InlineButton {
+            text: "Reset to default".into(),
+            callback_data: "/models reset".into(),
+        }]);
+    }
+    Some(that_channels::ReplyMarkup::InlineKeyboard(rows))
+}
+
+fn model_menu_markup(
+    agent: &AgentDef,
+    prefs: &ChannelPreferences,
+    provider: &str,
+) -> Option<that_channels::ReplyMarkup> {
+    let models = suggested_models(provider);
+    if models.is_empty() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for chunk in models.chunks(2) {
+        let row = chunk
+            .iter()
+            .map(|model| that_channels::InlineButton {
+                text: if provider == active_provider(agent, prefs)
+                    && model == active_model(agent, prefs)
+                {
+                    format!("✓ {model}")
+                } else {
+                    model.to_string()
+                },
+                callback_data: format!("/models {provider} {model}"),
+            })
+            .collect::<Vec<_>>();
+        rows.push(row);
+    }
+    rows.push(vec![that_channels::InlineButton {
+        text: "Back".into(),
+        callback_data: "/models".into(),
+    }]);
+    Some(that_channels::ReplyMarkup::InlineKeyboard(rows))
+}
+
+async fn send_channel_menu(
+    router: &Arc<that_channels::ChannelRouter>,
+    channel_id: &str,
+    target: &that_channels::OutboundTarget,
+    text: String,
+    reply_markup: Option<that_channels::ReplyMarkup>,
+) {
+    if let Some(reply_markup) = reply_markup {
+        let msg = that_channels::OutboundMessage {
+            text: text.clone(),
+            parse_mode: Some(that_channels::ParseMode::Plain),
+            reply_markup: Some(reply_markup),
+            reply_to_message_id: target.reply_to_message_id.clone(),
+        };
+        if router
+            .send_message(channel_id, msg, Some(target))
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
+    router.notify_channel(channel_id, &text, Some(target)).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_models_command(
+    router: &Arc<that_channels::ChannelRouter>,
+    session_mgr: &Arc<SessionManager>,
+    model_prefs: &ChannelModelPrefs,
+    sender_key: &str,
+    channel_id: &str,
+    target: &that_channels::OutboundTarget,
+    agent: &AgentDef,
+    current_prefs: &ChannelPreferences,
+    sandbox: bool,
+    args: &str,
+) {
+    let providers = available_providers();
+    if providers.is_empty() {
+        router
+            .notify_channel(
+                channel_id,
+                "No provider API keys are configured. Set an API key first, then try /models again.",
+                Some(target),
+            )
+            .await;
+        return;
+    }
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    match parts.as_slice() {
+        [] => {
+            send_channel_menu(
+                router,
+                channel_id,
+                target,
+                provider_menu_text(agent, current_prefs, &providers),
+                provider_menu_markup(agent, current_prefs, &providers),
+            )
+            .await;
+        }
+        ["reset"] => {
+            let prefs = ChannelPreferences::default();
+            {
+                let mut map = model_prefs.lock().await;
+                map.remove(sender_key);
+            }
+            session_mgr.save_channel_preferences(sender_key, &prefs);
+            remove_effective_channel_config(&agent.name, sender_key);
+            let message = format!(
+                "Model reset. This conversation now uses the agent default: {} / {}.",
+                agent.provider, agent.model
+            );
+            router
+                .notify_channel(channel_id, &message, Some(target))
+                .await;
+        }
+        [provider] => {
+            let Some(provider) = normalize_provider(provider) else {
+                router
+                    .notify_channel(
+                        channel_id,
+                        "Unknown provider. Use /models to pick from the configured providers.",
+                        Some(target),
+                    )
+                    .await;
+                return;
+            };
+            if !providers.iter().any(|candidate| candidate == &provider) {
+                let message = format!("Provider '{provider}' is not configured on this agent.");
+                router
+                    .notify_channel(channel_id, &message, Some(target))
+                    .await;
+                return;
+            }
+            send_channel_menu(
+                router,
+                channel_id,
+                target,
+                model_menu_text(agent, current_prefs, &provider),
+                model_menu_markup(agent, current_prefs, &provider),
+            )
+            .await;
+        }
+        [provider, model_parts @ ..] => {
+            let Some(provider) = normalize_provider(provider) else {
+                router
+                    .notify_channel(
+                        channel_id,
+                        "Unknown provider. Use /models to pick from the configured providers.",
+                        Some(target),
+                    )
+                    .await;
+                return;
+            };
+            if !providers.iter().any(|candidate| candidate == &provider) {
+                let message = format!("Provider '{provider}' is not configured on this agent.");
+                router
+                    .notify_channel(channel_id, &message, Some(target))
+                    .await;
+                return;
+            }
+            let model = model_parts.join(" ").trim().to_string();
+            if model.is_empty() {
+                router
+                    .notify_channel(
+                        channel_id,
+                        "Model name is required. Use /models <provider> first to see suggestions.",
+                        Some(target),
+                    )
+                    .await;
+                return;
+            }
+            let prefs = ChannelPreferences {
+                provider: Some(provider.to_string()),
+                model: Some(model.clone()),
+            };
+            {
+                let mut map = model_prefs.lock().await;
+                map.insert(sender_key.to_string(), prefs.clone());
+            }
+            session_mgr.save_channel_preferences(sender_key, &prefs);
+            let effective_agent = apply_channel_preferences(agent, &prefs);
+            let message = if let Some(path) =
+                persist_effective_channel_config(&effective_agent, sender_key, sandbox)
+            {
+                format!(
+                    "Model for this conversation set to {provider} / {model}. New runs will use it. Effective runtime config: {path}"
+                )
+            } else {
+                format!(
+                    "Model for this conversation set to {provider} / {model}. New runs will use it."
+                )
+            };
+            router
+                .notify_channel(channel_id, &message, Some(target))
+                .await;
+        }
     }
 }
 
@@ -169,10 +535,15 @@ pub async fn run_listen(
 
     // Per-sender state: key = "channel_id:sender_id" → (session_id, history, show_work).
     let sessions: ChannelSessions = Arc::new(Mutex::new(HashMap::new()));
+    let model_prefs: ChannelModelPrefs =
+        Arc::new(Mutex::new(session_mgr.load_channel_preferences()));
     let channel_index_lock = Arc::new(Mutex::new(()));
     let plugin_runtime_lock = Arc::new(Mutex::new(()));
     // Queued __notify__ messages drained each heartbeat tick.
     let notification_queue: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // Queued deferred inbound messages drained each heartbeat tick.
+    let inbound_queue: Arc<Mutex<Vec<that_channels::InboundMessage>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
     eprintln!(
         "[that] Listening on channels: {} (primary: {})\n[that] Agent: {} — Ctrl+C to stop.",
@@ -329,6 +700,7 @@ pub async fn run_listen(
         let channel_registry_hb = Arc::clone(&channel_registry);
         let route_registry_hb = Arc::clone(&route_registry);
         let notification_queue_hb = Arc::clone(&notification_queue);
+        let inbound_queue_hb = Arc::clone(&inbound_queue);
         let interval_secs = agent.heartbeat_interval.unwrap_or(10).max(1);
 
         let plugin_dir_hb = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -498,11 +870,14 @@ pub async fn run_listen(
 
                 let pending_notifs: Vec<String> =
                     std::mem::take(&mut *notification_queue_hb.lock().await);
+                let pending_inbound: Vec<that_channels::InboundMessage> =
+                    std::mem::take(&mut *inbound_queue_hb.lock().await);
 
                 if due_indices.is_empty()
                     && unscoped_plugin_tasks.is_empty()
                     && scoped_plugin_tasks.is_empty()
                     && pending_notifs.is_empty()
+                    && pending_inbound.is_empty()
                 {
                     continue;
                 }
@@ -537,8 +912,12 @@ pub async fn run_listen(
                 if !due_refs.is_empty()
                     || !unscoped_plugin_tasks.is_empty()
                     || !pending_notifs.is_empty()
+                    || !pending_inbound.is_empty()
                 {
-                    let mut task = if due_refs.is_empty() && pending_notifs.is_empty() {
+                    let mut task = if due_refs.is_empty()
+                        && pending_notifs.is_empty()
+                        && pending_inbound.is_empty()
+                    {
                         String::from(
                             "Heartbeat check-in. Process the following plugin-triggered items:\n\n",
                         )
@@ -552,6 +931,51 @@ pub async fn run_listen(
                         task.push_str("\n\n## Pending agent notifications:\n");
                         for n in &pending_notifs {
                             task.push_str(&format!("- {n}\n"));
+                        }
+                    }
+                    if !pending_inbound.is_empty() {
+                        task.push_str("\n\n## Pending inbound requests:\n");
+                        for m in &pending_inbound {
+                            let text_preview: String = m.text.chars().take(500).collect();
+                            let cb = m.callback_url.as_deref().unwrap_or("no callback");
+                            let attach_count = m.attachments.len();
+                            task.push_str(&format!(
+                                "- [sender: {}] {} (callback: {}) [{} attachments]\n",
+                                m.sender_id, text_preview, cb, attach_count
+                            ));
+                        }
+
+                        const INBOUND_BATCH_WARN_THRESHOLD: usize = 10;
+                        if pending_inbound.len() > INBOUND_BATCH_WARN_THRESHOLD {
+                            let mut sender_counts: std::collections::HashMap<&str, usize> =
+                                std::collections::HashMap::new();
+                            for m in &pending_inbound {
+                                *sender_counts.entry(&m.sender_id).or_default() += 1;
+                            }
+                            let breakdown: String = sender_counts
+                                .iter()
+                                .map(|(s, c)| format!("{s}: {c}"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            warn!(
+                                count = pending_inbound.len(),
+                                breakdown = %breakdown,
+                                "High inbound batch volume"
+                            );
+                            let warning_msg = format!(
+                                "Budget warning: {} inbound requests batched this tick. Breakdown: {}",
+                                pending_inbound.len(),
+                                breakdown
+                            );
+                            let _ = router_hb.notify_all(&warning_msg).await;
+                            task.push_str(&format!(
+                                "\n**BUDGET WARNING**: {} inbound requests batched this tick.\n\
+                                 Sender breakdown: {}\n\
+                                 Investigate which deployed service is over-requesting. Use `channel_notify` \
+                                 to alert the operator and propose corrective action before proceeding.\n",
+                                pending_inbound.len(),
+                                breakdown
+                            ));
                         }
                     }
                     if due_refs.is_empty() && !unscoped_plugin_tasks.is_empty() {
@@ -585,6 +1009,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&channel_registry_hb)),
                         Some(Arc::clone(&route_registry_hb)),
                         skill_roots_hb.clone(),
+                        None,
                         None,
                         None,
                     )
@@ -643,6 +1068,7 @@ pub async fn run_listen(
                         skill_roots_hb.clone(),
                         None,
                         None,
+                        None,
                     )
                     .await;
                 }
@@ -674,6 +1100,7 @@ pub async fn run_listen(
             let container = container.clone();
             let session_mgr = Arc::clone(&session_mgr);
             let sessions = Arc::clone(&sessions);
+            let model_prefs = Arc::clone(&model_prefs);
             let channel_index_lock = Arc::clone(&channel_index_lock);
             let plugin_runtime_lock = Arc::clone(&plugin_runtime_lock);
             let hot = Arc::clone(&hot);
@@ -684,8 +1111,18 @@ pub async fn run_listen(
             let channel_registry = Arc::clone(&channel_registry);
             let route_registry = Arc::clone(&route_registry);
             let notification_queue = Arc::clone(&notification_queue);
+            let inbound_queue = Arc::clone(&inbound_queue);
 
             async move {
+                if msg.deferred {
+                    let mut q = inbound_queue.lock().await;
+                    if q.len() < 100 {
+                        q.push(msg);
+                    } else {
+                        warn!("inbound_queue full (100), dropping deferred message from {}", msg.sender_id);
+                    }
+                    return;
+                }
                 if msg.sender_id == that_channels::NOTIFY_SENDER_ID {
                     let mut q = notification_queue.lock().await;
                     if q.len() < 500 {
@@ -788,6 +1225,21 @@ pub async fn run_listen(
                             state.skill_roots.clone(),
                         )
                     };
+                    let channel_prefs = {
+                        let prefs = model_prefs.lock().await;
+                        prefs.get(&sender_key).cloned().unwrap_or_default()
+                    };
+                    let effective_agent = apply_channel_preferences(&agent, &channel_prefs);
+                    let effective_config_path = if channel_prefs.is_default() {
+                        remove_effective_channel_config(&agent.name, &sender_key);
+                        None
+                    } else {
+                        persist_effective_channel_config(
+                            &effective_agent,
+                            &sender_key,
+                            container.is_some(),
+                        )
+                    };
 
                     if !plugin_activations.is_empty() {
                         let slash_command = parsed_slash.as_ref().map(|(cmd, _)| cmd.as_str());
@@ -839,6 +1291,22 @@ pub async fn run_listen(
                                     .await;
                                 return;
                             }
+                            "models" => {
+                                handle_models_command(
+                                    &router,
+                                    &session_mgr,
+                                    &model_prefs,
+                                    &sender_key,
+                                    &msg.channel_id,
+                                    &outbound_target,
+                                    &agent,
+                                    &channel_prefs,
+                                    container.is_some(),
+                                    &args,
+                                )
+                                .await;
+                                return;
+                            }
                             "clear" => {
                                 // Create a fresh session so the old transcript is abandoned.
                                 let new_sid = session_mgr
@@ -887,9 +1355,9 @@ pub async fn run_listen(
                                         drop(map);
                                         // LLM-generated summary of the conversation.
                                         let summary = build_compact_summary(
-                                            &agent.provider,
-                                            &agent.model,
-                                            &agent.name,
+                                            &effective_agent.provider,
+                                            &effective_agent.model,
+                                            &effective_agent.name,
                                             container.is_some(),
                                             &hist_clone,
                                         )
@@ -985,7 +1453,7 @@ pub async fn run_listen(
                                         sessions,
                                         std::sync::Arc::clone(&channel_index_lock),
                                         session_mgr,
-                                        agent,
+                                        effective_agent.clone(),
                                         container,
                                         preamble,
                                         router,
@@ -997,6 +1465,7 @@ pub async fn run_listen(
                                         Some(Arc::clone(&route_registry)),
                                         skill_roots,
                                         None,
+                                        effective_config_path.clone(),
                                     )
                                     .await;
                                     return;
@@ -1019,7 +1488,7 @@ pub async fn run_listen(
                                         sessions,
                                         std::sync::Arc::clone(&channel_index_lock),
                                         session_mgr,
-                                        agent,
+                                        effective_agent.clone(),
                                         container,
                                         preamble,
                                         router,
@@ -1031,6 +1500,7 @@ pub async fn run_listen(
                                         Some(Arc::clone(&route_registry)),
                                         skill_roots,
                                         None,
+                                        effective_config_path.clone(),
                                     )
                                     .await;
                                     return;
@@ -1060,7 +1530,7 @@ pub async fn run_listen(
                         sessions,
                         std::sync::Arc::clone(&channel_index_lock),
                         session_mgr,
-                        agent,
+                        effective_agent,
                         container,
                         preamble,
                         router,
@@ -1072,6 +1542,7 @@ pub async fn run_listen(
                         Some(Arc::clone(&route_registry)),
                         skill_roots,
                         msg.callback_url,
+                        effective_config_path,
                     )
                     .await;
                 })
@@ -1118,6 +1589,7 @@ async fn run_agent_for_sender_tracked(
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
     callback_url: Option<String>,
+    effective_config_path: Option<String>,
 ) {
     let active_run_id = run_seq.fetch_add(1, Ordering::Relaxed);
     let sender_key_for_task = sender_key.clone();
@@ -1147,6 +1619,7 @@ async fn run_agent_for_sender_tracked(
             route_registry,
             skill_roots,
             callback_url,
+            effective_config_path,
             Some(steering_for_task),
         )
         .await;
@@ -1199,6 +1672,7 @@ async fn run_agent_for_sender(
     route_registry: Option<Arc<that_channels::DynamicRouteRegistry>>,
     skill_roots: Vec<std::path::PathBuf>,
     callback_url: Option<String>,
+    effective_config_path: Option<String>,
     steering: Option<SteeringQueue>,
 ) {
     struct TypingTaskGuard(Option<tokio::task::JoinHandle<()>>);
@@ -1460,6 +1934,7 @@ async fn run_agent_for_sender(
         route_registry,
         skill_roots,
         steering_for_run,
+        effective_config_path,
     )
     .await;
 
@@ -1596,5 +2071,24 @@ async fn run_agent_for_sender(
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{channel_config_slug, effective_channel_config_visible_path};
+
+    #[test]
+    fn channel_config_slug_normalizes_sender_keys() {
+        assert_eq!(channel_config_slug("telegram:123/abc"), "telegram_123_abc");
+    }
+
+    #[test]
+    fn sandbox_effective_config_path_uses_state_dir() {
+        let path = effective_channel_config_visible_path("demo", "telegram:123", true).unwrap();
+        assert_eq!(
+            path,
+            "/home/agent/.that-agent/state/channel-configs/demo/telegram_123.toml"
+        );
     }
 }

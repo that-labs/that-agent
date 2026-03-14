@@ -198,6 +198,10 @@ pub fn build_bot_commands_list(
             command: "stop".into(),
             description: "Stop the active agent run".into(),
         },
+        that_channels::BotCommand {
+            command: "models".into(),
+            description: "Choose the provider and model for this conversation".into(),
+        },
     ];
     for built_in in &cmds {
         seen.insert(built_in.command.clone());

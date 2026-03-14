@@ -45,11 +45,13 @@ spec:
                 configMapKeyRef:
                   name: that-agent-config
                   key: THAT_AGENT_PARENT
+                  optional: true
             - name: THAT_AGENT_ROLE
               valueFrom:
                 configMapKeyRef:
                   name: that-agent-config
                   key: THAT_AGENT_ROLE
+                  optional: true
           envFrom:
             - configMapRef:
                 name: that-agent-config
@@ -154,6 +156,7 @@ spec:
                 configMapKeyRef:
                   name: that-agent-config
                   key: THAT_BUILDKIT_GC_KEEPSTORAGE_MB
+                  optional: true
           readinessProbe:
             exec:
               command: ["/bin/sh", "-lc", "buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1"]

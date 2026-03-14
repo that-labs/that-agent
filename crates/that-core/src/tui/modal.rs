@@ -7,17 +7,7 @@ use ratatui::{
     Frame,
 };
 
-pub const MODEL_OPTIONS: &[(&str, &str)] = &[
-    ("anthropic", "claude-opus-4-6"),
-    ("anthropic", "claude-sonnet-4-5-20250929"),
-    ("anthropic", "claude-haiku-4-5-20251001"),
-    ("openai", "gpt-5.2-codex"),
-    ("openai", "gpt-5.1-codex-mini"),
-    ("openai", "gpt-4o"),
-    ("openai", "gpt-4.1"),
-    ("openai", "o3"),
-    ("openai", "o4-mini"),
-];
+pub use crate::model_catalog::MODEL_OPTIONS;
 
 /// Identifies the purpose of a modal so the main loop can dispatch selections.
 #[derive(Clone, Copy, PartialEq, Eq)]

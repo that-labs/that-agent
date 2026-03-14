@@ -285,6 +285,7 @@ enum TurnFailure {
     Transport(anyhow::Error),
 }
 
+#[derive(Debug)]
 enum EventControl {
     Continue,
     Completed {
@@ -294,6 +295,28 @@ enum EventControl {
         code: Option<String>,
         detail: String,
     },
+}
+
+fn response_usage(response: &serde_json::Value, usage: &mut Usage) {
+    if let Some(u) = response.get("usage").and_then(|u| u.as_object()) {
+        usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0) as u32;
+        usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0) as u32;
+    }
+}
+
+fn response_id(response: &serde_json::Value) -> Option<String> {
+    response
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+}
+
+fn incomplete_detail(response: &serde_json::Value) -> String {
+    let reason = response
+        .pointer("/incomplete_details/reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    format!("incomplete: {reason}")
 }
 
 async fn read_ws_turn(
@@ -460,14 +483,15 @@ async fn handle_response_event(
 
         // ── Response complete ─────────────────────────────────────────────────
         "response.completed" => {
-            if let Some(u) = val.pointer("/response/usage").and_then(|u| u.as_object()) {
-                usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0) as u32;
-                usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0) as u32;
+            let response = &val["response"];
+            response_usage(response, usage);
+            let response_id = response_id(response);
+            if response.get("status").and_then(|v| v.as_str()) == Some("incomplete") {
+                return Ok(EventControl::ApiError {
+                    code: Some("incomplete".into()),
+                    detail: incomplete_detail(response),
+                });
             }
-            let response_id = val
-                .pointer("/response/id")
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string);
 
             let _ = tx
                 .send(TurnEvent::TurnEnd {
@@ -477,6 +501,15 @@ async fn handle_response_event(
                 .await;
 
             return Ok(EventControl::Completed { response_id });
+        }
+
+        "response.incomplete" => {
+            let response = &val["response"];
+            response_usage(response, usage);
+            return Ok(EventControl::ApiError {
+                code: Some("incomplete".into()),
+                detail: incomplete_detail(response),
+            });
         }
 
         // ── API-level error ───────────────────────────────────────────────────
@@ -703,4 +736,65 @@ pub fn messages_to_responses_input(messages: &[Message]) -> Vec<serde_json::Valu
     }
 
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn response_completed_incomplete_returns_error() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut full_text = String::from("partial");
+        let mut usage = Usage::default();
+        let mut tool_slots = std::collections::HashMap::new();
+
+        let event = handle_response_event(
+            r#"{"type":"response.completed","response":{"id":"resp_123","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":12,"output_tokens":34}}}"#,
+            &tx,
+            &mut full_text,
+            &mut usage,
+            &mut tool_slots,
+        )
+        .await
+        .unwrap();
+
+        match event {
+            EventControl::ApiError { code, detail } => {
+                assert_eq!(code.as_deref(), Some("incomplete"));
+                assert_eq!(detail, "incomplete: max_output_tokens");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 34);
+    }
+
+    #[tokio::test]
+    async fn response_completed_success_still_completes() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut full_text = String::from("done");
+        let mut usage = Usage::default();
+        let mut tool_slots = std::collections::HashMap::new();
+
+        let event = handle_response_event(
+            r#"{"type":"response.completed","response":{"id":"resp_456","status":"completed","usage":{"input_tokens":7,"output_tokens":8}}}"#,
+            &tx,
+            &mut full_text,
+            &mut usage,
+            &mut tool_slots,
+        )
+        .await
+        .unwrap();
+
+        match event {
+            EventControl::Completed { response_id } => {
+                assert_eq!(response_id.as_deref(), Some("resp_456"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(matches!(rx.recv().await, Some(TurnEvent::TurnEnd { .. })));
+        assert_eq!(usage.input_tokens, 7);
+        assert_eq!(usage.output_tokens, 8);
+    }
 }

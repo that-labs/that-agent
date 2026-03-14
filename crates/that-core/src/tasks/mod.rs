@@ -104,7 +104,7 @@ fn scan_dir_for_statuses(dir: &std::path::Path, summary: &mut TasksSummary) {
             if let Some(rest) = line.strip_prefix("**Status**:") {
                 let value = rest.trim().to_lowercase();
                 match value.as_str() {
-                    "in-progress" | "in_progress" | "inprogress" | "active" => {
+                    "in-progress" | "in_progress" | "inprogress" | "active" | "blocked" => {
                         summary.in_progress += 1;
                     }
                     "todo" | "pending" | "open" | "backlog" => {

@@ -176,8 +176,9 @@ fn mem_to_request(cmd: cli::MemCommands) -> Result<ToolRequest, String> {
             query,
             limit,
             session_id,
-        } => Ok(ToolRequest::MemRecall {
+        } => Ok(ToolRequest::MemSearch {
             query,
+            tags: None,
             limit: Some(limit),
             session_id,
         }),

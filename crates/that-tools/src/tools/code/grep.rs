@@ -22,18 +22,6 @@ pub enum GrepError {
     NotFound(String),
 }
 
-/// A single grep match with context (legacy flat format).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GrepMatch {
-    pub file: String,
-    pub line_number: usize,
-    pub content: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub context_before: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub context_after: Vec<String>,
-}
-
 /// A group of matches within a single file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrepFileGroup {
@@ -256,27 +244,23 @@ pub fn code_grep_filtered_with_options(
     let total_matches: usize = per_file.iter().map(|f| f.total_matches).sum();
     let matched_files = per_file.len();
 
-    // Deterministic top-N merge by sorted file order and line order.
-    let mut matches = Vec::new();
+    // Deterministic top-N merge: build grouped results directly from per-file scans.
+    let mut file_matches: Vec<GrepFileGroup> = Vec::new();
+    let mut returned = 0usize;
     for file in &per_file {
-        if matches.len() >= limit {
+        if returned >= limit {
             break;
         }
-        let needed = limit - matches.len();
-        for m in file.details.iter().take(needed) {
-            matches.push(GrepMatch {
-                file: file.file.clone(),
-                line_number: m.line_number,
-                content: m.content.clone(),
-                context_before: m.context_before.clone(),
-                context_after: m.context_after.clone(),
-            });
-        }
+        let needed = limit - returned;
+        let taken: Vec<GrepLineMatch> = file.details.iter().take(needed).cloned().collect();
+        returned += taken.len();
+        let mut group = GrepFileGroup {
+            file: file.file.clone(),
+            matches: taken,
+        };
+        dedup_context_in_group(&mut group.matches);
+        file_matches.push(group);
     }
-
-    let file_matches = build_file_groups(&matches);
-
-    let returned = matches.len();
     let result = GrepResult {
         schema_version: 2,
         pattern: pattern.to_string(),
@@ -290,39 +274,6 @@ pub fn code_grep_filtered_with_options(
     };
 
     Ok(output::emit_json(&result, max_tokens))
-}
-
-/// Build grouped file results from a sorted flat match list, with context dedup.
-fn build_file_groups(matches: &[GrepMatch]) -> Vec<GrepFileGroup> {
-    let mut groups: Vec<GrepFileGroup> = Vec::new();
-    for m in matches {
-        if groups.last().is_some_and(|g| g.file == m.file) {
-            groups
-                .last_mut()
-                .expect("checked is_some")
-                .matches
-                .push(GrepLineMatch {
-                    line_number: m.line_number,
-                    content: m.content.clone(),
-                    context_before: m.context_before.clone(),
-                    context_after: m.context_after.clone(),
-                });
-        } else {
-            groups.push(GrepFileGroup {
-                file: m.file.clone(),
-                matches: vec![GrepLineMatch {
-                    line_number: m.line_number,
-                    content: m.content.clone(),
-                    context_before: m.context_before.clone(),
-                    context_after: m.context_after.clone(),
-                }],
-            });
-        }
-    }
-    for group in &mut groups {
-        dedup_context_in_group(&mut group.matches);
-    }
-    groups
 }
 
 /// Deduplicate overlapping context lines between adjacent matches in a file group.
