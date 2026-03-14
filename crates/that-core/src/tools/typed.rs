@@ -813,8 +813,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Skill name exactly as listed in the preamble skill catalog" },
-                    "file": { "type": "string", "description": "File to read within the skill directory. Defaults to SKILL.md." }
+                    "name": { "type": "string", "description": "Skill name exactly as listed in the preamble skill catalog or from list_skills" },
+                    "file": { "type": "string", "description": "File path relative to the skill directory. Defaults to SKILL.md. Use this to load reference files (e.g. \"references/worktree-local.md\") — the available_files field in the response lists all loadable files." }
                 },
                 "required": ["name"]
             }),
