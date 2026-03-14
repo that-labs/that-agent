@@ -1,6 +1,6 @@
 # Search Tools
 
-Full flag reference for `anvil search` — query (web search) and fetch (URL reader), all engines and modes.
+Full flag reference for `that search` — query (web search) and fetch (URL reader), all engines and modes.
 
 ## Quick start
 

@@ -1,6 +1,6 @@
 # Filesystem Tools
 
-Full flag reference for `anvil fs` — ls, cat, write, mkdir, rm.
+Full flag reference for `that fs` — ls, cat, write, mkdir, rm.
 
 ## Quick start
 

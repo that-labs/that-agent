@@ -35,7 +35,7 @@ impl Default for BraveProvider {
 impl BraveProvider {
     pub fn new() -> Self {
         let api_key = std::env::var("BRAVE_API_KEY")
-            .or_else(|_| std::env::var("ANVIL_SEARCH_BRAVE_KEY"))
+            .or_else(|_| std::env::var("THAT_SEARCH_BRAVE_KEY"))
             .ok();
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))

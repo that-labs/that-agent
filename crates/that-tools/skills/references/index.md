@@ -31,4 +31,4 @@ that code index [path] --status  # report health
 
 **Decision:** if `stale_files > 0`, rebuild before using `--references` or `--ranked`.
 
-The index is stored in `.anvil/index.db` at the project root. Build time is proportional to project size; subsequent runs are fast.
+The index is stored in `.that-agent/index.db` at the project root. Build time is proportional to project size; subsequent runs are fast.

@@ -2,7 +2,7 @@
 
 Full flag reference for `that exec run` — timeout, streaming, working directory, and signal modes.
 
-**Never use exec as a substitute for anvil's own tools:**
+**Never use exec as a substitute for dedicated tools:**
 
 | Don't do this | Do this instead |
 |---------------|-----------------|
@@ -55,4 +55,4 @@ Commands run in a new process group — on timeout the entire group is killed (n
 
 Output: `command`, `exit_code`, `stdout`, `stderr`, `elapsed_ms`, `timed_out`.
 
-> **Policy:** Shell execution may be denied by default. Configure `policy.tools.shell_exec = "allow"` in `.anvil/config.toml` or run `that init --profile agent`.
+> **Policy:** Shell execution may be denied by default. Configure `policy.tools.shell_exec = "allow"` in `.that-agent/config.toml` or run `that init --profile agent`.

@@ -318,6 +318,7 @@ data:
   THAT_AGENT_MODEL: "{model_str}"
   THAT_PARENT_GATEWAY_URL: "{parent_gw}"
   THAT_PARENT_GATEWAY_TOKEN: "{gw_token}"
+  THAT_SANDBOX_K8S_NAMESPACE: "{ns}"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -476,6 +477,7 @@ pub async fn run_ephemeral_agent_k8s(
         "HTTP_PROXY": proxy_svc,
         "HTTPS_PROXY": proxy_svc,
         "NO_PROXY": "*.svc.cluster.local,10.0.0.0/8",
+        "THAT_SANDBOX_K8S_NAMESPACE": ns,
     });
     if workspace {
         config_data["GIT_REPO_URL"] = serde_json::json!(format!("{git_svc}/workspace.git"));

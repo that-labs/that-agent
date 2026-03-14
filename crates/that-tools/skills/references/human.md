@@ -1,6 +1,6 @@
 # Human-in-the-Loop
 
-Full flag reference for `anvil human` — ask, pending, approve, confirm.
+Full flag reference for `that human` — ask, pending, approve, confirm.
 
 ## Quick start
 
