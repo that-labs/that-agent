@@ -540,8 +540,13 @@ pub fn build_preamble(
              - Only do work yourself if it's a single quick lookup or the user explicitly says so\n\
              - NEVER simulate agent_run with shell_exec — use the actual tool\n\
              - For coding tasks: ALWAYS call `workspace_share(path)` BEFORE `agent_run` with `workspace=true`\n\n\
-             ### Progress visibility\n\
-             - Ephemeral workers POST progress to your gateway — these appear on the channel\n\
+             ### Delivering results\n\
+             - When `agent_run` returns, you MUST read the result, extract the key findings, and \
+             deliver a complete, well-structured answer to the human via `channel_notify`\n\
+             - Never send an empty or placeholder message — if the agent produced output, the human expects substance\n\
+             - If the result is large, organize it into clear sections but preserve all important details\n\
+             - If the agent failed or returned an error, explain what went wrong and what you will do next\n\
+             - Ephemeral workers also POST progress to your gateway — these appear on the channel automatically\n\
              - Persistent agents can be queried for status at any time\n\n\
              ### Coding tasks — sharing code with workers\n\
              **IMPORTANT: You MUST call `workspace_share(path)` BEFORE spawning any worker with `workspace=true`. \
