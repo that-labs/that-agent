@@ -549,8 +549,8 @@ pub async fn run_ephemeral_agent_k8s(
                             "containers": [{
                                 "name": "agent",
                                 "image": image,
-                                "command": ["that", "--agent", name, "run", "query",
-                                            "--parent", parent, "--no-sandbox", task],
+                                "command": ["/bin/bash", "-c",
+                                    "exec that --agent \"$THAT_AGENT_NAME\" run query --parent \"$THAT_AGENT_PARENT\" --no-sandbox \"$THAT_AGENT_TASK\""],
                                 "envFrom": [
                                     { "configMapRef": { "name": format!("{sa_name}-config") } },
                                     { "secretRef": { "name": "that-agent-secrets", "optional": true } },
@@ -954,11 +954,27 @@ pub fn cluster_dir_from_db(memory_db_path: &Path) -> Option<PathBuf> {
 fn k8s_labels(name: &str, parent: &str, agent_type: &str, role: &str) -> serde_json::Value {
     serde_json::json!({
         "that-agent/managed": "true",
-        "that-agent/name": name,
-        "that-agent/parent": parent,
+        "that-agent/name": sanitize_label_value(name),
+        "that-agent/parent": sanitize_label_value(parent),
         "that-agent/type": agent_type,
-        "that-agent/role": role,
+        "that-agent/role": sanitize_label_value(role),
     })
+}
+
+/// Sanitize a string for use as a K8s label value (max 63 chars, [a-zA-Z0-9._-]).
+fn sanitize_label_value(s: &str) -> String {
+    let sanitized: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(63)
+        .collect();
+    sanitized.trim_matches('-').to_string()
 }
 
 /// Build ownerReferences array for K8s resources.
