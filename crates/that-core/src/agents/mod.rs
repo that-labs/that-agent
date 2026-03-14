@@ -342,7 +342,7 @@ spec:
       containers:
         - name: agent
           image: {image}
-          command: ["that", "run", "listen", "--agent", "{name}", "--no-sandbox"]
+          command: ["that", "--agent", "{name}", "run", "listen", "--no-sandbox"]
           envFrom:
             - configMapRef:
                 name: {sa_name}-config
@@ -443,26 +443,15 @@ pub async fn run_ephemeral_agent_k8s(
     let mem_limit = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT").unwrap_or_else(|_| "2Gi".into());
 
     let role_str = role.unwrap_or("");
-    let labels = agent_labels(name, parent, "ephemeral", role_str);
-    let owner_ref = owner_reference(&parent_deploy, &deploy_uid);
 
-    // Escaped task for YAML embedding
-    let task_escaped = task.replace('\\', "\\\\").replace('"', "\\\"");
-
-    let mut extra_env = String::new();
     if workspace {
-        let git_url = format!("{git_svc}/workspace.git");
-        extra_env.push_str(&format!(
-            "  GIT_REPO_URL: \"{git_url}\"\n  GIT_BRANCH: \"task/{safe_name}\"\n"
-        ));
         // Ensure bare repo exists on git-server
-        let git_pod_selector = "app.kubernetes.io/component=git-server";
         let _ = tokio::process::Command::new("kubectl")
             .args([
                 "exec",
                 "-n",
                 &ns,
-                &format!("-l{git_pod_selector}"),
+                "-lapp.kubernetes.io/component=git-server",
                 "--",
                 "bash",
                 "-c",
@@ -472,7 +461,6 @@ pub async fn run_ephemeral_agent_k8s(
             ])
             .output()
             .await;
-        // Push current state to git-server via HTTP
         let _ = tokio::process::Command::new("git")
             .args([
                 "-C",
@@ -486,107 +474,117 @@ pub async fn run_ephemeral_agent_k8s(
             .await;
     }
 
-    // Proxy env for build cache
-    let proxy_url = &proxy_svc;
-    let no_proxy = "*.svc.cluster.local,10.0.0.0/8";
+    let labels = k8s_labels(name, parent, "ephemeral", role_str);
+    let owner_refs = k8s_owner_refs(&parent_deploy, &deploy_uid);
 
-    let yaml = format!(
-        r#"---
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {sa_name}
-  namespace: {ns}
-  labels:
-{labels}
-{owner_ref}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {sa_name}
-  namespace: {ns}
-  labels:
-{labels}
-{owner_ref}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: that-agent-child-readonly
-subjects:
-  - kind: ServiceAccount
-    name: {sa_name}
-    namespace: {ns}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {sa_name}-config
-  namespace: {ns}
-  labels:
-{labels}
-{owner_ref}
-data:
-  THAT_AGENT_NAME: "{name}"
-  THAT_AGENT_PARENT: "{parent}"
-  THAT_AGENT_ROLE: "{role_str}"
-  THAT_SANDBOX_MODE: "kubernetes"
-  THAT_TRUSTED_LOCAL_SANDBOX: "1"
-  THAT_AGENT_PROVIDER: "{provider}"
-  THAT_AGENT_MODEL: "{model_str}"
-  THAT_PARENT_GATEWAY_URL: "{parent_gw}"
-  THAT_PARENT_GATEWAY_TOKEN: "{gw_token}"
-  THAT_AGENT_TASK: "{task_escaped}"
-  HTTP_PROXY: "{proxy_url}"
-  HTTPS_PROXY: "{proxy_url}"
-  NO_PROXY: "{no_proxy}"
-{extra_env}---
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: {sa_name}
-  namespace: {ns}
-  labels:
-{labels}
-{owner_ref}
-spec:
-  backoffLimit: 0
-  ttlSecondsAfterFinished: 300
-  template:
-    metadata:
-      labels:
-{labels}
-    spec:
-      serviceAccountName: {sa_name}
-      automountServiceAccountToken: true
-      restartPolicy: Never
-      containers:
-        - name: agent
-          image: {image}
-          command: ["that", "run", "query", "--agent", "{name}", "--task", "{task_escaped}", "--parent", "{parent}", "--no-sandbox"]
-          envFrom:
-            - configMapRef:
-                name: {sa_name}-config
-            - secretRef:
-                name: that-agent-secrets
-                optional: true
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "256Mi"
-            limits:
-              cpu: "{cpu_limit}"
-              memory: "{mem_limit}"
-          volumeMounts:
-            - name: workspace
-              mountPath: /workspace
-      volumes:
-        - name: workspace
-          emptyDir: {{}}
-"#
-    );
+    let mut config_data = serde_json::json!({
+        "THAT_AGENT_NAME": name,
+        "THAT_AGENT_PARENT": parent,
+        "THAT_AGENT_ROLE": role_str,
+        "THAT_SANDBOX_MODE": "kubernetes",
+        "THAT_TRUSTED_LOCAL_SANDBOX": "1",
+        "THAT_AGENT_PROVIDER": provider,
+        "THAT_AGENT_MODEL": model_str,
+        "THAT_PARENT_GATEWAY_URL": parent_gw,
+        "THAT_PARENT_GATEWAY_TOKEN": gw_token,
+        "THAT_AGENT_TASK": task,
+        "HTTP_PROXY": proxy_svc,
+        "HTTPS_PROXY": proxy_svc,
+        "NO_PROXY": "*.svc.cluster.local,10.0.0.0/8",
+    });
+    if workspace {
+        config_data["GIT_REPO_URL"] = serde_json::json!(format!("{git_svc}/workspace.git"));
+        config_data["GIT_BRANCH"] = serde_json::json!(format!("task/{safe_name}"));
+    }
 
-    kubectl_apply(&yaml).await?;
+    // Build K8s resources as JSON (no YAML indentation issues)
+    let resources = serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "List",
+        "items": [
+            {
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {
+                    "name": sa_name,
+                    "namespace": ns,
+                    "labels": labels,
+                    "ownerReferences": owner_refs,
+                }
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": {
+                    "name": sa_name,
+                    "namespace": ns,
+                    "labels": labels,
+                    "ownerReferences": owner_refs,
+                },
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "Role",
+                    "name": "that-agent-child-readonly"
+                },
+                "subjects": [{
+                    "kind": "ServiceAccount",
+                    "name": sa_name,
+                    "namespace": ns,
+                }]
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": format!("{sa_name}-config"),
+                    "namespace": ns,
+                    "labels": labels,
+                    "ownerReferences": owner_refs,
+                },
+                "data": config_data,
+            },
+            {
+                "apiVersion": "batch/v1",
+                "kind": "Job",
+                "metadata": {
+                    "name": sa_name,
+                    "namespace": ns,
+                    "labels": labels,
+                    "ownerReferences": owner_refs,
+                },
+                "spec": {
+                    "backoffLimit": 0,
+                    "ttlSecondsAfterFinished": 300,
+                    "template": {
+                        "metadata": { "labels": labels },
+                        "spec": {
+                            "serviceAccountName": sa_name,
+                            "automountServiceAccountToken": true,
+                            "restartPolicy": "Never",
+                            "containers": [{
+                                "name": "agent",
+                                "image": image,
+                                "command": ["that", "--agent", name, "run", "query",
+                                            "--task", task, "--parent", parent, "--no-sandbox"],
+                                "envFrom": [
+                                    { "configMapRef": { "name": format!("{sa_name}-config") } },
+                                    { "secretRef": { "name": "that-agent-secrets", "optional": true } },
+                                ],
+                                "resources": {
+                                    "requests": { "cpu": "200m", "memory": "256Mi" },
+                                    "limits": { "cpu": cpu_limit, "memory": mem_limit },
+                                },
+                                "volumeMounts": [{ "name": "workspace", "mountPath": "/workspace" }],
+                            }],
+                            "volumes": [{ "name": "workspace", "emptyDir": {} }],
+                        }
+                    }
+                }
+            }
+        ]
+    });
+
+    kubectl_apply_json(&resources).await?;
 
     // Watch Job until completion or timeout
     let start = std::time::Instant::now();
@@ -987,7 +985,33 @@ pub fn cluster_dir_from_db(memory_db_path: &Path) -> Option<PathBuf> {
     memory_db_path.ancestors().nth(3).map(|p| p.join("cluster"))
 }
 
-/// Format standard agent labels as YAML (indented 4 spaces).
+/// Build K8s labels as a JSON object.
+fn k8s_labels(name: &str, parent: &str, agent_type: &str, role: &str) -> serde_json::Value {
+    serde_json::json!({
+        "that-agent/managed": "true",
+        "that-agent/name": name,
+        "that-agent/parent": parent,
+        "that-agent/type": agent_type,
+        "that-agent/role": role,
+    })
+}
+
+/// Build ownerReferences array for K8s resources.
+fn k8s_owner_refs(deploy_name: &str, uid: &str) -> serde_json::Value {
+    if uid.is_empty() {
+        return serde_json::json!([]);
+    }
+    serde_json::json!([{
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "name": deploy_name,
+        "uid": uid,
+        "controller": true,
+        "blockOwnerDeletion": false,
+    }])
+}
+
+// Keep YAML helpers for persistent agent (will migrate later)
 fn agent_labels(name: &str, parent: &str, agent_type: &str, role: &str) -> String {
     format!(
         "    that-agent/managed: \"true\"\n\
@@ -998,7 +1022,6 @@ fn agent_labels(name: &str, parent: &str, agent_type: &str, role: &str) -> Strin
     )
 }
 
-/// Format ownerReferences YAML block.
 fn owner_reference(deploy_name: &str, uid: &str) -> String {
     if uid.is_empty() {
         return String::new();
@@ -1026,6 +1049,30 @@ async fn kubectl_apply(yaml: &str) -> Result<()> {
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
         stdin.write_all(yaml.as_bytes()).await?;
+    }
+
+    let output = child.wait_with_output().await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "kubectl apply failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+/// Apply a JSON K8s resource list via `kubectl apply -f -`.
+async fn kubectl_apply_json(resource: &serde_json::Value) -> Result<()> {
+    let json_str = serde_json::to_string(resource)?;
+    let mut child = tokio::process::Command::new("kubectl")
+        .args(["apply", "-f", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(json_str.as_bytes()).await?;
     }
 
     let output = child.wait_with_output().await?;
