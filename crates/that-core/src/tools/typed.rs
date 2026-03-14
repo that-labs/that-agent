@@ -777,6 +777,10 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             name: "shell_exec".into(),
             description: format!(
                 "Execute a shell command and return stdout, stderr, and exit code. \
+                IMPORTANT: Do NOT use shell_exec for operations that have dedicated tools — \
+                use code_read/fs_cat instead of cat, code_grep instead of grep, fs_ls instead of ls, \
+                code_edit instead of sed/awk, fs_write instead of echo/tee, list_skills instead of ls on skills dir. \
+                Reserve shell_exec for git, build commands, package managers, and runtime operations with no dedicated tool. \
                 Default timeout: 5s — most commands finish instantly. \
                 Set a higher timeout_secs explicitly for builds, installs, or known slow ops. \
                 For long-running processes, redirect output to a file and manage it separately. \
