@@ -631,7 +631,12 @@ pub fn build_preamble(
                  - You were spawned by your parent to handle a specific task or domain\n\
                  - Report progress via POST to $THAT_PARENT_GATEWAY_URL/v1/notify\n\
                  - Focus on your assigned scope and report results\n\
-                 - You cannot spawn sub-agents of your own\n"
+                 - You cannot spawn sub-agents of your own\n\n\
+                 ### In-cluster services\n\
+                 - The git server uses **HTTP** (not git:// protocol) — always use `http://` URLs\n\
+                 - If you have `$GIT_REPO_URL` set, use it to clone the shared workspace\n\
+                 - Do NOT manually construct git server URLs — use the workspace tools or `$GIT_REPO_URL`\n\
+                 - Use `agent_query` to communicate with your parent by name\n"
             ));
         } else {
             preamble.push_str(&format!(
