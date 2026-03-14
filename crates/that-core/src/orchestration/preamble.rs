@@ -538,13 +538,16 @@ pub fn build_preamble(
              - When you need parallel work on independent subtasks: fan out with agent_run\n\
              - When you need a long-running service or collaborator: spawn_agent\n\
              - Only do work yourself if it's a single quick lookup or the user explicitly says so\n\
-             - NEVER simulate agent_run with shell_exec — use the actual tool\n\n\
+             - NEVER simulate agent_run with shell_exec — use the actual tool\n\
+             - For coding tasks: ALWAYS call `workspace_share(path)` BEFORE `agent_run` with `workspace=true`\n\n\
              ### Progress visibility\n\
              - Ephemeral workers POST progress to your gateway — these appear on the channel\n\
              - Persistent agents can be queried for status at any time\n\n\
              ### Coding tasks — sharing code with workers\n\
-             - `workspace_share(path)` → pushes a git repo to the in-cluster git server\n\
-             - `agent_run(name, task, workspace=true)` → worker clones the shared repo\n\
+             **IMPORTANT: You MUST call `workspace_share(path)` BEFORE spawning any worker with `workspace=true`. \
+             Workers clone at startup — if the workspace is not shared yet, they will fail.**\n\
+             - `workspace_share(path)` → pushes a git repo to the in-cluster git server (call FIRST)\n\
+             - `agent_run(name, task, workspace=true)` → worker clones the shared repo (call AFTER share)\n\
              - `workspace_activity()` → check which workers have pushed, how far ahead/behind\n\
              - `workspace_diff(branch)` → review a worker's changes without cloning\n\
              - `workspace_collect(path, worker)` → merge worker's changes back\n\
