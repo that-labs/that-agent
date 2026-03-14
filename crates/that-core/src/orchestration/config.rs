@@ -1,7 +1,25 @@
+use std::sync::Mutex;
+
 use crate::config::AgentDef;
 
 /// Maximum number of automatic retries on transient network / server errors.
 pub const MAX_NETWORK_RETRIES: u32 = 5;
+
+// ── Agent Status cache (Status.md) ───────────────────────────────────────────
+
+static AGENT_STATUS_CACHE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Set the cached Status.md content (called at session start and on identity_update).
+pub fn set_agent_status(content: Option<String>) {
+    if let Ok(mut cache) = AGENT_STATUS_CACHE.lock() {
+        *cache = content;
+    }
+}
+
+/// Get the cached Status.md content for injection into system reminders.
+pub fn get_agent_status() -> Option<String> {
+    AGENT_STATUS_CACHE.lock().ok().and_then(|c| c.clone())
+}
 
 /// Initial backoff delay in ms; doubles each attempt (0.5 s -> 1 -> 2 -> 4 -> 8 s).
 pub const RETRY_BASE_DELAY_MS: u64 = 500;
@@ -355,13 +373,6 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
                     }
                     append_rbac_runtime_lines(&mut lines, Some(&k8s.namespace));
                     lines.push("multi_agent_enabled: true".to_string());
-                    lines.push(
-                        "multi_agent_hint: Use agent_run(name, task) to delegate work to \
-                         ephemeral K8s Jobs. Use spawn_agent(name, role) for persistent agents. \
-                         Use workspace_share before agent_run with workspace=true for coding tasks. \
-                         Do NOT use shell_exec to manually run agents or push to git servers."
-                            .to_string(),
-                    );
                     if let Some(img) = std::env::var("THAT_AGENT_IMAGE")
                         .ok()
                         .filter(|v| !v.trim().is_empty())
@@ -483,6 +494,9 @@ pub fn append_system_reminder(
         "skill_naming_determinism: When creating skills without a user-provided name, use deterministic kebab-case from capability phrase; for JSON formatting skills use `json-formatter`.".to_string(),
     ];
     reminder.extend(runtime_reminder_lines(sandbox, agent_name));
+    if let Some(status) = get_agent_status() {
+        reminder.push(format!("agent_status:\n{status}"));
+    }
     format!(
         "{task}\n\n<system-reminder>\n{}\n</system-reminder>",
         reminder.join("\n")

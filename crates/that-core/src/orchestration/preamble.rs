@@ -218,7 +218,7 @@ pub fn build_preamble(
              - **Persistent home**: /home/agent/.that-agent/\n\
              - **Agent home**: /home/agent/.that-agent/agents/{agent_name}/\n\
              - **Task workspace**: /workspace\n\
-             - **Key files**: `Soul.md`, `Agents.md`, `{agent_name}.toml` (auto-reloads on change)\n\
+             - **Key files**: `Soul.md`, `Agents.md`, `Status.md`, `{agent_name}.toml` (auto-reloads on change)\n\
              - Use `/workspace` for project/task files and generated artifacts you want in the visible work tree.\n\
              - Use your agent home for persistent identity, memory, tasks, plugins, and runtime-managed files.\n\
              - **Runtime metadata** delivered in `<system-reminder>` blocks at message time.\n\n\
@@ -236,7 +236,7 @@ pub fn build_preamble(
              - **Agent**: {agent_name} | **Workspace**: {workspace}\n\
              - **Persistent home**: ~/.that-agent/\n\
              - **Agent home**: ~/.that-agent/agents/{agent_name}/\n\
-             - **Key files**: `Soul.md`, `Agents.md`, `{agent_name}.toml` (auto-reloads on change)\n\
+             - **Key files**: `Soul.md`, `Agents.md`, `Status.md`, `{agent_name}.toml` (auto-reloads on change)\n\
              - Use the workspace for project/task files and generated artifacts you want in the visible work tree.\n\
              - Use your agent home for persistent identity, memory, tasks, plugins, and runtime-managed files.\n\
              - **Runtime metadata** delivered in `<system-reminder>` blocks at message time.\n\n\
@@ -263,7 +263,14 @@ pub fn build_preamble(
          editing source code and then rebuilding, restarting, or redeploying the agent. \
          Do not assume those changes are live until verified.\n\n\
          When uncertain about current capability, inspect your tool surface, plugin state, \
-         runtime reminders, and workspace files. Do not guess.\n\n",
+         runtime reminders, and workspace files. Do not guess.\n\n\
+         ### Status.md — Live Awareness\n\n\
+         `Status.md` is your self-maintained awareness file. Its content appears in every \
+         `<system-reminder>` as `agent_status:` so you always see it.\n\n\
+         Use `identity_update(file=\"Status.md\", content=\"...\")` to update it. Keep it concise. \
+         Track: active deployments and their URLs, spawned child agents, key capabilities you've \
+         discovered, and anything you need to remember across turns. Remove entries when they're \
+         no longer relevant. This is your live operational context — not a log.\n\n",
     );
 
     // ── 3. Tools Available — compiled (runtime-volatile fs/exec notes) ────────

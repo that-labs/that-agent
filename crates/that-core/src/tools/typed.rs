@@ -2194,6 +2194,10 @@ async fn dispatch_inner(
                 ),
             }
             .map_err(ToolError)?;
+            // Refresh the in-memory Status.md cache when the agent updates it.
+            if args.file == "Status.md" {
+                crate::orchestration::config::set_agent_status(Some(args.content.clone()));
+            }
             Ok(serde_json::json!({ "status": "ok", "file": args.file }))
         }
         // ── HTTP request tool ─────────────────────────────────────────────────
