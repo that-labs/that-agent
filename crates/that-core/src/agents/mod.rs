@@ -454,6 +454,23 @@ pub async fn run_ephemeral_agent_k8s(
         extra_env.push_str(&format!(
             "  GIT_REPO_URL: \"{git_url}\"\n  GIT_BRANCH: \"task/{safe_name}\"\n"
         ));
+        // Ensure bare repo exists on git-server
+        let git_pod_selector = "app.kubernetes.io/component=git-server";
+        let _ = tokio::process::Command::new("kubectl")
+            .args([
+                "exec",
+                "-n",
+                &ns,
+                &format!("-l{git_pod_selector}"),
+                "--",
+                "bash",
+                "-c",
+                "test -d /repos/workspace.git || \
+                 (git init --bare /repos/workspace.git && \
+                  git -C /repos/workspace.git config http.receivepack true)",
+            ])
+            .output()
+            .await;
         // Push current state to git-server via HTTP
         let _ = tokio::process::Command::new("git")
             .args([
@@ -811,12 +828,36 @@ pub async fn workspace_share(path: &str, repo_name: Option<&str>) -> Result<serd
 
     let repo_url = format!("{git_svc}/{name}.git");
 
+    // Create bare repo on git-server pod if it doesn't exist
+    let git_pod_selector = "app.kubernetes.io/component=git-server";
+    let _ = tokio::process::Command::new("kubectl")
+        .args([
+            "exec",
+            "-n",
+            &ns,
+            &format!("-l{git_pod_selector}"),
+            "--",
+            "bash",
+            "-c",
+            &format!(
+                "test -d /repos/{name}.git || \
+                 (git init --bare /repos/{name}.git && \
+                  git -C /repos/{name}.git config http.receivepack true)"
+            ),
+        ])
+        .output()
+        .await;
+
     // Push current state to git-server over HTTP
     let push = tokio::process::Command::new("git")
         .args(["-C", path, "push", &repo_url, "HEAD:main", "--force"])
         .output()
         .await?;
-    anyhow::ensure!(push.status.success(), "git push to git-server failed");
+    let push_stderr = String::from_utf8_lossy(&push.stderr);
+    anyhow::ensure!(
+        push.status.success(),
+        "git push to git-server failed: {push_stderr}"
+    );
 
     Ok(serde_json::json!({
         "name": name,
