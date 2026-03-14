@@ -124,6 +124,12 @@ pub struct WorkspaceFiles {
     /// The agent deletes this file after completing the ritual.
     /// Its absence signals the agent has moved from script to authentic presence.
     pub bootstrap: Option<String>,
+    /// `Status.md` — agent-writable live awareness context.
+    ///
+    /// Injected into the system reminder every turn. The agent maintains this file
+    /// to track active deployments, capabilities, and runtime state. Capped at 8000
+    /// chars (~2k tokens) on read. Updated via `identity_update(file="Status.md", ...)`.
+    pub status: Option<String>,
 }
 
 impl WorkspaceFiles {
@@ -155,15 +161,17 @@ pub fn load_all_local(agent_name: &str) -> WorkspaceFiles {
         if let Some(name) = entry.file_name().to_str() {
             match name {
                 "Soul.md" | "Identity.md" | "Agents.md" | "User.md" | "Tools.md" | "Memory.md"
-                | "Boot.md" | "Bootstrap.md" => match std::fs::read_to_string(entry.path()) {
-                    Ok(c) => {
-                        files.insert(name.to_string(), c);
+                | "Boot.md" | "Bootstrap.md" | "Status.md" => {
+                    match std::fs::read_to_string(entry.path()) {
+                        Ok(c) => {
+                            files.insert(name.to_string(), c);
+                        }
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                            warn!(path = %entry.path().display(), error = %e, "Failed to read workspace file");
+                        }
+                        _ => {}
                     }
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                        warn!(path = %entry.path().display(), error = %e, "Failed to read workspace file");
-                    }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -177,6 +185,7 @@ pub fn load_all_local(agent_name: &str) -> WorkspaceFiles {
         memory: files.remove("Memory.md"),
         boot: files.remove("Boot.md"),
         bootstrap: files.remove("Bootstrap.md"),
+        status: files.remove("Status.md").map(cap_status),
     }
 }
 
@@ -191,6 +200,17 @@ pub fn load_all_sandbox(container: &str, agent_name: &str) -> WorkspaceFiles {
         memory: read_sandbox(container, agent_name, "Memory.md"),
         boot: read_sandbox(container, agent_name, "Boot.md"),
         bootstrap: read_sandbox(container, agent_name, "Bootstrap.md"),
+        status: read_sandbox(container, agent_name, "Status.md").map(cap_status),
+    }
+}
+
+/// Cap Status.md content at ~2k tokens (8000 chars).
+fn cap_status(s: String) -> String {
+    const MAX_STATUS_CHARS: usize = 8000;
+    if s.len() <= MAX_STATUS_CHARS {
+        s
+    } else {
+        s.chars().take(MAX_STATUS_CHARS).collect::<String>() + "\n[truncated]"
     }
 }
 

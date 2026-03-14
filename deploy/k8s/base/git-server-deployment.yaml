@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: that-agent-git-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: that-agent
+      app.kubernetes.io/component: git-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: that-agent
+        app.kubernetes.io/component: git-server
+    spec:
+      containers:
+        - name: git-server
+          image: ghcr.io/that-labs/that-agent:latest
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              mkdir -p /repos
+              export GIT_PROJECT_ROOT=/repos
+              export GIT_HTTP_EXPORT_ALL=1
+              # Use git's built-in http-backend via a proper CGI wrapper
+              exec python3 -u <<'PYEOF'
+              import os, subprocess, sys
+              from http.server import HTTPServer, BaseHTTPRequestHandler
+              from urllib.parse import urlparse, parse_qs
+
+              GIT_HTTP_BACKEND = None
+              for p in ["/usr/lib/git-core/git-http-backend", "/usr/libexec/git-core/git-http-backend"]:
+                  if os.path.isfile(p):
+                      GIT_HTTP_BACKEND = p
+                      break
+              if not GIT_HTTP_BACKEND:
+                  print("FATAL: git-http-backend not found", file=sys.stderr)
+                  sys.exit(1)
+
+              class GitHandler(BaseHTTPRequestHandler):
+                  def run_backend(self):
+                      parsed = urlparse(self.path)
+                      env = os.environ.copy()
+                      env["REQUEST_METHOD"] = self.command
+                      env["PATH_INFO"] = parsed.path
+                      env["QUERY_STRING"] = parsed.query or ""
+                      env["GIT_PROJECT_ROOT"] = "/repos"
+                      env["GIT_HTTP_EXPORT_ALL"] = "1"
+                      content_type = self.headers.get("Content-Type", "")
+                      if content_type:
+                          env["CONTENT_TYPE"] = content_type
+                      content_length = self.headers.get("Content-Length", "")
+                      if content_length:
+                          env["CONTENT_LENGTH"] = content_length
+                      env["SERVER_PROTOCOL"] = "HTTP/1.1"
+                      env["REMOTE_ADDR"] = self.client_address[0]
+
+                      stdin_data = b""
+                      if content_length:
+                          stdin_data = self.rfile.read(int(content_length))
+
+                      proc = subprocess.run(
+                          [GIT_HTTP_BACKEND],
+                          env=env,
+                          input=stdin_data,
+                          capture_output=True,
+                      )
+                      output = proc.stdout
+                      # Parse CGI output: headers then body separated by \r\n\r\n or \n\n
+                      sep = b"\r\n\r\n" if b"\r\n\r\n" in output else b"\n\n"
+                      parts = output.split(sep, 1)
+                      headers_raw = parts[0].decode("utf-8", errors="replace")
+                      body = parts[1] if len(parts) > 1 else b""
+
+                      status_code = 200
+                      for line in headers_raw.split("\n"):
+                          line = line.strip()
+                          if line.lower().startswith("status:"):
+                              code_str = line.split(":", 1)[1].strip().split(" ")[0]
+                              status_code = int(code_str)
+                          elif ":" in line:
+                              key, val = line.split(":", 1)
+                              self.send_header(key.strip(), val.strip())
+
+                      self.send_response(status_code)
+                      self.end_headers()
+                      self.wfile.write(body)
+
+                  def do_GET(self):
+                      self.run_backend()
+                  def do_POST(self):
+                      self.run_backend()
+                  def log_message(self, format, *args):
+                      sys.stderr.write("%s - %s\n" % (self.client_address[0], format % args))
+
+              # Auto-init any repo directory that doesn't exist yet
+              print(f"git-http-backend: {GIT_HTTP_BACKEND}", file=sys.stderr)
+              print("Listening on 0.0.0.0:9418", file=sys.stderr)
+              HTTPServer(("0.0.0.0", 9418), GitHandler).serve_forever()
+              PYEOF
+          ports:
+            - containerPort: 9418
+              name: git-http
+          volumeMounts:
+            - name: git-repos
+              mountPath: /repos
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      volumes:
+        - name: git-repos
+          emptyDir:
+            sizeLimit: 4Gi

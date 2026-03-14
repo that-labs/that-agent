@@ -25,7 +25,7 @@ spec:
         fsGroupChangePolicy: OnRootMismatch
       containers:
         - name: that-agent
-          image: ghcr.io/that-labs/that-agent:v0.2.0
+          image: ghcr.io/that-labs/that-agent:latest
           imagePullPolicy: Always
           securityContext:
             runAsUser: 1000
@@ -38,8 +38,6 @@ spec:
                   fieldPath: metadata.namespace
             - name: THAT_K8S_SERVICE_ACCOUNT
               value: that-agent
-            - name: BUILDKIT_HOST
-              value: unix:///run/buildkit/buildkitd.sock
             - name: THAT_AGENT_PARENT
               valueFrom:
                 configMapKeyRef:
@@ -62,11 +60,6 @@ spec:
               mountPath: /home/agent/.that-agent
             - name: workspace
               mountPath: /workspace
-            - name: buildkit-socket
-              mountPath: /run/buildkit
-            - name: buildkit-bin
-              mountPath: /opt/buildkit/bin
-              readOnly: true
             - name: entrypoint-script
               mountPath: /opt/that/bootstrap
               readOnly: true
@@ -88,105 +81,12 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
-        - name: buildkit-daemon
-          image: moby/buildkit:v0.25.1-rootless
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 1000
-            runAsGroup: 1000
-            allowPrivilegeEscalation: true
-            seccompProfile:
-              type: Unconfined
-            appArmorProfile:
-              type: Unconfined
-          command: ["/bin/sh", "-lc"]
-          args:
-            - |
-              set -euo pipefail
-              REGISTRY="${THAT_SANDBOX_K8S_REGISTRY:-}"
-              PUSH_REGISTRY="${THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT:-${REGISTRY}}"
-              BUILDKIT_GC_KEEPSTORAGE_MB="${BUILDKIT_GC_KEEPSTORAGE_MB:-4096}"
-              BUILDKITD_CFG="/home/user/.config/buildkit/buildkitd.toml"
-              mkdir -p "$(dirname "${BUILDKITD_CFG}")"
-              mkdir -p /opt/buildkit/bin
-              if [ -x /usr/bin/buildctl ]; then
-                cp -f /usr/bin/buildctl /opt/buildkit/bin/buildctl
-                chmod 0755 /opt/buildkit/bin/buildctl
-              fi
-              if command -v rootlesskit >/dev/null 2>&1; then
-                BUILDKIT_LAUNCHER="rootlesskit buildkitd"
-              else
-                BUILDKIT_LAUNCHER="buildkitd"
-              fi
-              if [ -n "${REGISTRY}" ] || [ -n "${PUSH_REGISTRY}" ]; then
-                : > "${BUILDKITD_CFG}"
-                if [ -n "${REGISTRY}" ]; then
-                  printf '[registry."%s"]\n  http = true\n  insecure = true\n' "${REGISTRY}" >> "${BUILDKITD_CFG}"
-                fi
-                if [ -n "${PUSH_REGISTRY}" ] && [ "${PUSH_REGISTRY}" != "${REGISTRY}" ]; then
-                  printf '[registry."%s"]\n  http = true\n  insecure = true\n' "${PUSH_REGISTRY}" >> "${BUILDKITD_CFG}"
-                fi
-                exec ${BUILDKIT_LAUNCHER} \
-                  --config "${BUILDKITD_CFG}" \
-                  --addr unix:///run/buildkit/buildkitd.sock \
-                  --oci-worker-gc \
-                  --oci-worker-gc-keepstorage "${BUILDKIT_GC_KEEPSTORAGE_MB}" \
-                  --oci-worker-no-process-sandbox
-              fi
-              exec ${BUILDKIT_LAUNCHER} \
-                --addr unix:///run/buildkit/buildkitd.sock \
-                --oci-worker-gc \
-                --oci-worker-gc-keepstorage "${BUILDKIT_GC_KEEPSTORAGE_MB}" \
-                --oci-worker-no-process-sandbox
-          env:
-            - name: THAT_SANDBOX_K8S_REGISTRY
-              valueFrom:
-                configMapKeyRef:
-                  name: that-agent-config
-                  key: THAT_SANDBOX_K8S_REGISTRY
-            - name: THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT
-              valueFrom:
-                configMapKeyRef:
-                  name: that-agent-config
-                  key: THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT
-            - name: OTEL_SDK_DISABLED
-              value: "true"
-            - name: BUILDKIT_GC_KEEPSTORAGE_MB
-              valueFrom:
-                configMapKeyRef:
-                  name: that-agent-config
-                  key: THAT_BUILDKIT_GC_KEEPSTORAGE_MB
-                  optional: true
-          readinessProbe:
-            exec:
-              command: ["/bin/sh", "-lc", "buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1"]
-            initialDelaySeconds: 5
-            periodSeconds: 5
-          livenessProbe:
-            exec:
-              command: ["/bin/sh", "-lc", "buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1"]
-            initialDelaySeconds: 15
-            periodSeconds: 10
-          volumeMounts:
-            - name: buildkit-socket
-              mountPath: /run/buildkit
-            - name: buildkit-bin
-              mountPath: /opt/buildkit/bin
-            - name: buildkit-state
-              mountPath: /home/user/.local/share/buildkit
       volumes:
         - name: agent-home
           persistentVolumeClaim:
             claimName: that-agent-home
         - name: workspace
           emptyDir: {}
-        - name: buildkit-socket
-          emptyDir: {}
-        - name: buildkit-bin
-          emptyDir: {}
-        - name: buildkit-state
-          emptyDir:
-            sizeLimit: 8Gi
         - name: entrypoint-script
           configMap:
             name: that-agent-entrypoint

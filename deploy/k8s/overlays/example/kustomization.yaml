@@ -12,6 +12,5 @@ patches:
   - path: patch-configmap.yaml
 
 images:
-  - name: that-agent
-    newName: ghcr.io/that-labs/that-agent
+  - name: ghcr.io/that-labs/that-agent
     newTag: v0.2.0

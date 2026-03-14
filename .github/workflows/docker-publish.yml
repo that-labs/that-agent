@@ -48,7 +48,7 @@ jobs:
             /usr/local/cargo/registry
             /usr/local/cargo/git
             target
-          key: cargo-bookworm-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-bookworm-v2-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-bookworm-${{ matrix.target }}-
 

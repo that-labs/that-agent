@@ -21,6 +21,17 @@ The base kustomization applies `that-agent/managed: "true"` to all resources.
 For multi-agent deployments, child agent overlays should patch in hierarchy labels
 so you can query agents by parent or role.
 
+When the parent agent spawns children via `spawn_agent` or `agent_run`, it
+automatically applies these labels to all child resources:
+
+```
+that-agent/managed: "true"
+that-agent/name: "<child-name>"
+that-agent/parent: "<parent-name>"
+that-agent/type: "persistent" | "ephemeral"
+that-agent/role: "<role>"
+```
+
 ### Setting Hierarchy Labels in Overlays
 
 Create a patch file in your child agent overlay to add parent and role labels:
@@ -69,6 +80,10 @@ kubectl get pods -l that-agent/parent=<parent-agent-name>
 # List all agents with a specific role
 kubectl get pods -l that-agent/role=<role>
 
-# Combine selectors
-kubectl get pods -l that-agent/parent=<parent-agent-name>,that-agent/role=<role>
+# List all persistent vs ephemeral agents
+kubectl get deployments,jobs -l that-agent/type=persistent
+kubectl get jobs -l that-agent/type=ephemeral
+
+# Clean up a specific child's resources
+kubectl delete deployment,service,job,sa,rolebinding,configmap -l that-agent/name=<child-name>
 ```

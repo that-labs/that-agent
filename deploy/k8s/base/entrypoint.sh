@@ -87,11 +87,16 @@ export THAT_K8S_REGISTRY_PUSH_ENDPOINT="${REGISTRY_PUSH}"
 PROBE_DIR="$(mktemp -d)"
 trap 'rm -rf "${PROBE_DIR}"' EXIT
 
-# ── Probe: BuildKit sidecar ─────────────────────────────────────────
+# ── Probe: BuildKit (sidecar or service) ──────────────────────────────
 probe_buildkit() {
-  local addr="${BUILDKIT_HOST:-unix:///run/buildkit/buildkitd.sock}"
+  local addr="${BUILDKIT_HOST:-}"
   local wait="${THAT_BUILDKIT_WAIT_SECONDS:-20}"
   if ! command -v buildctl >/dev/null 2>&1; then
+    echo "false" > "${PROBE_DIR}/buildkit"
+    return
+  fi
+  # No BUILDKIT_HOST set — no sidecar, no service configured. Skip.
+  if [ -z "${addr}" ]; then
     echo "false" > "${PROBE_DIR}/buildkit"
     return
   fi

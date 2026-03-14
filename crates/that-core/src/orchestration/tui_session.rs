@@ -1260,6 +1260,7 @@ pub async fn execute_agent_run_tui(
                 router: None,
                 state_dir: dirs::home_dir()
                     .map(|h| h.join(".that-agent").join("agents").join(&agent.name)),
+                agent_name: agent.name.clone(),
             },
             images: vec![],
             steering: steering.clone(),

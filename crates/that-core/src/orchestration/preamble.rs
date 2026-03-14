@@ -218,7 +218,7 @@ pub fn build_preamble(
              - **Persistent home**: /home/agent/.that-agent/\n\
              - **Agent home**: /home/agent/.that-agent/agents/{agent_name}/\n\
              - **Task workspace**: /workspace\n\
-             - **Key files**: `Soul.md`, `Agents.md`, `{agent_name}.toml` (auto-reloads on change)\n\
+             - **Key files**: `Soul.md`, `Agents.md`, `Status.md`, `{agent_name}.toml` (auto-reloads on change)\n\
              - Use `/workspace` for project/task files and generated artifacts you want in the visible work tree.\n\
              - Use your agent home for persistent identity, memory, tasks, plugins, and runtime-managed files.\n\
              - **Runtime metadata** delivered in `<system-reminder>` blocks at message time.\n\n\
@@ -236,7 +236,7 @@ pub fn build_preamble(
              - **Agent**: {agent_name} | **Workspace**: {workspace}\n\
              - **Persistent home**: ~/.that-agent/\n\
              - **Agent home**: ~/.that-agent/agents/{agent_name}/\n\
-             - **Key files**: `Soul.md`, `Agents.md`, `{agent_name}.toml` (auto-reloads on change)\n\
+             - **Key files**: `Soul.md`, `Agents.md`, `Status.md`, `{agent_name}.toml` (auto-reloads on change)\n\
              - Use the workspace for project/task files and generated artifacts you want in the visible work tree.\n\
              - Use your agent home for persistent identity, memory, tasks, plugins, and runtime-managed files.\n\
              - **Runtime metadata** delivered in `<system-reminder>` blocks at message time.\n\n\
@@ -263,7 +263,14 @@ pub fn build_preamble(
          editing source code and then rebuilding, restarting, or redeploying the agent. \
          Do not assume those changes are live until verified.\n\n\
          When uncertain about current capability, inspect your tool surface, plugin state, \
-         runtime reminders, and workspace files. Do not guess.\n\n",
+         runtime reminders, and workspace files. Do not guess.\n\n\
+         ### Status.md — Live Awareness\n\n\
+         `Status.md` is your self-maintained awareness file. Its content appears in every \
+         `<system-reminder>` as `agent_status:` so you always see it.\n\n\
+         Use `identity_update(file=\"Status.md\", content=\"...\")` to update it. Keep it concise. \
+         Track: active deployments and their URLs, spawned child agents, key capabilities you've \
+         discovered, and anything you need to remember across turns. Remove entries when they're \
+         no longer relevant. This is your live operational context — not a log.\n\n",
     );
 
     // ── 3. Tools Available — compiled (runtime-volatile fs/exec notes) ────────
@@ -500,11 +507,54 @@ pub fn build_preamble(
 
     // ── 11.5. Orchestration — multi-agent coordination tools ──────────────────
     //
-    // Inform the agent about worktree-based orchestration capabilities so it
-    // knows it can coordinate parallel work across agents.
+    // Mode-aware: K8s mode uses pod-based orchestration, local mode uses worktrees.
 
-    preamble.push_str(
-        "## Orchestration\n\n\
+    let is_k8s = matches!(
+        std::env::var("THAT_SANDBOX_MODE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "k8s" | "kubernetes"
+    );
+
+    if is_k8s {
+        preamble.push_str(
+            "## Orchestration — Multi-Agent (Kubernetes)\n\n\
+             You can delegate work to child agents running as separate pods in your namespace.\n\n\
+             ### Two patterns for delegation\n\n\
+             **Persistent agents** — long-running services you can query repeatedly:\n\
+             - `spawn_agent(name, role)` → creates a Deployment + Service\n\
+             - `agent_query(name, message)` → synchronous request/response via gateway\n\
+             - `agent_unregister(name)` → tear down when no longer needed\n\
+             - Use for: coordinators, channel listeners, always-on workers\n\n\
+             **Ephemeral agents** — one-off tasks that run and return results:\n\
+             - `agent_run(name, task, role?)` → blocks until done, returns result\n\
+             - Call multiple `agent_run` in parallel for fan-out work\n\
+             - Workers see their progress notifications on your channel\n\
+             - Use for: analysis tasks, batch processing, parallel research\n\n\
+             ### When to delegate\n\
+             - When the user asks you to delegate or use workers: ALWAYS use agent_run\n\
+             - When you need parallel work on independent subtasks: fan out with agent_run\n\
+             - When you need a long-running service or collaborator: spawn_agent\n\
+             - Only do work yourself if it's a single quick lookup or the user explicitly says so\n\
+             - NEVER simulate agent_run with shell_exec — use the actual tool\n\n\
+             ### Progress visibility\n\
+             - Ephemeral workers POST progress to your gateway — these appear on the channel\n\
+             - Persistent agents can be queried for status at any time\n\n\
+             ### Coding tasks — sharing code with workers\n\
+             - `workspace_share(path)` → pushes a git repo to the in-cluster git server\n\
+             - `agent_run(name, task, workspace=true)` → worker clones the shared repo\n\
+             - `workspace_collect(path, worker)` → merge worker's changes back\n\
+             - Workers push to their own task branch — no conflicts between parallel workers\n\n\
+             ### Limitations\n\
+             - Children cannot spawn their own sub-agents (restricted RBAC)\n\
+             - Ephemeral agents have resource limits\n\
+             - Children share your API keys but have separate memory stores\n\n",
+        );
+    } else {
+        preamble.push_str(
+            "## Orchestration\n\n\
          You have access to git worktree tools for coordinating parallel work:\n\
          - `worktree_create` — create an isolated branch for a named agent\n\
          - `worktree_list` — list all active agent worktrees\n\
@@ -565,26 +615,48 @@ pub fn build_preamble(
          `{\"text\": \"<response>\"}` back to your `callback_url`.\n\n\
          Use `/v1/notify` for progress updates. Use `/v1/inbound` + `callback_url` only \
          when you genuinely need the parent to reason and respond.\n\n",
-    );
+        );
+    }
 
     // ── 11.6. Agent Hierarchy — parent/child context ─────────────────────────
     if let Some(parent) = &agent.parent {
-        preamble.push_str(&format!(
-            "### Agent Hierarchy\n\
-             - **Parent agent**: {parent}\n\
-             - You were spawned by your parent to handle a specific task or domain.\n\
-             - Focus on your assigned scope. Report results back via your channel.\n\
-             - `$THAT_PARENT_GATEWAY_URL` — your parent's HTTP gateway base URL\n\
-             - `$THAT_PARENT_GATEWAY_TOKEN` — bearer token for that gateway (if auth is on)\n\
-             - Use `POST $THAT_PARENT_GATEWAY_URL/v1/notify` for status updates (zero-cost, \
-             no LLM turn on the parent side, batched into the next heartbeat).\n\
-             - Use `POST $THAT_PARENT_GATEWAY_URL/v1/inbound` with a `callback_url` when \
-             you need the parent to reason and reply asynchronously.\n"
-        ));
+        if is_k8s {
+            preamble.push_str(&format!(
+                "### Agent Hierarchy\n\
+                 - **Parent agent**: {parent}\n\
+                 - You were spawned by your parent to handle a specific task or domain\n\
+                 - Report progress via POST to $THAT_PARENT_GATEWAY_URL/v1/notify\n\
+                 - Focus on your assigned scope and report results\n\
+                 - You cannot spawn sub-agents of your own\n"
+            ));
+        } else {
+            preamble.push_str(&format!(
+                "### Agent Hierarchy\n\
+                 - **Parent agent**: {parent}\n\
+                 - You were spawned by your parent to handle a specific task or domain.\n\
+                 - Focus on your assigned scope. Report results back via your channel.\n\
+                 - `$THAT_PARENT_GATEWAY_URL` — your parent's HTTP gateway base URL\n\
+                 - `$THAT_PARENT_GATEWAY_TOKEN` — bearer token for that gateway (if auth is on)\n\
+                 - Use `POST $THAT_PARENT_GATEWAY_URL/v1/notify` for status updates (zero-cost, \
+                 no LLM turn on the parent side, batched into the next heartbeat).\n\
+                 - Use `POST $THAT_PARENT_GATEWAY_URL/v1/inbound` with a `callback_url` when \
+                 you need the parent to reason and reply asynchronously.\n"
+            ));
+        }
         if let Some(role) = &agent.role {
             preamble.push_str(&format!("- **Your role**: {role}\n"));
         }
         preamble.push('\n');
+    } else if is_k8s {
+        preamble.push_str(
+            "### Agent Hierarchy\n\
+             You are a root agent running in Kubernetes.\n\
+             - Use `spawn_agent` for persistent child agents and `agent_run` for ephemeral tasks\n\
+             - Children automatically receive your gateway URL for notifications\n\
+             - Children run in the same namespace with restricted permissions\n\
+             - Use `agent_list` to see all your children and their status\n\
+             - Use `agent_unregister` to clean up persistent children when done\n\n",
+        );
     } else {
         preamble.push_str(
             "### Agent Hierarchy\n\

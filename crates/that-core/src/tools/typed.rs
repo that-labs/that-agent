@@ -1132,23 +1132,41 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         // ── Multi-agent lifecycle tools ───────────────────────────────────────
         ToolDef {
             name: "spawn_agent".into(),
-            description: "Spawn a named sub-agent process in the background. The child agent runs \
-                independently and registers itself in the cluster. Returns the PID and gateway URL.".into(),
+            description: "Spawn a persistent sub-agent. In K8s mode creates a Deployment + Service; \
+                locally forks a background process. Returns the gateway URL for querying.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Unique name for the sub-agent" },
                     "role": { "type": "string", "description": "Optional role description" },
-                    "gateway_port": { "type": "integer", "description": "Port for the child agent's HTTP gateway" },
+                    "gateway_port": { "type": "integer", "description": "Port for the child agent's HTTP gateway (local mode only)" },
                     "model": { "type": "string", "description": "Optional model override for the child agent" }
                 },
                 "required": ["name"]
             }),
         },
         ToolDef {
+            name: "agent_run".into(),
+            description: "Run an ephemeral task agent. Blocks until the task completes and returns \
+                the result. Call multiple agent_run in parallel for fan-out work. In K8s mode runs \
+                as a Job; locally runs as a foreground process.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Unique worker name" },
+                    "role": { "type": "string", "description": "Optional role description for the worker" },
+                    "task": { "type": "string", "description": "The task for the worker to execute" },
+                    "model": { "type": "string", "description": "Optional model override" },
+                    "workspace": { "type": "boolean", "description": "If true, share the current git workspace with the worker (default: false)" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 300)" }
+                },
+                "required": ["name", "task"]
+            }),
+        },
+        ToolDef {
             name: "agent_list".into(),
-            description: "List all registered agents in the cluster with their role, gateway URL, \
-                and liveness status.".into(),
+            description: "List all agents — persistent Deployments and ephemeral Jobs — with their \
+                role, gateway URL, and status.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {}
@@ -1156,8 +1174,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "agent_query".into(),
-            description: "Send a message to a named peer agent and return its response. \
-                The target agent must have a gateway URL registered in the cluster.".into(),
+            description: "Send a message to a persistent agent and return its response. \
+                Only works for agents with a gateway (persistent, not ephemeral).".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1166,6 +1184,45 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 60)" }
                 },
                 "required": ["name", "message"]
+            }),
+        },
+        ToolDef {
+            name: "agent_unregister".into(),
+            description: "Remove a child agent and all its resources. In K8s mode uses label-scoped \
+                deletion; locally removes the registry entry and kills the process.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the agent to remove" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDef {
+            name: "workspace_share".into(),
+            description: "Share a local git repository with sub-agents via the in-cluster git server. \
+                Workers can clone this workspace for coding tasks. Call before agent_run with workspace param.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to a git repo to share" },
+                    "name": { "type": "string", "description": "Optional repo name (defaults to folder basename)" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "workspace_collect".into(),
+            description: "Merge or review a worker's code changes back into your local workspace. \
+                Call after agent_run completes for coding tasks.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Local working tree to merge into" },
+                    "worker": { "type": "string", "description": "Worker name whose branch to merge" },
+                    "strategy": { "type": "string", "description": "\"merge\" (default) or \"review\" (diff only, no merge)" }
+                },
+                "required": ["path", "worker"]
             }),
         },
     ]
@@ -2137,6 +2194,10 @@ async fn dispatch_inner(
                 ),
             }
             .map_err(ToolError)?;
+            // Refresh the in-memory Status.md cache when the agent updates it.
+            if args.file == "Status.md" {
+                crate::orchestration::config::set_agent_status(Some(args.content.clone()));
+            }
             Ok(serde_json::json!({ "status": "ok", "file": args.file }))
         }
         // ── HTTP request tool ─────────────────────────────────────────────────
@@ -2180,47 +2241,137 @@ async fn dispatch_inner(
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
-                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
-            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
             let parent = resolve_agent_name(config, skill_roots, None);
-            let entry = crate::agents::spawn_agent(
-                &args.name,
-                args.role.as_deref(),
-                parent.as_deref(),
-                args.gateway_port,
-                args.model.as_deref(),
-                &reg,
-            )
-            .await
-            .map_err(|e| ToolError(e.to_string()))?;
-            Ok(serde_json::json!({
-                "name": entry.name,
-                "pid": entry.pid,
-                "gateway_url": entry.gateway_url,
-                "started_at": entry.started_at,
-            }))
+            if crate::agents::is_k8s_mode() {
+                crate::agents::spawn_persistent_agent_k8s(
+                    &args.name,
+                    args.role.as_deref(),
+                    parent.as_deref().unwrap_or("root"),
+                    args.model.as_deref(),
+                )
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+            } else {
+                let cluster_dir =
+                    crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                        .ok_or_else(|| {
+                            ToolError("Cannot derive cluster dir from memory path".into())
+                        })?;
+                let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+                let entry = crate::agents::spawn_agent(
+                    &args.name,
+                    args.role.as_deref(),
+                    parent.as_deref(),
+                    args.gateway_port,
+                    args.model.as_deref(),
+                    &reg,
+                )
+                .await
+                .map_err(|e| ToolError(e.to_string()))?;
+                Ok(serde_json::json!({
+                    "name": entry.name,
+                    "pid": entry.pid,
+                    "gateway_url": entry.gateway_url,
+                    "started_at": entry.started_at,
+                }))
+            }
+        }
+        "agent_run" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                role: Option<String>,
+                task: String,
+                model: Option<String>,
+                workspace: Option<bool>,
+                timeout_secs: Option<u64>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let parent =
+                resolve_agent_name(config, skill_roots, None).unwrap_or_else(|| "root".to_string());
+            if crate::agents::is_k8s_mode() {
+                crate::agents::run_ephemeral_agent_k8s(
+                    &args.name,
+                    args.role.as_deref(),
+                    &args.task,
+                    &parent,
+                    args.model.as_deref(),
+                    args.workspace.unwrap_or(false),
+                    args.timeout_secs.unwrap_or(300),
+                )
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+            } else {
+                // Local mode: run as a foreground query process
+                let binary = std::env::current_exe()
+                    .map_err(|e| ToolError(format!("cannot find binary: {e}")))?;
+                let timeout = args.timeout_secs.unwrap_or(300);
+                let mut cmd = tokio::process::Command::new(&binary);
+                cmd.arg("--agent")
+                    .arg(&args.name)
+                    .arg("run")
+                    .arg("query")
+                    .arg("--task")
+                    .arg(&args.task);
+                if let Some(ref role) = args.role {
+                    cmd.arg("--role").arg(role);
+                }
+                cmd.env(
+                    "THAT_PARENT_GATEWAY_URL",
+                    crate::orchestration::support::resolve_gateway_url(),
+                );
+                if let Ok(tok) = std::env::var("THAT_GATEWAY_TOKEN") {
+                    cmd.env("THAT_PARENT_GATEWAY_TOKEN", tok);
+                }
+                let start = std::time::Instant::now();
+                let output = tokio::time::timeout(Duration::from_secs(timeout), cmd.output())
+                    .await
+                    .map_err(|_| ToolError(format!("agent_run timed out after {timeout}s")))?
+                    .map_err(|e| ToolError(e.to_string()))?;
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let status = if output.status.success() {
+                    "succeeded"
+                } else {
+                    "failed"
+                };
+                Ok(serde_json::json!({
+                    "name": args.name,
+                    "status": status,
+                    "output": stdout,
+                    "elapsed_secs": start.elapsed().as_secs(),
+                }))
+            }
         }
         "agent_list" => {
-            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
-                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
-            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
-            let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
-            let agents: Vec<serde_json::Value> = entries
-                .iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "name": e.name,
-                        "role": e.role,
-                        "parent": e.parent,
-                        "pid": e.pid,
-                        "gateway_url": e.gateway_url,
-                        "started_at": e.started_at,
-                        "alive": crate::agents::AgentRegistry::is_alive(e.pid),
+            if crate::agents::is_k8s_mode() {
+                crate::agents::list_agents_k8s()
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))
+            } else {
+                let cluster_dir =
+                    crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                        .ok_or_else(|| {
+                            ToolError("Cannot derive cluster dir from memory path".into())
+                        })?;
+                let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+                let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
+                let agents: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "name": e.name,
+                            "role": e.role,
+                            "parent": e.parent,
+                            "pid": e.pid,
+                            "gateway_url": e.gateway_url,
+                            "started_at": e.started_at,
+                            "alive": crate::agents::AgentRegistry::is_alive(e.pid),
+                        })
                     })
-                })
-                .collect();
-            Ok(serde_json::json!({ "agents": agents }))
+                    .collect();
+                Ok(serde_json::json!({ "agents": agents }))
+            }
         }
         "agent_query" => {
             #[derive(Deserialize)]
@@ -2231,23 +2382,89 @@ async fn dispatch_inner(
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
-                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
-            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
-            let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
-            let entry = entries
-                .iter()
-                .find(|e| e.name == args.name)
-                .ok_or_else(|| ToolError(format!("agent '{}' not found in registry", args.name)))?;
-            let gw = entry
-                .gateway_url
-                .as_deref()
-                .ok_or_else(|| ToolError(format!("agent '{}' has no gateway URL", args.name)))?;
-            let resp =
-                crate::agents::query_agent(gw, &args.message, args.timeout_secs.unwrap_or(60))
+            if crate::agents::is_k8s_mode() {
+                crate::agents::query_agent_k8s(
+                    &args.name,
+                    &args.message,
+                    args.timeout_secs.unwrap_or(60),
+                )
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+            } else {
+                let cluster_dir =
+                    crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                        .ok_or_else(|| {
+                            ToolError("Cannot derive cluster dir from memory path".into())
+                        })?;
+                let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+                let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
+                let entry = entries
+                    .iter()
+                    .find(|e| e.name == args.name)
+                    .ok_or_else(|| {
+                        ToolError(format!("agent '{}' not found in registry", args.name))
+                    })?;
+                let gw = entry.gateway_url.as_deref().ok_or_else(|| {
+                    ToolError(format!("agent '{}' has no gateway URL", args.name))
+                })?;
+                let resp =
+                    crate::agents::query_agent(gw, &args.message, args.timeout_secs.unwrap_or(60))
+                        .await
+                        .map_err(|e| ToolError(e.to_string()))?;
+                Ok(serde_json::json!({ "agent": args.name, "response": resp }))
+            }
+        }
+        "agent_unregister" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            if crate::agents::is_k8s_mode() {
+                crate::agents::unregister_agent_k8s(&args.name)
                     .await
+                    .map_err(|e| ToolError(e.to_string()))
+            } else {
+                let cluster_dir =
+                    crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                        .ok_or_else(|| {
+                            ToolError("Cannot derive cluster dir from memory path".into())
+                        })?;
+                let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+                reg.unregister(&args.name)
                     .map_err(|e| ToolError(e.to_string()))?;
-            Ok(serde_json::json!({ "agent": args.name, "response": resp }))
+                Ok(serde_json::json!({ "name": args.name, "status": "unregistered" }))
+            }
+        }
+        "workspace_share" => {
+            #[derive(Deserialize)]
+            struct Args {
+                path: String,
+                name: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::workspace_share(&args.path, args.name.as_deref())
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+        }
+        "workspace_collect" => {
+            #[derive(Deserialize)]
+            struct Args {
+                path: String,
+                worker: String,
+                strategy: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::workspace_collect(
+                &args.path,
+                &args.worker,
+                args.strategy.as_deref().unwrap_or("merge"),
+            )
+            .await
+            .map_err(|e| ToolError(e.to_string()))
         }
         other => Err(ToolError(format!("unknown tool: {other}"))),
     }
@@ -2432,6 +2649,7 @@ mod tests {
             router: None,
             route_registry: None,
             state_dir: None,
+            agent_name: String::new(),
         }
     }
 

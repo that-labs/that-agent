@@ -89,6 +89,8 @@ pub struct ToolContext {
     pub route_registry: Option<std::sync::Arc<that_channels::DynamicRouteRegistry>>,
     /// Agent state directory for audit logging. When `None`, audit is silently skipped.
     pub state_dir: Option<std::path::PathBuf>,
+    /// Agent name for structured run logging.
+    pub agent_name: String,
 }
 
 /// All parameters for a single `run()` invocation.
@@ -164,6 +166,19 @@ async fn run_from_checkpoint(
     mut messages: Vec<Message>,
     hook: &dyn LoopHook,
 ) -> std::result::Result<(String, Usage), InterruptedRun> {
+    // Log the user request to the structured run log.
+    if let Some(ref sd) = config.tool_ctx.state_dir {
+        let task = messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        crate::audit::log_run_event(sd, &config.tool_ctx.agent_name, "Input", "agent_loop", task);
+    }
+
     let mut total_usage = Usage::default();
     let mut pending_edit_verification: HashMap<String, String> = HashMap::new();
     let openai_session: Option<Arc<Mutex<openai::OpenAiWsState>>> =
@@ -334,6 +349,15 @@ async fn run_from_checkpoint(
                 )));
                 continue;
             }
+            if let Some(ref sd) = config.tool_ctx.state_dir {
+                crate::audit::log_run_event(
+                    sd,
+                    &config.tool_ctx.agent_name,
+                    "Output",
+                    "agent_loop",
+                    &text,
+                );
+            }
             return Ok((text, total_usage));
         }
 
@@ -353,8 +377,14 @@ async fn run_from_checkpoint(
             );
 
             if let Some(ref sd) = config.tool_ctx.state_dir {
-                let args_short: String = tc.args_json.chars().take(120).collect();
-                crate::audit::log_event(sd, "tool_call", &format!("{}: {args_short}", tc.name));
+                crate::audit::log_event(sd, "tool_call", &format!("{}: {}", tc.name, tc.args_json));
+                crate::audit::log_run_event(
+                    sd,
+                    &config.tool_ctx.agent_name,
+                    "ToolCall",
+                    "agent_loop",
+                    &format!("{} {}", tc.name, tc.args_json),
+                );
             }
 
             let tool_span = info_span!(
@@ -436,15 +466,23 @@ async fn run_from_checkpoint(
             let is_error = is_tool_error_result(&result);
             if is_error {
                 if let Some(ref sd) = config.tool_ctx.state_dir {
-                    crate::audit::log_error(
-                        sd,
-                        &tc.name,
-                        &result.chars().take(500).collect::<String>(),
-                        &tc.args_json,
-                    );
+                    crate::audit::log_error(sd, &tc.name, &result, &tc.args_json);
                 }
             }
             let result_chars = result.chars().count();
+            if let Some(ref sd) = config.tool_ctx.state_dir {
+                let status = if is_error { "error" } else { "ok" };
+                crate::audit::log_run_event(
+                    sd,
+                    &config.tool_ctx.agent_name,
+                    "ToolResult",
+                    "agent_loop",
+                    &format!(
+                        "{} ({}, {} chars) {}",
+                        tc.name, status, result_chars, &result
+                    ),
+                );
+            }
             let status_str = if is_error {
                 let snippet = compact_oneliner(&result, 60);
                 format!("ERR  {snippet}")

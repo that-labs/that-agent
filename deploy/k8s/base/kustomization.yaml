@@ -4,15 +4,26 @@ kind: Kustomization
 resources:
   - serviceaccount.yaml
   - role.yaml
+  - role-child-readonly.yaml
+  - role-child-sandbox.yaml
   - rolebinding.yaml
   - clusterrole.yaml
   - clusterrolebinding.yaml
+  - network-policy.yaml
   - pvc.yaml
   - configmap.yaml
   - gateway-service.yaml
-  - phoenix-service.yaml
-  - phoenix-deployment.yaml
   - deployment.yaml
+  # Uncomment to enable Phoenix observability (heavy — ~512Mi memory)
+  # - phoenix-deployment.yaml
+  # - phoenix-service.yaml
+  # Infrastructure pods — each is independent, remove lines to exclude
+  - buildkit-deployment.yaml
+  - buildkit-service.yaml
+  - git-server-deployment.yaml
+  - git-server-service.yaml
+  - cache-proxy-deployment.yaml
+  - cache-proxy-service.yaml
 
 configMapGenerator:
   - name: that-agent-entrypoint
