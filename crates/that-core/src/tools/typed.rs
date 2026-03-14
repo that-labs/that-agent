@@ -795,9 +795,19 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "list_skills".into(),
+            description: "List all available skills with their names, descriptions, and reference files. \
+                Use this to discover what skills are available before loading one with read_skill. \
+                Do NOT use shell_exec to list the skills directory.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
             name: "read_skill".into(),
             description: "Read a skill's documentation from the host skills directory. \
-                Call this when a skill listed in the preamble is relevant to the current task — \
+                Call this when a skill listed in the preamble or from list_skills is relevant to the current task — \
                 it returns the full instructions and lists any reference files available for deeper detail. \
                 This is the correct way to load skill content; do NOT use the bash tool to read skill files.".into(),
             parameters: serde_json::json!({
@@ -1747,6 +1757,7 @@ async fn dispatch_inner(
         "shell_exec" => dispatch_shell_exec(args_json, config, container)
             .await
             .map(|o| serde_json::to_value(o).unwrap_or_default()),
+        "list_skills" => super::skill::dispatch_list_skills(skill_roots).await,
         "read_skill" => super::skill::dispatch_read_skill(args_json, skill_roots).await,
         "read_plugin" => {
             let args: ReadPluginArgs = serde_json::from_str(args_json)

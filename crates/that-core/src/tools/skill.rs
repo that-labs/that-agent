@@ -188,6 +188,42 @@ fn resolve_skill_dir(
     None
 }
 
+/// Dispatch a `list_skills` tool call — returns all discovered skills with name and description.
+pub async fn dispatch_list_skills(
+    skill_roots: &[PathBuf],
+) -> Result<serde_json::Value, crate::tools::typed::ToolError> {
+    let tool = ReadSkillTool::new_with_roots(skill_roots.to_vec());
+    let mut skills = Vec::new();
+
+    for (_key, dir) in tool.skill_index.iter() {
+        let skill_file = dir.join("SKILL.md");
+        let Ok(content) = std::fs::read_to_string(&skill_file) else {
+            continue;
+        };
+        let (name, description, _meta) = match crate::skills::parse_frontmatter(&content) {
+            Some(parsed) => parsed,
+            None => continue,
+        };
+        let references = list_skill_files(dir)
+            .into_iter()
+            .filter(|f| f != "SKILL.md")
+            .collect::<Vec<_>>();
+        skills.push(serde_json::json!({
+            "name": name,
+            "description": description,
+            "references": references,
+        }));
+    }
+
+    skills.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["name"].as_str().unwrap_or(""))
+    });
+    Ok(serde_json::json!({ "skills": skills }))
+}
+
 fn sanitize_relative_path(path: &str) -> Result<&Path, String> {
     let rel = Path::new(path);
     if rel.is_absolute() {
