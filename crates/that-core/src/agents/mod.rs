@@ -831,6 +831,121 @@ pub async fn unregister_agent_k8s(name: &str) -> Result<serde_json::Value> {
     Ok(serde_json::json!({ "name": name, "status": "unregistered" }))
 }
 
+/// Stop a child agent — delete its Job/Deployment and all associated resources.
+pub async fn agent_stop_k8s(name: &str) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    kubectl_delete_by_label(name, &ns).await?;
+    Ok(serde_json::json!({ "name": name, "status": "stopped" }))
+}
+
+/// Get detailed status of a child agent — Job/Deployment state, pod phase, start time.
+pub async fn agent_status_k8s(name: &str) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    let safe_name = sanitize_name(name);
+    let sa_name = format!("that-agent-{safe_name}");
+
+    // Try Job first (ephemeral), then Deployment (persistent)
+    let job_out = tokio::process::Command::new("kubectl")
+        .args([
+            "get", "job", &sa_name, "-n", &ns, "-o",
+            "jsonpath={.status.conditions[0].type},{.status.conditions[0].status},{.status.startTime},{.status.succeeded},{.status.failed},{.status.active}",
+        ])
+        .output()
+        .await?;
+
+    if job_out.status.success() {
+        let raw = String::from_utf8_lossy(&job_out.stdout);
+        let parts: Vec<&str> = raw.split(',').collect();
+        return Ok(serde_json::json!({
+            "name": name,
+            "kind": "Job",
+            "condition": parts.first().unwrap_or(&""),
+            "condition_status": parts.get(1).unwrap_or(&""),
+            "start_time": parts.get(2).unwrap_or(&""),
+            "succeeded": parts.get(3).unwrap_or(&"0"),
+            "failed": parts.get(4).unwrap_or(&"0"),
+            "active": parts.get(5).unwrap_or(&"0"),
+        }));
+    }
+
+    // Try Deployment
+    let deploy_out = tokio::process::Command::new("kubectl")
+        .args([
+            "get", "deployment", &sa_name, "-n", &ns, "-o",
+            "jsonpath={.status.readyReplicas},{.status.replicas},{.status.updatedReplicas},{.metadata.creationTimestamp}",
+        ])
+        .output()
+        .await?;
+
+    if deploy_out.status.success() {
+        let raw = String::from_utf8_lossy(&deploy_out.stdout);
+        let parts: Vec<&str> = raw.split(',').collect();
+        return Ok(serde_json::json!({
+            "name": name,
+            "kind": "Deployment",
+            "ready": parts.first().unwrap_or(&"0"),
+            "replicas": parts.get(1).unwrap_or(&"0"),
+            "updated": parts.get(2).unwrap_or(&"0"),
+            "created": parts.get(3).unwrap_or(&""),
+        }));
+    }
+
+    anyhow::bail!("agent '{name}' not found as Job or Deployment in {ns}")
+}
+
+/// Get recent logs from a child agent's pod.
+pub async fn agent_logs_k8s(name: &str, tail: u32) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    let safe_name = sanitize_name(name);
+    let sa_name = format!("that-agent-{safe_name}");
+
+    let output = tokio::process::Command::new("kubectl")
+        .args([
+            "logs",
+            &format!("job/{sa_name}"),
+            "-n",
+            &ns,
+            &format!("--tail={tail}"),
+        ])
+        .output()
+        .await?;
+
+    if output.status.success() {
+        let logs = String::from_utf8_lossy(&output.stdout).to_string();
+        return Ok(serde_json::json!({
+            "name": name,
+            "kind": "Job",
+            "lines": tail,
+            "logs": logs,
+        }));
+    }
+
+    // Fallback: try deployment pods
+    let output = tokio::process::Command::new("kubectl")
+        .args([
+            "logs",
+            &format!("deployment/{sa_name}"),
+            "-n",
+            &ns,
+            &format!("--tail={tail}"),
+        ])
+        .output()
+        .await?;
+
+    if output.status.success() {
+        let logs = String::from_utf8_lossy(&output.stdout).to_string();
+        return Ok(serde_json::json!({
+            "name": name,
+            "kind": "Deployment",
+            "lines": tail,
+            "logs": logs,
+        }));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!("cannot get logs for agent '{name}': {stderr}")
+}
+
 /// Delete all ephemeral child Jobs for the current agent.
 /// Used by /stop to clean up running workers when the parent run is cancelled.
 pub async fn cleanup_ephemeral_children() -> Result<()> {

@@ -1213,6 +1213,44 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "agent_stop".into(),
+            description: "Stop and clean up a running child agent (ephemeral or persistent). \
+                Deletes the Job/Deployment and all associated resources. Use when a child is stuck, \
+                timed out, or no longer needed.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the agent to stop" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDef {
+            name: "agent_status".into(),
+            description: "Get detailed status of a child agent — running, completed, failed, \
+                pod phase, and start time. Works for both ephemeral Jobs and persistent Deployments.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the agent to check" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDef {
+            name: "agent_logs".into(),
+            description: "Get recent log output from a child agent. Works for running or completed agents. \
+                Use to inspect what an agent is doing or why it failed.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the agent" },
+                    "tail": { "type": "integer", "description": "Number of log lines from the end (default: 50)" }
+                },
+                "required": ["name"]
+            }),
+        },
+        ToolDef {
             name: "workspace_share".into(),
             description: "Share a local git repository with sub-agents via the in-cluster git server. \
                 Workers can clone this workspace for coding tasks. Call before agent_run with workspace param.".into(),
@@ -2485,6 +2523,40 @@ async fn dispatch_inner(
                     .map_err(|e| ToolError(e.to_string()))?;
                 Ok(serde_json::json!({ "name": args.name, "status": "unregistered" }))
             }
+        }
+        "agent_stop" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::agent_stop_k8s(&args.name)
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+        }
+        "agent_status" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::agent_status_k8s(&args.name)
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+        }
+        "agent_logs" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                tail: Option<u32>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::agent_logs_k8s(&args.name, args.tail.unwrap_or(50))
+                .await
+                .map_err(|e| ToolError(e.to_string()))
         }
         "workspace_share" => {
             #[derive(Deserialize)]
