@@ -79,6 +79,7 @@ const AUTO_COMPACT_TOKENS: u32 = 180_000;
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 /// Context needed to execute tool calls — policies and sandbox routing.
+#[derive(Clone)]
 pub struct ToolContext {
     pub config: ThatToolsConfig,
     pub container: Option<String>,
@@ -366,8 +367,70 @@ async fn run_from_checkpoint(
             tool_calls: tool_calls.clone(),
         });
 
-        // Execute each tool call — each gets its own child span.
-        for tc in &tool_calls {
+        // Execute tool calls — parallel-safe tools run concurrently, others sequentially.
+        // Results are collected into a vec indexed by original position to preserve order.
+        type ToolResult = (String, Vec<(Vec<u8>, String)>);
+        let mut tool_results: Vec<Option<ToolResult>> = vec![None; tool_calls.len()];
+
+        // Partition: identify which tools can run in parallel.
+        let parallel_indices: Vec<usize> = tool_calls
+            .iter()
+            .enumerate()
+            .filter(|(_, tc)| is_parallel_safe(&tc.name))
+            .map(|(i, _)| i)
+            .collect();
+        let sequential_indices: Vec<usize> = tool_calls
+            .iter()
+            .enumerate()
+            .filter(|(_, tc)| !is_parallel_safe(&tc.name))
+            .map(|(i, _)| i)
+            .collect();
+
+        // Run parallel-safe tools concurrently.
+        if parallel_indices.len() > 1 {
+            let parallel_futures: Vec<_> = parallel_indices
+                .iter()
+                .map(|&i| {
+                    let tc = &tool_calls[i];
+                    let tool_ctx = config.tool_ctx.clone();
+                    let name = tc.name.clone();
+                    let args = tc.args_json.clone();
+                    let call_id = tc.call_id.clone();
+                    async move {
+                        let logged_args = compact_oneliner(&args, TOOL_LOG_PREVIEW_CHARS);
+                        info!(tool = %name, call_id = %call_id, " → {name}: {logged_args}");
+                        let dr = dispatch_tool(&name, &args, &tool_ctx).await;
+                        let result_chars = dr.text.chars().count();
+                        let is_error = is_tool_error_result(&dr.text);
+                        let status_str = if is_error {
+                            format!("ERR  {}", compact_oneliner(&dr.text, 60))
+                        } else {
+                            "ok".to_string()
+                        };
+                        info!(
+                            tool = %name, call_id = %call_id, is_error, result_chars,
+                            " ← {name}: {status_str}  ({result_chars} chars)"
+                        );
+                        (i, dr.text, dr.images)
+                    }
+                })
+                .collect();
+            let results = futures::future::join_all(parallel_futures).await;
+            for (i, text, images) in results {
+                tool_results[i] = Some((text, images));
+            }
+        } else {
+            // Only 0 or 1 parallel tool — run in the sequential path below.
+        }
+
+        // Run sequential tools (and any single parallel tool not yet executed).
+        let remaining_parallel: Vec<usize> = parallel_indices
+            .iter()
+            .filter(|&&i| tool_results[i].is_none())
+            .copied()
+            .collect();
+        for &i in sequential_indices.iter().chain(remaining_parallel.iter()) {
+            let tc = &tool_calls[i];
             let args_preview = truncate_chars(&tc.args_json, TRACE_PREVIEW_CHARS);
             let logged_args = compact_oneliner(&tc.args_json, TOOL_LOG_PREVIEW_CHARS);
             info!(
@@ -410,7 +473,6 @@ async fn run_from_checkpoint(
             let mut tool_images: Vec<(Vec<u8>, String)> = Vec::new();
             let result = match action {
                 HookAction::Skip { result_json } => {
-                    // Brief synchronous entry so the span appears in the trace.
                     tool_span.in_scope(|| {
                         tracing::Span::current().record("tool.skipped", true);
                     });
@@ -463,6 +525,16 @@ async fn run_from_checkpoint(
 
             let result_preview = truncate_chars(&result, TRACE_PREVIEW_CHARS);
             tool_span.record("output.value", result_preview.as_str());
+
+            tool_results[i] = Some((result, tool_images));
+        }
+
+        // Post-process all results in original order: audit, logging, hook, message push.
+        for (i, tc) in tool_calls.iter().enumerate() {
+            let (result, tool_images) = tool_results[i]
+                .take()
+                .unwrap_or_else(|| (r#"{"error":"tool not executed"}"#.to_string(), vec![]));
+
             let is_error = is_tool_error_result(&result);
             if is_error {
                 if let Some(ref sd) = config.tool_ctx.state_dir {
@@ -483,19 +555,25 @@ async fn run_from_checkpoint(
                     ),
                 );
             }
-            let status_str = if is_error {
-                let snippet = compact_oneliner(&result, 60);
-                format!("ERR  {snippet}")
+
+            // Log for parallel tools that didn't log during execution
+            if parallel_indices.len() > 1 && parallel_indices.contains(&i) {
+                // Already logged during parallel execution
             } else {
-                "ok".to_string()
-            };
-            info!(
-                tool = %tc.name,
-                call_id = %tc.call_id,
-                is_error,
-                result_chars,
-                " ← {}: {status_str}  ({result_chars} chars)", tc.name
-            );
+                let status_str = if is_error {
+                    let snippet = compact_oneliner(&result, 60);
+                    format!("ERR  {snippet}")
+                } else {
+                    "ok".to_string()
+                };
+                info!(
+                    tool = %tc.name,
+                    call_id = %tc.call_id,
+                    is_error,
+                    result_chars,
+                    " ← {}: {status_str}  ({result_chars} chars)", tc.name
+                );
+            }
 
             hook.on_tool_result(&tc.name, &tc.call_id, &result).await;
             let content = sanitize_tool_result(&tc.name, &result);
@@ -1087,6 +1165,24 @@ fn tool_arg_path(args_json: &str) -> Option<String> {
     } else {
         Some(raw.to_string())
     }
+}
+
+/// Tools that can safely run concurrently — they don't mutate local filesystem state
+/// or depend on ordering with other tool calls in the same turn.
+fn is_parallel_safe(name: &str) -> bool {
+    matches!(
+        name,
+        "agent_run"
+            | "agent_query"
+            | "http_request"
+            | "workspace_activity"
+            | "workspace_diff"
+            | "workspace_conflicts"
+            | "agent_list"
+            | "list_skills"
+            | "read_skill"
+            | "mem_recall"
+    )
 }
 
 fn is_tool_error_result(result_json: &str) -> bool {
