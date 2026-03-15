@@ -248,6 +248,7 @@ pub async fn spawn_persistent_agent_k8s(
     role: Option<&str>,
     parent: &str,
     model: Option<&str>,
+    env_overrides: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let safe_name = sanitize_name(name);
@@ -292,6 +293,13 @@ pub async fn spawn_persistent_agent_k8s(
     });
     if let Ok(auth) = std::env::var("CLAUDE_CODE_AUTH") {
         config_data["CLAUDE_CODE_AUTH"] = serde_json::json!(auth);
+    }
+
+    // Apply caller-provided env overrides (e.g. a dedicated TELEGRAM_BOT_TOKEN).
+    if let Some(overrides) = env_overrides {
+        for (k, v) in overrides {
+            config_data[k] = serde_json::json!(v);
+        }
     }
 
     let resources = serde_json::json!({

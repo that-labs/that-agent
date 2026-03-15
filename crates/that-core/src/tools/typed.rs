@@ -1154,7 +1154,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "name": { "type": "string", "description": "Unique name for the sub-agent" },
                     "role": { "type": "string", "description": "Optional role description" },
                     "gateway_port": { "type": "integer", "description": "Port for the child agent's HTTP gateway (local mode only)" },
-                    "model": { "type": "string", "description": "Optional model override. Use full IDs: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5, gpt-5.2-codex. Shorthands like sonnet-4-6 or opus are auto-normalized." }
+                    "model": { "type": "string", "description": "Optional model override. Use full IDs: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5, gpt-5.2-codex. Shorthands like sonnet-4-6 or opus are auto-normalized." },
+                    "env": { "type": "object", "description": "Optional env var overrides for the child (e.g. {\"TELEGRAM_BOT_TOKEN\": \"bot123:...\"} to give it its own channel)" }
                 },
                 "required": ["name"]
             }),
@@ -2328,6 +2329,7 @@ async fn dispatch_inner(
                 role: Option<String>,
                 gateway_port: Option<u16>,
                 model: Option<String>,
+                env: Option<std::collections::HashMap<String, String>>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
@@ -2338,6 +2340,7 @@ async fn dispatch_inner(
                     args.role.as_deref(),
                     parent.as_deref().unwrap_or("root"),
                     args.model.as_deref(),
+                    args.env.as_ref(),
                 )
                 .await
                 .map_err(|e| ToolError(e.to_string()))
