@@ -1172,7 +1172,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "task": { "type": "string", "description": "The task for the worker to execute" },
                     "model": { "type": "string", "description": "Optional model override. Use full IDs: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5, gpt-5.2-codex. Shorthands like sonnet-4-6 or opus are auto-normalized." },
                     "workspace": { "type": "boolean", "description": "If true, share the current git workspace with the worker (default: false)" },
-                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 300)" }
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 1800 = 30 min). Complex coding tasks may need longer." }
                 },
                 "required": ["name", "task"]
             }),
@@ -2388,7 +2388,7 @@ async fn dispatch_inner(
                     &parent,
                     args.model.as_deref(),
                     args.workspace.unwrap_or(false),
-                    args.timeout_secs.unwrap_or(300),
+                    args.timeout_secs.unwrap_or(1800),
                 )
                 .await
                 .map_err(|e| ToolError(e.to_string()))
@@ -2396,7 +2396,7 @@ async fn dispatch_inner(
                 // Local mode: run as a foreground query process
                 let binary = std::env::current_exe()
                     .map_err(|e| ToolError(format!("cannot find binary: {e}")))?;
-                let timeout = args.timeout_secs.unwrap_or(300);
+                let timeout = args.timeout_secs.unwrap_or(1800);
                 let mut cmd = tokio::process::Command::new(&binary);
                 cmd.arg("--agent").arg(&args.name).arg("run").arg("query");
                 if let Some(ref role) = args.role {

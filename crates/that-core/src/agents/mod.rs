@@ -482,7 +482,6 @@ pub async fn run_ephemeral_agent_k8s(
         "THAT_AGENT_MODEL": model_str,
         "THAT_PARENT_GATEWAY_URL": parent_gw,
         "THAT_PARENT_GATEWAY_TOKEN": gw_token,
-        "THAT_AGENT_TASK": task,
         "HTTP_PROXY": proxy_svc,
         "HTTPS_PROXY": proxy_svc,
         "NO_PROXY": "*.svc.cluster.local,10.0.0.0/8,api.anthropic.com,api.openai.com,openrouter.ai",
@@ -549,6 +548,19 @@ pub async fn run_ephemeral_agent_k8s(
                 "data": config_data,
             },
             {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": format!("{sa_name}-task"),
+                    "namespace": ns,
+                    "labels": labels,
+                    "ownerReferences": owner_refs,
+                },
+                "data": {
+                    "task.txt": task,
+                },
+            },
+            {
                 "apiVersion": "batch/v1",
                 "kind": "Job",
                 "metadata": {
@@ -570,7 +582,7 @@ pub async fn run_ephemeral_agent_k8s(
                                 "name": "agent",
                                 "image": image,
                                 "command": ["/bin/bash", "-c",
-                                    "exec that --agent \"$THAT_AGENT_NAME\" run query --parent \"$THAT_AGENT_PARENT\" --no-sandbox \"$THAT_AGENT_TASK\""],
+                                    "exec that --agent \"$THAT_AGENT_NAME\" run query --parent \"$THAT_AGENT_PARENT\" --no-sandbox --task-file /etc/agent-task/task.txt"],
                                 "envFrom": [
                                     { "configMapRef": { "name": format!("{sa_name}-config") } },
                                     { "secretRef": { "name": "that-agent-secrets", "optional": true } },
@@ -579,9 +591,15 @@ pub async fn run_ephemeral_agent_k8s(
                                     "requests": { "cpu": "200m", "memory": "256Mi" },
                                     "limits": { "cpu": cpu_limit, "memory": mem_limit },
                                 },
-                                "volumeMounts": [{ "name": "workspace", "mountPath": "/workspace" }],
+                                "volumeMounts": [
+                                    { "name": "workspace", "mountPath": "/workspace" },
+                                    { "name": "task", "mountPath": "/etc/agent-task", "readOnly": true },
+                                ],
                             }],
-                            "volumes": [{ "name": "workspace", "emptyDir": {} }],
+                            "volumes": [
+                                { "name": "workspace", "emptyDir": {} },
+                                { "name": "task", "configMap": { "name": format!("{sa_name}-task") } },
+                            ],
                         }
                     }
                 }

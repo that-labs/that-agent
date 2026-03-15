@@ -289,8 +289,12 @@ pub enum ToolsCommands {
 pub enum RunCommands {
     /// Execute a one-shot task with the agent.
     Query {
-        /// The task to execute.
-        task: String,
+        /// The task to execute (ignored if --task-file is set).
+        task: Option<String>,
+        /// Read the task from a file instead of a CLI argument.
+        /// Avoids shell escaping issues with large/complex task descriptions.
+        #[arg(long)]
+        task_file: Option<String>,
         /// Session ID (creates new if omitted).
         #[arg(long)]
         session: Option<String>,
