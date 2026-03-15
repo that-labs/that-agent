@@ -676,18 +676,44 @@ pub async fn run_ephemeral_agent_k8s(
             anyhow::bail!("agent job failed\nLast output:\n{logs}");
         }
 
-        // Periodic progress: tail last log line every 30s
+        // Periodic progress: tail last log line every 30s, extract turn info
         if last_log_check.elapsed() >= Duration::from_secs(30) {
             last_log_check = std::time::Instant::now();
-            let latest = tail_job_logs(&job_name, &ns, 1).await;
+            let latest = tail_job_logs(&job_name, &ns, 3).await;
             if !latest.is_empty() && latest != last_log_line {
                 last_log_line = latest.clone();
                 let elapsed = start.elapsed().as_secs();
-                tracing::info!(
-                    agent = %name,
-                    elapsed_secs = elapsed,
-                    "agent_run progress: {latest}"
-                );
+                // Extract turn info like "turn 15/75" from log lines
+                let turn_info = latest
+                    .lines()
+                    .rev()
+                    .find_map(|l| {
+                        l.find("turn=").and_then(|i| {
+                            let rest = &l[i..];
+                            let turn = rest.strip_prefix("turn=")?.split_whitespace().next()?;
+                            let max = rest.find("max_turns=").and_then(|j| {
+                                rest[j..]
+                                    .strip_prefix("max_turns=")?
+                                    .split_whitespace()
+                                    .next()
+                            })?;
+                            Some(format!("turn {turn}/{max}"))
+                        })
+                    })
+                    .unwrap_or_else(|| "working...".to_string());
+                let msg = format!("[{name}] {turn_info} ({elapsed}s)");
+                tracing::info!(agent = %name, "{msg}");
+                // Post to parent's own gateway so it shows on the channel
+                let gw = crate::orchestration::support::resolve_gateway_url();
+                let _ = reqwest::Client::new()
+                    .post(format!("{gw}/v1/notify"))
+                    .json(&serde_json::json!({
+                        "message": msg,
+                        "agent": name,
+                    }))
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await;
             }
         }
 
