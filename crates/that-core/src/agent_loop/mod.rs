@@ -193,7 +193,14 @@ async fn run_from_checkpoint(
     let budget_half = config.max_turns / 2;
     let budget_eighty = config.max_turns * 4 / 5;
 
-    for turn in 0..config.max_turns {
+    // When resuming from a checkpoint, count existing assistant messages to
+    // continue the turn counter from where we left off (not from 0).
+    let turns_consumed = messages
+        .iter()
+        .filter(|m| matches!(m, Message::Assistant { .. }))
+        .count() as u32;
+
+    for turn in turns_consumed..config.max_turns {
         // Drain steering hints queued by the human between turns.
         if let Some(ref queue) = config.steering {
             let hints: Vec<String> = {
