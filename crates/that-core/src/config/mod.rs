@@ -13,7 +13,7 @@ fn default_model() -> String {
     "gpt-5.2-codex".into()
 }
 fn default_max_turns() -> usize {
-    75
+    300
 }
 fn default_max_tokens() -> u64 {
     16384

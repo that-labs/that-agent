@@ -1190,13 +1190,29 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "agent_query".into(),
             description: "Send a message to a persistent agent and return its response. \
-                Only works for agents with a gateway (persistent, not ephemeral).".into(),
+                Only works for agents with a gateway (persistent, not ephemeral). \
+                Set stream=true to relay the sub-agent's tool calls to the channel in real-time.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Name of the target agent" },
                     "message": { "type": "string", "description": "Message to send" },
-                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 60)" }
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 60)" },
+                    "stream": { "type": "boolean", "description": "When true, relay the sub-agent's tool calls to the channel in real-time via SSE streaming (default: false)" }
+                },
+                "required": ["name", "message"]
+            }),
+        },
+        ToolDef {
+            name: "agent_query_async".into(),
+            description: "Send a message to a persistent agent asynchronously and return immediately. \
+                The sub-agent processes the request in the background and posts its result back \
+                as a notification. Use for long-running tasks or parallel delegation.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name of the target agent" },
+                    "message": { "type": "string", "description": "Message to send" }
                 },
                 "required": ["name", "message"]
             }),
@@ -2503,6 +2519,37 @@ async fn dispatch_inner(
                         .map_err(|e| ToolError(e.to_string()))?;
                 Ok(serde_json::json!({ "agent": args.name, "response": resp }))
             }
+        }
+        "agent_query_async" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                message: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+            let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
+            let entry = entries
+                .iter()
+                .find(|e| e.name == args.name)
+                .ok_or_else(|| ToolError(format!("agent '{}' not found in registry", args.name)))?;
+            let gw = entry
+                .gateway_url
+                .as_deref()
+                .ok_or_else(|| ToolError(format!("agent '{}' has no gateway URL", args.name)))?;
+            let parent_name = if ctx.agent_name.is_empty() {
+                "parent"
+            } else {
+                &ctx.agent_name
+            };
+            let parent_gw = crate::orchestration::support::resolve_gateway_url();
+            crate::agents::query_agent_async(gw, parent_name, &parent_gw, &args.message)
+                .await
+                .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "queued": true, "agent": args.name }))
         }
         "agent_unregister" => {
             #[derive(Deserialize)]

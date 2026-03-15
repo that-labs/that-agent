@@ -530,6 +530,8 @@ pub fn build_preamble(
              **Persistent agents** (`spawn_agent`) — long-running services:\n\
              - `spawn_agent(name, role)` → creates a Deployment + Service\n\
              - `agent_query(name, message)` → synchronous request/response via gateway\n\
+             - `agent_query(name, message, stream=true)` → streaming: sub-agent tool calls shown on channel in real-time\n\
+             - `agent_query_async(name, message)` → fire-and-forget: returns immediately, result arrives as notification\n\
              - `agent_unregister(name)` → tear down when no longer needed\n\
              - Use for: coordinators, channel listeners, always-on workers\n\n\
              ### Orchestration workflow\n\n\
@@ -555,6 +557,14 @@ pub fn build_preamble(
              - `workspace_collect(path, worker)` → merge worker's branch into your workspace\n\
              - `workspace_conflicts(branch)` → on merge failure, see conflicting files and both diffs\n\
              - Load `read_skill git-workspace` for the full conflict resolution guide\n\n\
+             ### Agent query modes\n\n\
+             When querying a persistent sub-agent, choose the right mode:\n\n\
+             | Tool | Behavior | Use when |\n\
+             |------|----------|----------|\n\
+             | `agent_query(name, message)` | Blocks until done, returns full response | Quick tasks where you need the answer immediately |\n\
+             | `agent_query(name, message, stream=true)` | Streams: sub-agent tool calls visible on channel in real-time | Visible work, user wants to see progress |\n\
+             | `agent_query_async(name, message)` | Returns immediately, result arrives as notification | Long tasks, parallel delegation, check back via heartbeat |\n\n\
+             Sub-agent notifications are relayed to the channel immediately AND queued for your next heartbeat turn.\n\n\
              ### Limitations\n\
              - Children cannot spawn their own sub-agents (restricted RBAC)\n\
              - Ephemeral agents have resource limits and a turn budget\n\
@@ -622,7 +632,16 @@ pub fn build_preamble(
          The parent queues the request and processes it at the next heartbeat tick, then POSTs \
          `{\"text\": \"<response>\"}` back to your `callback_url`.\n\n\
          Use `/v1/notify` for progress updates. Use `/v1/inbound` + `callback_url` only \
-         when you genuinely need the parent to reason and respond.\n\n",
+         when you genuinely need the parent to reason and respond.\n\n\
+         ### Agent query modes\n\n\
+         When querying a persistent sub-agent, choose the right mode:\n\n\
+         | Tool | Behavior | Use when |\n\
+         |------|----------|----------|\n\
+         | `agent_query(name, message)` | Blocks until done, returns full response | Quick tasks where you need the answer immediately |\n\
+         | `agent_query(name, message, stream=true)` | Streams: sub-agent tool calls visible on channel in real-time | Visible work, user wants to see progress |\n\
+         | `agent_query_async(name, message)` | Returns immediately, result arrives as notification | Long tasks, parallel delegation, check back via heartbeat |\n\n\
+         Sub-agent notifications (via `/v1/notify`) are now relayed to the channel immediately \
+         AND queued for your next heartbeat turn — the user sees them in real-time.\n\n",
         );
     }
 

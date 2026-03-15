@@ -1133,6 +1133,9 @@ pub async fn run_listen(
                     return;
                 }
                 if msg.sender_id == that_channels::NOTIFY_SENDER_ID {
+                    // Relay to channel immediately for user visibility.
+                    router.notify_all(&msg.text).await;
+                    // Also queue for parent LLM context at next heartbeat turn.
                     let mut q = notification_queue.lock().await;
                     if q.len() < 500 {
                         q.push(msg.text);

@@ -162,6 +162,138 @@ pub async fn query_agent(gateway_url: &str, message: &str, timeout_secs: u64) ->
     Ok(body["text"].as_str().unwrap_or_default().to_string())
 }
 
+/// SSE event received from a streaming agent query.
+#[derive(Debug, Clone)]
+pub enum AgentStreamEvent {
+    ToolCall { name: String, args: String },
+    ToolResult { name: String, result: String },
+    Done { text: String },
+    Error { message: String },
+}
+
+/// Query an agent's `/v1/chat/stream` SSE endpoint, sending events to `event_tx`.
+///
+/// Only relays `tool_call`, `tool_result`, and `done` events. Returns the final text.
+pub async fn query_agent_stream(
+    gateway_url: &str,
+    agent_name: &str,
+    message: &str,
+    timeout_secs: u64,
+    event_tx: tokio::sync::mpsc::UnboundedSender<AgentStreamEvent>,
+) -> Result<String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{gateway_url}/v1/chat/stream"))
+        .json(&serde_json::json!({ "message": message, "sender_id": "parent" }))
+        .timeout(Duration::from_secs(timeout_secs))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let mut final_text = String::new();
+    let mut got_terminal = false;
+    let mut bytes = resp.bytes_stream();
+    let mut buf = String::new();
+    let mut current_event_type = String::new();
+
+    use futures::StreamExt;
+    while let Some(chunk) = bytes.next().await {
+        let chunk = chunk?;
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+
+        // Parse SSE frames: "event: <type>\ndata: <json>\n\n"
+        while let Some(boundary) = buf.find("\n\n") {
+            let frame = buf[..boundary].to_string();
+            buf = buf[boundary + 2..].to_string();
+
+            for line in frame.lines() {
+                if let Some(ev) = line.strip_prefix("event: ") {
+                    current_event_type = ev.trim().to_string();
+                } else if let Some(data) = line.strip_prefix("data: ") {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(data.trim()).unwrap_or_default();
+                    match current_event_type.as_str() {
+                        "tool_call" => {
+                            let name = format!(
+                                "{}/{}",
+                                agent_name,
+                                parsed["name"].as_str().unwrap_or("unknown")
+                            );
+                            let args = parsed["args"].as_str().unwrap_or_default().to_string();
+                            let _ = event_tx.send(AgentStreamEvent::ToolCall { name, args });
+                        }
+                        "tool_result" => {
+                            let name = format!(
+                                "{}/{}",
+                                agent_name,
+                                parsed["name"].as_str().unwrap_or("unknown")
+                            );
+                            let result = parsed["result"].as_str().unwrap_or_default().to_string();
+                            let _ = event_tx.send(AgentStreamEvent::ToolResult { name, result });
+                        }
+                        "done" => {
+                            got_terminal = true;
+                            final_text = parsed["text"].as_str().unwrap_or_default().to_string();
+                            let _ = event_tx.send(AgentStreamEvent::Done {
+                                text: final_text.clone(),
+                            });
+                        }
+                        "error" => {
+                            let err_msg = parsed["error"]
+                                .as_str()
+                                .unwrap_or("unknown error")
+                                .to_string();
+                            let _ = event_tx.send(AgentStreamEvent::Error {
+                                message: err_msg.clone(),
+                            });
+                            return Err(anyhow::anyhow!(
+                                "sub-agent '{agent_name}' error: {err_msg}"
+                            ));
+                        }
+                        _ => {} // skip stream_token, etc.
+                    }
+                    current_event_type.clear();
+                }
+            }
+        }
+    }
+    // Stream ended without a terminal event — sub-agent was likely aborted.
+    if !got_terminal {
+        let msg = format!("sub-agent '{agent_name}' stream ended without completion (likely aborted or hit tool limit)");
+        let _ = event_tx.send(AgentStreamEvent::Error {
+            message: msg.clone(),
+        });
+        return Err(anyhow::anyhow!(msg));
+    }
+    Ok(final_text)
+}
+
+/// Fire-and-forget: post a message to a sub-agent's `/v1/inbound` with a callback URL.
+///
+/// Returns immediately after the POST succeeds. The sub-agent will process
+/// asynchronously and POST its result to `callback_url` when done.
+pub async fn query_agent_async(
+    gateway_url: &str,
+    parent_name: &str,
+    parent_gateway_url: &str,
+    message: &str,
+) -> Result<()> {
+    let client = reqwest::Client::new();
+    let callback = format!("{parent_gateway_url}/v1/notify");
+    client
+        .post(format!("{gateway_url}/v1/inbound"))
+        .json(&serde_json::json!({
+            "message": message,
+            "sender_id": parent_name,
+            "callback_url": callback,
+        }))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 // ── K8s mode detection ───────────────────────────────────────────────────────
 
 /// Returns `true` when running in K8s sandbox mode.

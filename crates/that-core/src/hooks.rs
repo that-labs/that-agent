@@ -809,6 +809,125 @@ impl LoopHook for ChannelHook {
                     result_json: serde_json::json!({ "ok": true }).to_string(),
                 }
             }
+            "agent_query" => {
+                // When stream=true, intercept and relay SSE events to the channel.
+                let parsed = serde_json::from_str::<JsonValue>(args_json).unwrap_or_default();
+                if parsed.get("stream").and_then(|v| v.as_bool()) != Some(true) {
+                    // Non-streaming: show tool call on channel, then fall through to dispatch.
+                    if !self.suppress_streaming && self.show_work.load(Ordering::Relaxed) {
+                        let preview = compact_args_preview(name, args_json);
+                        let event = ChannelEvent::ToolCall {
+                            call_id: call_id.to_string(),
+                            name: name.to_string(),
+                            args: preview,
+                        };
+                        if let Some(cid) = self.channel_id.as_deref() {
+                            let _ = self.router.send_to(cid, &event, self.target.as_ref()).await;
+                        } else {
+                            self.router.broadcast(&event).await;
+                        }
+                    }
+                    return HookAction::Continue;
+                }
+
+                let agent_name = parsed["name"].as_str().unwrap_or("unknown").to_string();
+                let message = parsed["message"].as_str().unwrap_or("").to_string();
+                let timeout = parsed["timeout_secs"].as_u64().unwrap_or(120);
+
+                // Resolve gateway URL from the cluster registry.
+                let cluster_dir = dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".that-agent")
+                    .join("cluster");
+                let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+                let gw = reg.list().ok().and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|e| e.name == agent_name)
+                        .and_then(|e| e.gateway_url.clone())
+                });
+                let Some(gateway_url) = gw else {
+                    return HookAction::Skip {
+                        result_json: serde_json::json!({
+                            "error": format!("agent '{}' not found or has no gateway", agent_name)
+                        })
+                        .to_string(),
+                    };
+                };
+
+                let router = Arc::clone(&self.router);
+                let channel_id = self.channel_id.clone();
+                let target = self.target.clone();
+                let show_work = self.show_work.load(Ordering::Relaxed) && !self.suppress_streaming;
+
+                let (event_tx, mut event_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<crate::agents::AgentStreamEvent>();
+
+                // Spawn relay task: forwards SSE events to the channel router.
+                let relay = tokio::spawn({
+                    let router = Arc::clone(&router);
+                    let channel_id = channel_id.clone();
+                    let target = target.clone();
+                    async move {
+                        while let Some(event) = event_rx.recv().await {
+                            if !show_work {
+                                continue;
+                            }
+                            let ch_event = match &event {
+                                crate::agents::AgentStreamEvent::ToolCall { name, args } => {
+                                    ChannelEvent::ToolCall {
+                                        call_id: String::new(),
+                                        name: name.clone(),
+                                        args: args.clone(),
+                                    }
+                                }
+                                crate::agents::AgentStreamEvent::ToolResult { name, result } => {
+                                    ChannelEvent::ToolResult {
+                                        call_id: String::new(),
+                                        name: name.clone(),
+                                        result: result.clone(),
+                                    }
+                                }
+                                crate::agents::AgentStreamEvent::Done { .. } => continue,
+                                crate::agents::AgentStreamEvent::Error { message } => {
+                                    ChannelEvent::Notify(format!("⚠ Sub-agent error: {message}"))
+                                }
+                            };
+                            if let Some(cid) = channel_id.as_deref() {
+                                let _ = router.send_to(cid, &ch_event, target.as_ref()).await;
+                            } else {
+                                router.broadcast(&ch_event).await;
+                            }
+                        }
+                    }
+                });
+
+                let result = crate::agents::query_agent_stream(
+                    &gateway_url,
+                    &agent_name,
+                    &message,
+                    timeout,
+                    event_tx,
+                )
+                .await;
+
+                // Wait for relay to drain.
+                let _ = relay.await;
+
+                let result_json = match result {
+                    Ok(text) => serde_json::json!({
+                        "agent": agent_name,
+                        "response": text,
+                        "streamed": true,
+                    })
+                    .to_string(),
+                    Err(e) => serde_json::json!({
+                        "error": format!("streaming query failed: {e:#}")
+                    })
+                    .to_string(),
+                };
+                return HookAction::Skip { result_json };
+            }
             _ => {
                 // Surface all tool invocations to the active channel when not
                 // in a silent/background run and work visibility is enabled.
