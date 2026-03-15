@@ -88,6 +88,7 @@ pub async fn evict_sender_lock_if_idle(
 }
 
 /// Abort and clear the currently active run for a sender key, if any.
+/// Also cleans up any ephemeral K8s Jobs spawned by this agent.
 pub(super) async fn stop_active_sender_run(
     active_runs: &ActiveSenderRuns,
     sender_key: &str,
@@ -95,6 +96,14 @@ pub(super) async fn stop_active_sender_run(
     let active = active_runs.lock().await.remove(sender_key);
     if let Some(run) = active {
         run.abort.abort();
+        // Clean up ephemeral child Jobs in K8s (fire-and-forget)
+        if crate::agents::is_k8s_mode() {
+            tokio::spawn(async {
+                if let Err(e) = crate::agents::cleanup_ephemeral_children().await {
+                    tracing::warn!("failed to clean up child jobs on /stop: {e}");
+                }
+            });
+        }
         true
     } else {
         false

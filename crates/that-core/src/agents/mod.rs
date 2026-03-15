@@ -831,6 +831,32 @@ pub async fn unregister_agent_k8s(name: &str) -> Result<serde_json::Value> {
     Ok(serde_json::json!({ "name": name, "status": "unregistered" }))
 }
 
+/// Delete all ephemeral child Jobs for the current agent.
+/// Used by /stop to clean up running workers when the parent run is cancelled.
+pub async fn cleanup_ephemeral_children() -> Result<()> {
+    let ns = k8s_namespace();
+    let parent_name = std::env::var("THAT_AGENT_NAME").unwrap_or_else(|_| "default".into());
+    let safe_parent = sanitize_name(&parent_name);
+    tracing::info!("cleaning up ephemeral children of {safe_parent} in {ns}");
+    let output = tokio::process::Command::new("kubectl")
+        .args([
+            "delete",
+            "job,configmap,serviceaccount,rolebinding",
+            "-l",
+            &format!("that-agent/parent={safe_parent},that-agent/type=ephemeral"),
+            "-n",
+            &ns,
+            "--ignore-not-found",
+        ])
+        .output()
+        .await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("cleanup_ephemeral_children: {stderr}");
+    }
+    Ok(())
+}
+
 // ── Workspace sharing ────────────────────────────────────────────────────────
 
 /// Push a local git repo to the in-cluster git server for child access.
