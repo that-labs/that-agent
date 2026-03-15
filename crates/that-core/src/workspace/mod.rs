@@ -290,6 +290,7 @@ const WRITABLE_WORKSPACE_FILES: &[&str] = &[
     "Boot.md",
     "Tasks.md",
     "Status.md",
+    "Bootstrap.md",
 ];
 
 /// Resolve a short name like "agents" to its filename "Agents.md".
