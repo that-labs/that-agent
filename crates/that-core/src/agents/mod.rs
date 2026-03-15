@@ -485,7 +485,7 @@ pub async fn run_ephemeral_agent_k8s(
         "THAT_AGENT_TASK": task,
         "HTTP_PROXY": proxy_svc,
         "HTTPS_PROXY": proxy_svc,
-        "NO_PROXY": "*.svc.cluster.local,10.0.0.0/8",
+        "NO_PROXY": "*.svc.cluster.local,10.0.0.0/8,api.anthropic.com,api.openai.com,openrouter.ai",
         "THAT_SANDBOX_K8S_NAMESPACE": ns,
     });
 
