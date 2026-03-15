@@ -244,7 +244,8 @@ pub async fn execute_agent_run_streaming(
 
         match result {
             Ok((text, usage)) => {
-                let usage = checkpoint_usage.add(&usage);
+                // Log cache usage from the last run only (not cumulative) — cumulative
+                // totals produce meaningless hit-rate percentages.
                 log_prompt_cache_usage(
                     &agent.provider,
                     &agent.model,
@@ -252,6 +253,7 @@ pub async fn execute_agent_run_streaming(
                     usage.cache_read_tokens as u64,
                     usage.cache_write_tokens as u64,
                 );
+                let _usage = checkpoint_usage.add(&usage);
                 tracing::Span::current().record("gen_ai.completion", text.as_str());
                 tracing::Span::current().record("output.value", text.as_str());
                 tracing::Span::current().record("otel.status_code", "ok");
@@ -379,7 +381,6 @@ pub async fn execute_agent_run_eval(
 
         match result {
             Ok((text, usage)) => {
-                let usage = checkpoint_usage.add(&usage);
                 let mut events = checkpoint_events;
                 events.extend(hook.take_events());
                 log_prompt_cache_usage(
@@ -389,6 +390,7 @@ pub async fn execute_agent_run_eval(
                     usage.cache_read_tokens as u64,
                     usage.cache_write_tokens as u64,
                 );
+                let _usage = checkpoint_usage.add(&usage);
                 tracing::Span::current().record("gen_ai.completion", text.as_str());
                 tracing::Span::current().record("output.value", text.as_str());
                 tracing::Span::current().record("otel.status_code", "ok");
@@ -771,7 +773,6 @@ pub async fn execute_agent_run_channel(
 
         match result {
             Ok((text, usage)) => {
-                let usage = checkpoint_usage.add(&usage);
                 if !checkpoint_tool_events.is_empty() {
                     let mut merged = std::mem::take(&mut checkpoint_tool_events);
                     merged.extend(tool_events);

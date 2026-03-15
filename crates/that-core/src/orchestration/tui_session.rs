@@ -1273,7 +1273,6 @@ pub async fn execute_agent_run_tui(
 
         match result {
             Ok((text, usage)) => {
-                let usage = checkpoint_usage.add(&usage);
                 log_prompt_cache_usage(
                     &agent.provider,
                     &agent.model,
@@ -1281,6 +1280,7 @@ pub async fn execute_agent_run_tui(
                     usage.cache_read_tokens as u64,
                     usage.cache_write_tokens as u64,
                 );
+                let usage = checkpoint_usage.add(&usage);
                 tracing::Span::current().record("gen_ai.completion", text.as_str());
                 tracing::Span::current().record("output.value", text.as_str());
                 tracing::Span::current().record("otel.status_code", "ok");
