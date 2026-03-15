@@ -25,6 +25,28 @@ pub fn normalize_provider(provider: &str) -> Option<String> {
     }
 }
 
+/// Normalize a shorthand model name to a full model ID.
+/// e.g. "sonnet-4-6" → "claude-sonnet-4-6", "opus" → "claude-opus-4-6"
+pub fn normalize_model(model: &str) -> String {
+    let m = model.trim();
+    // Already a full ID — return as-is
+    if MODEL_OPTIONS.iter().any(|(_, id)| *id == m) {
+        return m.to_string();
+    }
+    // Try prefixing "claude-" for Anthropic shorthand
+    let with_prefix = format!("claude-{m}");
+    if MODEL_OPTIONS.iter().any(|(_, id)| *id == with_prefix) {
+        return with_prefix;
+    }
+    // Common aliases
+    match m {
+        "opus" | "claude-opus" => "claude-opus-4-6".to_string(),
+        "sonnet" | "claude-sonnet" => "claude-sonnet-4-6".to_string(),
+        "haiku" | "claude-haiku" => "claude-haiku-4-5".to_string(),
+        _ => m.to_string(), // pass through unknown models unchanged
+    }
+}
+
 pub fn suggested_models(provider: &str) -> Vec<String> {
     match provider {
         "openai" | "anthropic" | "openrouter" => MODEL_OPTIONS

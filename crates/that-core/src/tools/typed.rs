@@ -1154,7 +1154,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "name": { "type": "string", "description": "Unique name for the sub-agent" },
                     "role": { "type": "string", "description": "Optional role description" },
                     "gateway_port": { "type": "integer", "description": "Port for the child agent's HTTP gateway (local mode only)" },
-                    "model": { "type": "string", "description": "Optional model override for the child agent" }
+                    "model": { "type": "string", "description": "Optional model override. Use full IDs: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5, gpt-5.2-codex. Shorthands like sonnet-4-6 or opus are auto-normalized." }
                 },
                 "required": ["name"]
             }),
@@ -1170,7 +1170,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "name": { "type": "string", "description": "Unique worker name" },
                     "role": { "type": "string", "description": "Optional role description for the worker" },
                     "task": { "type": "string", "description": "The task for the worker to execute" },
-                    "model": { "type": "string", "description": "Optional model override" },
+                    "model": { "type": "string", "description": "Optional model override. Use full IDs: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5, gpt-5.2-codex. Shorthands like sonnet-4-6 or opus are auto-normalized." },
                     "workspace": { "type": "boolean", "description": "If true, share the current git workspace with the worker (default: false)" },
                     "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 300)" }
                 },

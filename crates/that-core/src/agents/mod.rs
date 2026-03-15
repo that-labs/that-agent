@@ -261,7 +261,7 @@ pub async fn spawn_persistent_agent_k8s(
 
     let provider = std::env::var("THAT_AGENT_PROVIDER").unwrap_or_default();
     let model_str = model
-        .map(str::to_string)
+        .map(crate::model_catalog::normalize_model)
         .or_else(|| std::env::var("THAT_AGENT_MODEL").ok())
         .unwrap_or_default();
 
@@ -436,7 +436,7 @@ pub async fn run_ephemeral_agent_k8s(
 
     let provider = std::env::var("THAT_AGENT_PROVIDER").unwrap_or_default();
     let model_str = model
-        .map(str::to_string)
+        .map(crate::model_catalog::normalize_model)
         .or_else(|| std::env::var("THAT_AGENT_MODEL").ok())
         .unwrap_or_default();
 
@@ -446,18 +446,45 @@ pub async fn run_ephemeral_agent_k8s(
     let role_str = role.unwrap_or("");
 
     if workspace {
-        // Push workspace to git-server (auto-inits bare repo on first access)
-        let _ = tokio::process::Command::new("git")
+        // Resolve the parent's actual workspace path
+        let ws_dir = crate::config::AgentDef::agent_workspace_dir(parent);
+        let ws_path = ws_dir.to_string_lossy();
+
+        // Verify workspace is a git repo with commits before pushing
+        let rev_check = tokio::process::Command::new("git")
+            .args(["-C", &*ws_path, "rev-parse", "HEAD"])
+            .output()
+            .await;
+        match rev_check {
+            Ok(o) if o.status.success() => {}
+            _ => {
+                anyhow::bail!(
+                    "workspace=true but {} is not a git repo with commits. \
+                     Call workspace_share(path) first to push your repo to the git server.",
+                    ws_path
+                );
+            }
+        }
+
+        // Push workspace to git-server for the worker to clone
+        let push = tokio::process::Command::new("git")
             .args([
                 "-C",
-                "/workspace",
+                &*ws_path,
                 "push",
                 &format!("{git_svc}/workspace.git"),
                 &format!("HEAD:refs/heads/task/{safe_name}"),
                 "--force",
             ])
             .output()
-            .await;
+            .await?;
+        if !push.status.success() {
+            let stderr = String::from_utf8_lossy(&push.stderr);
+            anyhow::bail!(
+                "Failed to push workspace to git server: {stderr}. \
+                 Ensure workspace_share(path) was called first."
+            );
+        }
     }
 
     let labels = k8s_labels(name, parent, "ephemeral", role_str);
@@ -651,10 +678,12 @@ pub async fn run_ephemeral_agent_k8s(
 
     // If workspace mode, collect the branch info
     if workspace {
+        let ws_dir = crate::config::AgentDef::agent_workspace_dir(parent);
+        let ws_path = ws_dir.to_string_lossy();
         let _ = tokio::process::Command::new("git")
             .args([
                 "-C",
-                "/workspace",
+                &*ws_path,
                 "fetch",
                 &format!("{git_svc}/workspace.git"),
                 &format!("task/{safe_name}"),
