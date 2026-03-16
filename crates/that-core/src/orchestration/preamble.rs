@@ -139,7 +139,9 @@ fn task_delegation_preamble() -> &'static str {
      - `agent_task_send(name, message, task_id=X)` — steer a running task\n\
      - `agent_task_status()` — check all tasks (free local read, zero cost)\n\
      - `agent_task_cancel(task_id)` — graceful stop\n\
-     - `agent_task_resume(task_id)` — resume canceled task\n\n\
+     - `agent_task_resume(task_id)` — resume canceled task\n\
+     - `scratchpad_read(task_id)` — read shared notes for a task (zero cost)\n\
+     - `scratchpad_write(task_id, note)` — append a note to a task's scratchpad\n\n\
      Task states: submitted → working → input_required → completed/failed/canceled\n\n\
      Task updates arrive in your heartbeat check-in. Use `agent_task_status()` proactively — it costs nothing.\n\
      When a task is `input_required`, the sub-agent needs your input — reply with `agent_task_send(task_id=X)` or ask the human.\n\
@@ -155,6 +157,29 @@ fn task_delegation_preamble() -> &'static str {
      **Share locations, not content.** Task messages have size limits. Never embed large files, skill bodies, or repo contents \
      in `agent_task_send`. Instead, tell the sub-agent *where* to find the resource (repo URL, file path, skill name) and let it \
      fetch the content itself. Example: \"Clone repo X and install all skills from the skills/ directory\" — not the skill text.\n\n\
+     ### Task Scratchpad\n\n\
+     Every task has a shared scratchpad — a persistent notepad both parent and sub-agent can read and write.\n\n\
+     **Parent (dispatcher):** On `agent_task_send`, the harness automatically writes to the scratchpad:\n\
+     - Workspace root path (derived from your agent name)\n\
+     - Parent gateway URL\n\
+     Add extra context with `scratchpad_write` only for things not already auto-provided:\n\
+     - Key subdirectory locations or specific file paths\n\
+     - Environment variables or credentials the sub-agent needs\n\
+     This prevents the sub-agent from guessing paths or exploring blindly.\n\n\
+     **Sub-agent (worker):** Before starting any filesystem exploration or heavy tool use:\n\
+     1. `scratchpad_read(task_id)` — ALWAYS read first for workspace paths and context from the dispatcher\n\
+     2. After every meaningful milestone or if blocked for 3+ turns, `scratchpad_write` your progress or blocker\n\
+     If `scratchpad_read` returns workspace paths, use them directly — do not explore to rediscover them.\n\n\
+     #### Anti-loop protection\n\n\
+     The harness tracks consecutive turns where you only use exploration tools \
+     (filesystem listing, file reading, grep, search, shell). If you spend 8+ turns exploring \
+     without producing output or using non-exploration tools, you will receive a warning. \
+     At 12 turns the harness forces you to stop. Duplicate tool calls (same tool + same arguments) \
+     accelerate the counter. To avoid triggering this:\n\
+     - Read the scratchpad FIRST for paths and context\n\
+     - Use provided paths directly instead of searching for them\n\
+     - If blocked, report `input_required` early rather than continuing to explore\n\n\
+     The scratchpad is the first place to look when you're unsure about paths, workspace layout, or task expectations.\n\n\
      Sub-agent notifications are relayed to the channel immediately AND queued for your next heartbeat turn.\n\n"
 }
 
@@ -616,7 +641,9 @@ pub fn build_preamble(
          |----------|----------|----------|\n\
          | `POST /v1/inbound` | Queued for next heartbeat tick (returns 202). Batched with scheduled tasks. Response delivered via `callback_url` if provided, otherwise the agent uses `answer`. | Plugins, services, and bridges that need the agent to act autonomously in the background. |\n\
          | `POST /v1/chat` | Synchronous (blocks until done, returns full response). | One-shot queries where the caller needs the answer inline. |\n\
-         | `POST /v1/notify` | Zero-cost queue (returns 202). No LLM turn — batched into the next heartbeat tick. | Status reports, progress updates, fire-and-forget notifications. |\n\n\
+         | `POST /v1/notify` | Zero-cost queue (returns 202). No LLM turn — batched into the next heartbeat tick. | Status reports, progress updates, fire-and-forget notifications. |\n\
+         | `GET /v1/scratchpad?task_id=X` | Read scratchpad entries for a task (returns 200). | Sub-agents reading parent-side scratchpad via HTTP fallback. |\n\
+         | `POST /v1/scratchpad?task_id=X` | Append a note `{note, from}` to a task's scratchpad (returns 200). | Sub-agents writing to parent-side scratchpad when local registry unavailable. |\n\n\
          **Key rule for plugins and deployed services:** When building a service that sends \
          work to the agent (e.g. a content scanner with approve/reject buttons), always use \
          `/v1/inbound` so the agent processes the request asynchronously in the background. \
@@ -759,7 +786,7 @@ pub fn build_preamble(
     if agent.steering {
         let prefix = crate::agent_loop::STEERING_HINT_PREFIX;
         preamble.push_str(&format!(
-            "`{prefix}` messages are soft mid-run nudges from the human — consider them but don't redirect unless warranted.\n\n",
+            "`{prefix}` messages are soft mid-run nudges from the human or parent agents — use them immediately when they provide paths or context.\n\n",
         ));
     }
 

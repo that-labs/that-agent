@@ -81,6 +81,13 @@ struct TaskUpdateRequest {
     agent: Option<String>,
 }
 
+/// POST /v1/scratchpad request body — append a note to a task's scratchpad.
+#[derive(Debug, Deserialize)]
+struct ScratchpadWriteRequest {
+    note: String,
+    from: String,
+}
+
 /// A single base64-encoded attachment in an inbound webhook request.
 #[derive(Debug, Deserialize)]
 struct InboundAttachmentPayload {
@@ -138,6 +145,8 @@ struct HttpState {
     request_timeout_secs: u64,
     /// Path to the dynamic route registry file, if configured.
     route_registry_path: Option<PathBuf>,
+    /// Cluster directory for task registry access (scratchpad endpoints).
+    cluster_dir: Option<PathBuf>,
     /// File path for persisting the bearer token across restarts.
     #[cfg(feature = "pairing")]
     token_file: Option<PathBuf>,
@@ -232,6 +241,7 @@ impl HttpAdapter {
             pairing: Mutex::new(pairing),
             request_timeout_secs,
             route_registry_path: None,
+            cluster_dir: None,
             #[cfg(feature = "pairing")]
             token_file,
         });
@@ -252,6 +262,14 @@ impl HttpAdapter {
         Arc::get_mut(&mut self.state)
             .expect("with_route_registry called after Arc was shared")
             .route_registry_path = Some(registry.path.clone());
+        self
+    }
+
+    /// Attach the cluster directory so scratchpad endpoints can access the task registry.
+    pub fn with_cluster_dir(mut self, dir: PathBuf) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("with_cluster_dir called after Arc was shared")
+            .cluster_dir = Some(dir);
         self
     }
 }
@@ -309,6 +327,10 @@ impl Channel for HttpAdapter {
             .route("/v1/inbound", post(handle_inbound))
             .route("/v1/notify", post(handle_notify))
             .route("/v1/task_update", post(handle_task_update))
+            .route(
+                "/v1/scratchpad",
+                get(handle_scratchpad_read).post(handle_scratchpad_write),
+            )
             .route("/v1/schema", get(handle_schema))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&state),
@@ -855,7 +877,9 @@ async fn handle_inbound(
         session_hint: None,
         attachments,
         callback_url: body.callback_url.clone(),
-        deferred: true,
+        // Task dispatches (with callback_url) process immediately — they are intentional
+        // parent→child work, not background webhooks. Deferred messages wait for heartbeat.
+        deferred: body.callback_url.is_none(),
         metadata: None,
     };
 
@@ -1012,6 +1036,132 @@ async fn handle_task_update(
         Json(serde_json::json!({ "status": "updated", "task_id": task_id })),
     )
         .into_response()
+}
+
+// ─── Scratchpad ──────────────────────────────────────────────────────────────
+
+/// Max scratchpad entries per task (matches that-core constant).
+const MAX_SCRATCHPAD_ENTRIES: usize = 50;
+
+/// GET /v1/scratchpad?task_id=X — read a task's scratchpad entries.
+async fn handle_scratchpad_read(
+    State(state): State<Arc<HttpState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let task_id = match params.get("task_id") {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing task_id query parameter" })),
+            )
+                .into_response()
+        }
+    };
+    let tasks_path = match &state.cluster_dir {
+        Some(dir) => dir.join("agent_tasks.json"),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "scratchpad unavailable — no cluster_dir" })),
+            )
+                .into_response()
+        }
+    };
+    let tasks: Vec<serde_json::Value> = match std::fs::read_to_string(&tasks_path) {
+        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let task = tasks
+        .iter()
+        .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(task_id));
+    match task {
+        Some(t) => {
+            let entries = t
+                .get("scratchpad")
+                .cloned()
+                .unwrap_or(serde_json::json!([]));
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "task_id": task_id, "entries": entries })),
+            )
+                .into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("task '{}' not found", task_id) })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /v1/scratchpad?task_id=X — append a note to a task's scratchpad.
+async fn handle_scratchpad_write(
+    State(state): State<Arc<HttpState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    Json(body): Json<ScratchpadWriteRequest>,
+) -> Response {
+    let task_id = match params.get("task_id") {
+        Some(id) => id.clone(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "missing task_id query parameter" })),
+            )
+                .into_response()
+        }
+    };
+    let tasks_path = match &state.cluster_dir {
+        Some(dir) => dir.join("agent_tasks.json"),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "scratchpad unavailable — no cluster_dir" })),
+            )
+                .into_response()
+        }
+    };
+    let mut tasks: Vec<serde_json::Value> = match std::fs::read_to_string(&tasks_path) {
+        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let task = tasks
+        .iter_mut()
+        .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(&task_id));
+    match task {
+        Some(t) => {
+            let entry = serde_json::json!({
+                "from": body.from,
+                "note": body.note,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+            });
+            let scratchpad = t
+                .as_object_mut()
+                .unwrap()
+                .entry("scratchpad")
+                .or_insert_with(|| serde_json::json!([]));
+            if let Some(arr) = scratchpad.as_array_mut() {
+                arr.push(entry);
+                if arr.len() > MAX_SCRATCHPAD_ENTRIES {
+                    let start = arr.len() - MAX_SCRATCHPAD_ENTRIES;
+                    *arr = arr[start..].to_vec();
+                }
+            }
+            if let Err(e) = crate::atomic_write_json(&tasks_path, &tasks) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": format!("write failed: {e}") })),
+                )
+                    .into_response();
+            }
+            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("task '{}' not found", task_id) })),
+        )
+            .into_response(),
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

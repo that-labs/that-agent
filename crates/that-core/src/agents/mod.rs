@@ -126,6 +126,16 @@ pub struct TaskMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScratchpadEntry {
+    pub from: String,
+    pub note: String,
+    pub timestamp: String,
+}
+
+/// Max scratchpad entries per task.
+const MAX_SCRATCHPAD_ENTRIES: usize = 50;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTask {
     pub id: String,
     pub agent: String,
@@ -134,6 +144,8 @@ pub struct AgentTask {
     pub updated_at: String,
     pub result: Option<String>,
     pub messages: Vec<TaskMessage>,
+    #[serde(default)]
+    pub scratchpad: Vec<ScratchpadEntry>,
 }
 
 /// File-backed registry of agent tasks at `<cluster_dir>/agent_tasks.json`.
@@ -171,6 +183,7 @@ impl AgentTaskRegistry {
                 text: message.to_string(),
                 timestamp: now,
             }],
+            scratchpad: Vec::new(),
         };
         let mut tasks = self.load()?;
         tasks.push(task.clone());
@@ -246,6 +259,23 @@ impl AgentTaskRegistry {
                 timestamp: now,
             });
             Self::cap_messages(task);
+        }
+        self.save(&tasks)
+    }
+
+    pub fn scratchpad_append(&self, id: &str, from: &str, note: &str) -> Result<()> {
+        let mut tasks = self.load()?;
+        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
+            task.scratchpad.push(ScratchpadEntry {
+                from: from.to_string(),
+                note: note.to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            });
+            if task.scratchpad.len() > MAX_SCRATCHPAD_ENTRIES {
+                task.scratchpad = task
+                    .scratchpad
+                    .split_off(task.scratchpad.len() - MAX_SCRATCHPAD_ENTRIES);
+            }
         }
         self.save(&tasks)
     }

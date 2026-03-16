@@ -30,7 +30,9 @@ pub use hook::{HookAction, LoopHook, NoopHook};
 pub use types::{Message, ToolCall, ToolDef, Usage};
 
 use anyhow::Result;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use that_tools::ThatToolsConfig;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, info_span, warn, Instrument};
@@ -90,6 +92,20 @@ const BASE64_BLOB_MIN_LEN: usize = 1_000;
 const CONTEXT_WARN_FRACTION: f64 = 0.70;
 /// Fraction of context window at which compaction is mandatory.
 const CONTEXT_CRITICAL_FRACTION: f64 = 0.85;
+
+/// Tools classified as exploration — consecutive turns using only these trigger anti-loop.
+const EXPLORATION_TOOLS: &[&str] = &[
+    "shell_exec",
+    "fs_ls",
+    "fs_cat",
+    "code_grep",
+    "code_search",
+    "code_read",
+];
+/// Soft warning threshold — inject a nudge after this many exploration-only turns.
+const EXPLORATION_SOFT_LIMIT: u32 = 8;
+/// Hard limit — force the agent to stop exploring and report.
+const EXPLORATION_HARD_LIMIT: u32 = 12;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -237,6 +253,10 @@ async fn run_from_checkpoint(
             .filter(|m| matches!(m, Message::Assistant { .. }))
             .count() as u32
     };
+
+    // Anti-loop: track consecutive exploration-only turns.
+    let mut exploration_streak: u32 = 0;
+    let mut seen_calls: HashSet<u64> = HashSet::new();
 
     for turn in turns_consumed..config.max_turns {
         // Drain steering hints queued by the human between turns.
@@ -661,6 +681,51 @@ async fn run_from_checkpoint(
                  Your context window is {pct}% full. Call mem_compact NOW as your first \
                  action this turn to preserve the session before the window fills and \
                  responses get truncated.\n</system-reminder>"
+            )));
+        }
+
+        // ── Anti-loop: exploration streak detection ────────────────────────
+        if !tool_calls.is_empty()
+            && tool_calls
+                .iter()
+                .all(|tc| EXPLORATION_TOOLS.contains(&tc.name.as_str()))
+        {
+            exploration_streak += 1;
+            // Repeated-call booster: hash (name, args) and add +1 for duplicates.
+            for tc in &tool_calls {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                tc.name.hash(&mut hasher);
+                tc.args_json.hash(&mut hasher);
+                let h = hasher.finish();
+                if !seen_calls.insert(h) {
+                    exploration_streak += 1;
+                }
+            }
+        } else {
+            exploration_streak = 0;
+            seen_calls.clear();
+        }
+
+        if exploration_streak >= EXPLORATION_HARD_LIMIT {
+            warn!(
+                streak = exploration_streak,
+                "Anti-loop hard limit reached — forcing input_required"
+            );
+            messages.push(Message::user(
+                "STOP exploring. You have exceeded the exploration limit. \
+                 Report input_required with a specific question about what context is missing."
+                    .to_string(),
+            ));
+        } else if exploration_streak >= EXPLORATION_SOFT_LIMIT {
+            warn!(
+                streak = exploration_streak,
+                "Anti-loop soft warning — injecting nudge"
+            );
+            messages.push(Message::user(format!(
+                "You have been exploring for {exploration_streak} turns without progress. \
+                 Check if the information you need was provided in the task message or \
+                 scratchpad. If you cannot find what you need, report input_required \
+                 with a specific question about what is missing."
             )));
         }
 

@@ -587,17 +587,20 @@ pub async fn run_listen(
         // Build restart summary from last session + active tasks.
         let mut summary = format!("🔄 {} restarted — back online.", agent.name);
 
-        // Last human message from the most recent channel session.
-        // Skip heartbeat tasks, steering hints, and other system-injected messages.
+        // Find the last human message from a real channel session.
+        // Skip heartbeat/system sender keys — only look at channel:conversation:user sessions.
         let channel_sessions = session_mgr.load_channel_sessions();
-        if let Some((_sender, sid)) = channel_sessions.iter().next() {
+        let human_session = channel_sessions
+            .iter()
+            .find(|(key, _)| !key.starts_with("heartbeat:") && !key.starts_with("inbound:"));
+        if let Some((_sender, sid)) = human_session {
             if let Ok(entries) = session_mgr.read_transcript(sid) {
+                // Walk backwards to find a genuine human message (not system-injected).
                 let last_human_msg = entries.iter().rev().find_map(|e| match &e.event {
                     crate::session::TranscriptEvent::UserMessage { content }
-                        if !content.starts_with("Heartbeat check-in")
-                            && !content.starts_with("[hint]:")
-                            && !content.starts_with("[task:")
-                            && !content.starts_with("## Pending") =>
+                        if !content.starts_with("Heartbeat")
+                            && !content.starts_with('[')
+                            && !content.starts_with('#') =>
                     {
                         let preview: String = content.chars().take(100).collect();
                         Some(preview)
@@ -616,12 +619,21 @@ pub async fn run_listen(
             if !tasks.is_empty() {
                 summary.push_str(&format!("\nActive tasks: {}", tasks.len()));
                 for t in tasks.iter().take(5) {
-                    summary.push_str(&format!("\n• {} ({}): {}", t.agent, t.state, {
+                    let pad_hint = if t.scratchpad.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{} scratchpad notes]", t.scratchpad.len())
+                    };
+                    summary.push_str(&format!(
+                        "\n• {} ({}){}: {}",
+                        t.agent,
+                        t.state,
+                        pad_hint,
                         t.messages
                             .last()
                             .map(|m| m.text.chars().take(80).collect::<String>())
                             .unwrap_or_default()
-                    }));
+                    ));
                 }
             }
         }
@@ -738,6 +750,10 @@ pub async fn run_listen(
         });
     }
 
+    let sender_locks = SenderRunLocks::default();
+    let active_sender_runs: ActiveSenderRuns = Arc::default();
+    let sender_run_seq = Arc::new(AtomicU64::new(1));
+
     // ── Background heartbeat monitor ────────────────────────────────────────
     // Polls Heartbeat.md every heartbeat_interval seconds. Due entries are
     // dispatched as autonomous agent runs. Global items use "heartbeat:system";
@@ -755,6 +771,7 @@ pub async fn run_listen(
         let route_registry_hb = Arc::clone(&route_registry);
         let notification_queue_hb = Arc::clone(&notification_queue);
         let inbound_queue_hb = Arc::clone(&inbound_queue);
+        let active_runs_hb = Arc::clone(&active_sender_runs);
         let interval_secs = agent.heartbeat_interval.unwrap_or(10).max(1);
 
         let plugin_dir_hb = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -859,6 +876,22 @@ pub async fn run_listen(
                     heartbeat::Priority::Low => 3,
                     heartbeat::Priority::Unknown(_) => 4,
                 });
+
+                // Suppress non-urgent heartbeat entries when a task run is active.
+                // This prevents the agent from doing unrelated background work (status
+                // reports, daily checks) while focused on a parent-dispatched task.
+                let has_active_task_run = {
+                    let runs = active_runs_hb.lock().await;
+                    runs.keys().any(|k| !k.starts_with("heartbeat:"))
+                };
+                if has_active_task_run && !due_indices.is_empty() {
+                    due_indices.retain(|&i| {
+                        matches!(
+                            entries[i].priority,
+                            heartbeat::Priority::Urgent | heartbeat::Priority::High
+                        )
+                    });
+                }
 
                 let plugin_tasks = {
                     let _runtime_guard = plugin_runtime_lock_hb.lock().await;
@@ -991,9 +1024,21 @@ pub async fn run_listen(
                         task.push_str("\n\n## Pending inbound requests:\n");
                         for m in &pending_inbound {
                             let cb = m.callback_url.as_deref().unwrap_or("no callback");
+                            // Extract task_id from callback URL for scratchpad access.
+                            let task_id_hint = m
+                                .callback_url
+                                .as_deref()
+                                .and_then(|u| u.split("task_id=").nth(1))
+                                .map(|t| t.split('&').next().unwrap_or(t))
+                                .unwrap_or("");
                             let attach_count = m.attachments.len();
+                            let tid_line = if task_id_hint.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (task_id: {task_id_hint})")
+                            };
                             task.push_str(&format!(
-                                "### [sender: {}] (callback: {}) [{} attachments]\n{}\n\n",
+                                "### [sender: {}]{tid_line} (callback: {}) [{} attachments]\n{}\n\n",
                                 m.sender_id, cb, attach_count, m.text
                             ));
                         }
@@ -1125,13 +1170,31 @@ pub async fn run_listen(
                     )
                     .await;
                 }
+
+                // After processing, immediately re-check for inbound messages that
+                // arrived while we were busy. Avoids waiting a full tick interval for
+                // queued tasks dispatched by the parent during a long run.
+                let leftover_inbound = {
+                    let q = inbound_queue_hb.lock().await;
+                    !q.is_empty()
+                };
+                let leftover_notifs = {
+                    let q = notification_queue_hb.lock().await;
+                    !q.is_empty()
+                };
+                if leftover_inbound || leftover_notifs {
+                    debug!(
+                        "Heartbeat re-check: {} inbound, {} notifications queued during run",
+                        if leftover_inbound { "yes" } else { "no" },
+                        if leftover_notifs { "yes" } else { "no" }
+                    );
+                    // Reset the ticker so the next iteration starts immediately.
+                    ticker.reset();
+                }
             }
         });
     }
 
-    let sender_locks = SenderRunLocks::default();
-    let active_sender_runs: ActiveSenderRuns = Arc::default();
-    let sender_run_seq = Arc::new(AtomicU64::new(1));
     // ── SIGTERM / SIGINT handler ───────────────────────────────────────────
     // Without this, K8s pod termination (SIGTERM) or OOM-adjacent kills leave
     // no trace in logs, making crashes look "silent".

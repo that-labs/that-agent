@@ -1219,9 +1219,10 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "agent_task_send".into(),
             description: "Dispatch a task to a sub-agent asynchronously and return immediately with a \
-                task_id for tracking. The sub-agent processes the task in the background. Use \
-                agent_task_status to check progress. Pass an existing task_id to send a follow-up \
-                message (steering) to a running task.".into(),
+                task_id for tracking. The sub-agent processes the task in the background. \
+                Automatically writes workspace path and parent gateway URL to the task scratchpad. \
+                Use agent_task_status to check progress. Pass an existing task_id to send a \
+                follow-up message (steering) to a running task.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1242,6 +1243,34 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                 "properties": {
                     "task_id": { "type": "string", "description": "Specific task ID to query. Omit for all active tasks." }
                 }
+            }),
+        },
+        ToolDef {
+            name: "scratchpad_read".into(),
+            description: "Read a task's scratchpad — shared notes between parent and sub-agent. \
+                Tries local file first (zero cost); if task not found locally, falls back to \
+                parent gateway via HTTP. Use before starting work to check for context hints, \
+                workspace paths, or blockers left by the other side.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID to read scratchpad for" }
+                },
+                "required": ["task_id"]
+            }),
+        },
+        ToolDef {
+            name: "scratchpad_write".into(),
+            description: "Append a note to a task's scratchpad. Tries local file first; falls back to \
+                parent gateway via HTTP if task not found locally. Use to share context, report \
+                progress, flag blockers, or ask questions. Both parent and sub-agent can read and write.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID" },
+                    "note": { "type": "string", "description": "Note to append (context, progress, blocker, question)" }
+                },
+                "required": ["task_id", "note"]
             }),
         },
         ToolDef {
@@ -2622,6 +2651,17 @@ async fn dispatch_inner(
             crate::agents::post_to_agent_inbound(&gw, &args.message, sender, Some(&callback))
                 .await
                 .map_err(|e| ToolError(e.to_string()))?;
+
+            // Auto-enrich scratchpad with workspace context so sub-agent doesn't explore blindly.
+            let workspace_hint = format!(
+                "/home/agent/.that-agent/workspaces/{sender}",
+                sender = sender
+            );
+            let note = format!(
+                "Workspace root: {workspace_hint} (verify with ls)\nParent gateway: {parent_gw}"
+            );
+            let _ = task_reg.scratchpad_append(&task_id, sender, &note);
+
             Ok(serde_json::json!({ "task_id": task_id, "state": "submitted" }))
         }
         "agent_task_status" => {
@@ -2671,6 +2711,100 @@ async fn dispatch_inner(
                     })
                     .collect();
                 Ok(serde_json::json!({ "tasks": summary }))
+            }
+        }
+        "scratchpad_read" => {
+            #[derive(Deserialize)]
+            struct Args {
+                task_id: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+
+            // Try local registry first.
+            let local =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .and_then(|reg| reg.get(&args.task_id).ok().flatten());
+
+            if let Some(task) = local {
+                let entries: Vec<_> = task
+                    .scratchpad
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({ "from": e.from, "note": e.note, "at": e.timestamp })
+                    })
+                    .collect();
+                Ok(serde_json::json!({ "task_id": args.task_id, "entries": entries }))
+            } else if let Ok(parent_gw) = std::env::var("THAT_PARENT_GATEWAY_URL") {
+                // HTTP fallback to parent gateway.
+                let url = format!("{parent_gw}/v1/scratchpad?task_id={}", args.task_id);
+                let client = reqwest::Client::new();
+                let mut req = client.get(&url).timeout(Duration::from_secs(5));
+                if let Ok(token) = std::env::var("THAT_PARENT_GATEWAY_TOKEN") {
+                    req = req.bearer_auth(token);
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        let body: serde_json::Value =
+                            resp.json().await.unwrap_or(serde_json::json!({}));
+                        Ok(body)
+                    }
+                    _ => Ok(serde_json::json!({
+                        "task_id": args.task_id,
+                        "entries": [],
+                        "note": "scratchpad unavailable — check task message for context"
+                    })),
+                }
+            } else {
+                Err(ToolError(format!("task '{}' not found", args.task_id)))
+            }
+        }
+        "scratchpad_write" => {
+            #[derive(Deserialize)]
+            struct Args {
+                task_id: String,
+                note: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let sender = ctx.sender_name();
+
+            // Try local registry first.
+            let local_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path));
+            let local_ok = local_reg
+                .as_ref()
+                .map(|r| {
+                    r.scratchpad_append(&args.task_id, sender, &args.note)
+                        .is_ok()
+                })
+                .unwrap_or(false);
+
+            if local_ok {
+                Ok(serde_json::json!({ "ok": true }))
+            } else if let Ok(parent_gw) = std::env::var("THAT_PARENT_GATEWAY_URL") {
+                // HTTP fallback to parent gateway.
+                let url = format!("{parent_gw}/v1/scratchpad?task_id={}", args.task_id);
+                let client = reqwest::Client::new();
+                let mut req = client
+                    .post(&url)
+                    .timeout(Duration::from_secs(5))
+                    .json(&serde_json::json!({ "note": args.note, "from": sender }));
+                if let Ok(token) = std::env::var("THAT_PARENT_GATEWAY_TOKEN") {
+                    req = req.bearer_auth(token);
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => Ok(serde_json::json!({ "ok": true })),
+                    _ => Ok(serde_json::json!({
+                        "ok": false,
+                        "note": "scratchpad unavailable — check task message for context"
+                    })),
+                }
+            } else {
+                Err(ToolError(format!(
+                    "task '{}' not found and no parent gateway configured",
+                    args.task_id
+                )))
             }
         }
         "agent_task_cancel" => {
