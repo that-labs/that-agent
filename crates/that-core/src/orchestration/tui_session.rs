@@ -1298,6 +1298,9 @@ pub async fn execute_agent_run_tui(
             }
             Err(interrupted) => {
                 if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
+                    if checkpoint_messages.is_some() {
+                        attempt = 0;
+                    }
                     attempt += 1;
                     checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
                     checkpoint_messages = Some(interrupted.messages);

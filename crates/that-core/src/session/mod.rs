@@ -64,6 +64,9 @@ pub enum TranscriptEvent {
         /// The last tool the agent called before the interruption.
         #[serde(skip_serializing_if = "Option::is_none")]
         last_tool: Option<String>,
+        /// Recent tool call names from the interrupted run (most recent last).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        recent_tools: Vec<String>,
     },
 
     #[serde(rename = "usage")]
@@ -374,6 +377,7 @@ impl SessionManager {
                     interrupted_run_id: Some(interrupted.run_id.clone()),
                     last_task: interrupted.last_task,
                     last_tool: interrupted.last_tool,
+                    recent_tools: interrupted.recent_tools,
                 },
             },
         );
@@ -438,12 +442,14 @@ pub fn rebuild_history(entries: &[TranscriptEntry]) -> Vec<crate::agent_loop::Me
             TranscriptEvent::Restart {
                 last_task,
                 last_tool,
+                recent_tools,
                 ..
             } => {
                 let ctx = InterruptedRun {
                     run_id: String::new(),
                     last_task: last_task.clone(),
                     last_tool: last_tool.clone(),
+                    recent_tools: recent_tools.clone(),
                 };
                 append_restart_marker(&mut history, &ctx);
             }
@@ -499,6 +505,7 @@ pub fn rebuild_history_recent(
             TranscriptEvent::Restart {
                 last_task,
                 last_tool,
+                recent_tools,
                 ..
             } => {
                 // Persisted restart marker — inject as a synthetic pair.
@@ -506,6 +513,7 @@ pub fn rebuild_history_recent(
                     run_id: String::new(),
                     last_task: last_task.clone(),
                     last_tool: last_tool.clone(),
+                    recent_tools: recent_tools.clone(),
                 };
                 let (user_msg, asst_msg) = restart_marker_pair(&ctx);
                 pairs.push((user_msg, asst_msg));
@@ -560,7 +568,21 @@ fn restart_marker_pair(ctx: &InterruptedRun) -> (String, String) {
         }
         msg.push('.');
     }
-    if let Some(tool) = &ctx.last_tool {
+    if !ctx.recent_tools.is_empty() {
+        // Show up to the last 15 tool calls so the agent sees what it was doing.
+        let chain: Vec<&str> = ctx
+            .recent_tools
+            .iter()
+            .rev()
+            .take(15)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|s| s.as_str())
+            .collect();
+        msg.push_str(&format!(" Recent tool chain: {}", chain.join(" → ")));
+        msg.push('.');
+    } else if let Some(tool) = &ctx.last_tool {
         msg.push_str(&format!(" The last tool you called was: {tool}."));
     }
     msg.push_str(" Assess the situation before continuing.]");
@@ -584,6 +606,8 @@ struct InterruptedRun {
     run_id: String,
     last_task: Option<String>,
     last_tool: Option<String>,
+    /// Recent tool call names from the interrupted run (most recent last).
+    recent_tools: Vec<String>,
 }
 
 /// Returns context about the last interrupted run, if any.
@@ -597,6 +621,7 @@ fn find_interrupted_run(entries: &[TranscriptEntry]) -> Option<InterruptedRun> {
                     run_id: entry.run_id.clone(),
                     last_task: Some(task.clone()),
                     last_tool: None,
+                    recent_tools: Vec::new(),
                 });
                 open += 1;
             }
@@ -609,6 +634,7 @@ fn find_interrupted_run(entries: &[TranscriptEntry]) -> Option<InterruptedRun> {
             TranscriptEvent::ToolCall { tool, .. } if open > 0 => {
                 if let Some(ref mut c) = current {
                     c.last_tool = Some(tool.clone());
+                    c.recent_tools.push(tool.clone());
                 }
             }
             _ => {}

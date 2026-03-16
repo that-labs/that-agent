@@ -262,6 +262,9 @@ pub async fn execute_agent_run_streaming(
             }
             Err(interrupted) => {
                 if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
+                    if checkpoint_messages.is_some() {
+                        attempt = 0;
+                    }
                     attempt += 1;
                     checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
                     checkpoint_messages = Some(interrupted.messages);
@@ -399,6 +402,9 @@ pub async fn execute_agent_run_eval(
             }
             Err(interrupted) => {
                 if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
+                    if checkpoint_messages.is_some() {
+                        attempt = 0;
+                    }
                     attempt += 1;
                     checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
                     checkpoint_messages = Some(interrupted.messages);
@@ -867,6 +873,11 @@ pub async fn execute_agent_run_channel(
             }
             Err(interrupted) => {
                 if is_retryable_error(&interrupted.error) && attempt < MAX_NETWORK_RETRIES {
+                    // Reset retry counter if the agent made progress since the last error
+                    // (new tool events means turns completed successfully before this failure).
+                    if !tool_events.is_empty() {
+                        attempt = 0;
+                    }
                     attempt += 1;
                     checkpoint_usage = checkpoint_usage.add(&interrupted.usage);
                     checkpoint_messages = Some(interrupted.messages);
