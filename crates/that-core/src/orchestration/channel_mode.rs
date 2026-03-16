@@ -587,18 +587,25 @@ pub async fn run_listen(
         // Build restart summary from last session + active tasks.
         let mut summary = format!("🔄 {} restarted — back online.", agent.name);
 
-        // Last user message from the most recent channel session.
+        // Last human message from the most recent channel session.
+        // Skip heartbeat tasks, steering hints, and other system-injected messages.
         let channel_sessions = session_mgr.load_channel_sessions();
         if let Some((_sender, sid)) = channel_sessions.iter().next() {
             if let Ok(entries) = session_mgr.read_transcript(sid) {
-                let last_user_msg = entries.iter().rev().find_map(|e| match &e.event {
-                    crate::session::TranscriptEvent::UserMessage { content } => {
-                        Some(content.chars().take(200).collect::<String>())
+                let last_human_msg = entries.iter().rev().find_map(|e| match &e.event {
+                    crate::session::TranscriptEvent::UserMessage { content }
+                        if !content.starts_with("Heartbeat check-in")
+                            && !content.starts_with("[hint]:")
+                            && !content.starts_with("[task:")
+                            && !content.starts_with("## Pending") =>
+                    {
+                        let preview: String = content.chars().take(100).collect();
+                        Some(preview)
                     }
                     _ => None,
                 });
-                if let Some(msg) = last_user_msg {
-                    summary.push_str(&format!("\nLast message: \"{msg}\""));
+                if let Some(msg) = last_human_msg {
+                    summary.push_str(&format!("\nLast request: \"{msg}\""));
                 }
             }
         }
