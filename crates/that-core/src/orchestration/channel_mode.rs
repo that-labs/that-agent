@@ -574,6 +574,7 @@ pub async fn run_listen(
     router.initialize_deferred().await;
 
     // If unbootstrapped, greet on all channels so the user knows to start the ceremony.
+    // Otherwise, send a restart marker so the user knows we're back.
     if ws_files.needs_bootstrap() {
         let name = &agent.name;
         router
@@ -581,6 +582,10 @@ pub async fn run_listen(
                 "Hey! I'm {name} — I just woke up for the first time. \
                  Send me a message to start our bootstrap ceremony and figure out who I am."
             ))
+            .await;
+    } else {
+        router
+            .notify_all(&format!("🔄 {} restarted — back online.", agent.name))
             .await;
     }
 

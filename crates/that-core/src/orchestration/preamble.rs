@@ -150,6 +150,8 @@ fn task_delegation_preamble() -> &'static str {
      | Steer running task | `agent_task_send(task_id=X)` | Redirect, add context |\n\
      | Quick answer needed | `agent_query` | Simple questions, <30s |\n\
      | Parallel ephemeral | `agent_run` (×N) | Fan-out coding with workspace |\n\n\
+     **Never use `agent_query` to check sub-agent status** — it blocks your turn. Use `agent_task_status()` instead (instant, free).\n\
+     After a restart, check `agent_task_status()` and `agent_list()` before contacting sub-agents — they may also be restarting.\n\n\
      Sub-agent notifications are relayed to the channel immediately AND queued for your next heartbeat turn.\n\n"
 }
 
