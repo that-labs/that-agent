@@ -268,15 +268,27 @@ fn build_request(
 
     let messages_json = messages_to_anthropic(messages, prompt_caching);
 
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,
         "stream": true,
         "system": system_block,
         "messages": messages_json,
         "tools": tools_json,
-    })
-    .to_string()
+    });
+
+    // Claude 4+ models support extended thinking. Enable it with a budget
+    // of ~60% of max_tokens, leaving room for the visible response.
+    // Models: claude-opus-4*, claude-sonnet-4*, claude-haiku-4*, etc.
+    if model.starts_with("claude-") && !model.contains("-3") {
+        let budget = (max_tokens as u64 * 3 / 5).max(1024);
+        body["thinking"] = serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": budget,
+        });
+    }
+
+    body.to_string()
 }
 
 fn tool_to_anthropic(t: &ToolDef) -> serde_json::Value {
@@ -598,5 +610,31 @@ mod tests {
         assert!(parsed["messages"].is_array());
         assert!(parsed["tools"].is_array());
         assert_eq!(parsed["messages"].as_array().unwrap().len(), 1);
+        // Opus models must have thinking enabled
+        assert_eq!(parsed["thinking"]["type"], "enabled");
+        assert!(parsed["thinking"]["budget_tokens"].as_u64().unwrap() >= 1024);
+    }
+
+    #[test]
+    fn build_request_sonnet_has_thinking() {
+        let messages = vec![Message::user("hello")];
+        let body = build_request("system", &messages, &[], "claude-sonnet-4-6", 4096, false);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn build_request_claude3_has_no_thinking() {
+        let messages = vec![Message::user("hello")];
+        let body = build_request(
+            "system",
+            &messages,
+            &[],
+            "claude-3-5-sonnet-20241022",
+            4096,
+            false,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(parsed["thinking"].is_null());
     }
 }
