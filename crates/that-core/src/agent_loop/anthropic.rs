@@ -518,4 +518,78 @@ mod tests {
             Some("ephemeral")
         );
     }
+
+    #[test]
+    fn turn1_with_restart_history_produces_valid_request() {
+        // Simulate restart history + new "yo" message — this is the exact
+        // sequence that causes 400 errors in production.
+        let messages = vec![
+            // Restart history from rebuild_history_recent
+            Message::user("[System: the previous run was interrupted. You were working on: \"deploy finx\". Recent tool chain: fs_cat → shell_exec → code_edit. Assess the situation before continuing.]"),
+            Message::assistant("Understood — I was interrupted. I'll check the current state before proceeding."),
+            // New inbound message
+            Message::user("yo\n\n<system-reminder>\nchannel info here\n</system-reminder>"),
+        ];
+
+        let wire = messages_to_anthropic(&messages, true);
+        let arr = wire.as_array().unwrap();
+
+        // Must have exactly 3 messages with alternating roles
+        assert_eq!(arr.len(), 3, "expected 3 messages, got: {arr:?}");
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[1]["role"], "assistant");
+        assert_eq!(arr[2]["role"], "user");
+
+        // Content must not be null or empty array
+        for (i, msg) in arr.iter().enumerate() {
+            let content = &msg["content"];
+            assert!(
+                !content.is_null(),
+                "message {i} has null content: {msg}"
+            );
+            if let Some(arr) = content.as_array() {
+                assert!(!arr.is_empty(), "message {i} has empty content array: {msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn single_user_message_produces_valid_wire_format() {
+        // Simplest case: just "yo" with no history
+        let messages = vec![Message::user("yo")];
+        let wire = messages_to_anthropic(&messages, true);
+        let arr = wire.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["role"], "user");
+        // Turn 1 with single message: cache_control should NOT be added
+        // (out.len() == 1, so the cache condition `out.len() > 1` is false)
+        let content = &arr[0]["content"];
+        assert!(content.is_string() || content.is_array());
+    }
+
+    #[test]
+    fn build_request_produces_valid_json() {
+        let messages = vec![Message::user("hello")];
+        let tools = vec![ToolDef {
+            name: "shell_exec".into(),
+            description: "Run a command".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cmd": { "type": "string" }
+                },
+                "required": ["cmd"]
+            }),
+        }];
+        let body = build_request("system prompt", &messages, &tools, "claude-opus-4-6", 4096, true);
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .expect("build_request should produce valid JSON");
+
+        assert_eq!(parsed["model"], "claude-opus-4-6");
+        assert_eq!(parsed["stream"], true);
+        assert!(parsed["system"].is_array());
+        assert!(parsed["messages"].is_array());
+        assert!(parsed["tools"].is_array());
+        assert_eq!(parsed["messages"].as_array().unwrap().len(), 1);
+    }
 }
