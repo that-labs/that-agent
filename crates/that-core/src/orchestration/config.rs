@@ -113,10 +113,8 @@ pub fn should_use_channel_empty_response_fallback(
     // Mid-task notifications are not a substitute for the run's final user-facing
     // answer. Only suppress the fallback when a terminal channel delivery tool
     // already succeeded and produced its own outbound message, or when the agent
-    // deliberately sent its final answer via channel_notify as its last action.
-    !has_successful_terminal_channel_output(tool_events)
-        && !last_tool_was_answer(tool_events)
-        && !last_tool_was_channel_notify(tool_events)
+    // deliberately sent its final answer via the dedicated answer tool.
+    !has_successful_terminal_channel_output(tool_events) && !last_tool_was_answer(tool_events)
 }
 
 pub fn summarize_tool_result_for_empty_response(
@@ -191,13 +189,6 @@ pub fn last_tool_was_answer(tool_events: &[that_channels::ToolLogEvent]) -> bool
     last_tool_result_name(tool_events) == Some(("answer", false))
 }
 
-/// Returns true when the last tool result in the event log is a successful
-/// `channel_notify`. This signals the agent deliberately sent its final
-/// answer via the notification tool, so no fallback response is needed.
-pub fn last_tool_was_channel_notify(tool_events: &[that_channels::ToolLogEvent]) -> bool {
-    last_tool_result_name(tool_events) == Some(("channel_notify", false))
-}
-
 fn last_tool_result_name(tool_events: &[that_channels::ToolLogEvent]) -> Option<(&str, bool)> {
     tool_events.iter().rev().find_map(|ev| {
         if let that_channels::ToolLogEvent::Result { name, is_error, .. } = ev {
@@ -238,8 +229,8 @@ pub fn should_retry_empty_channel_response(
     if !text.trim().is_empty() {
         return false;
     }
-    // If the agent deliberately sent its final answer via answer or channel_notify, skip retry.
-    if last_tool_was_answer(tool_events) || last_tool_was_channel_notify(tool_events) {
+    // If the agent deliberately sent its final answer via answer, skip retry.
+    if last_tool_was_answer(tool_events) {
         return false;
     }
     // Avoid re-running after side-effecting tool calls — but memory tools are
@@ -628,8 +619,7 @@ mod tests {
     use that_channels::ToolLogEvent;
 
     #[test]
-    fn empty_response_after_final_channel_notify_skips_fallback() {
-        // channel_notify as the last tool call = agent's deliberate final answer.
+    fn empty_response_after_channel_notify_uses_fallback() {
         let tool_events = vec![
             ToolLogEvent::Call {
                 name: "channel_notify".into(),
@@ -642,7 +632,7 @@ mod tests {
             },
         ];
 
-        assert!(!should_use_channel_empty_response_fallback(
+        assert!(should_use_channel_empty_response_fallback(
             "",
             false,
             &tool_events
@@ -779,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_skipped_when_last_tool_was_channel_notify() {
+    fn retry_still_skipped_after_channel_notify_side_effect() {
         let tool_events = vec![
             ToolLogEvent::Call {
                 name: "channel_notify".into(),

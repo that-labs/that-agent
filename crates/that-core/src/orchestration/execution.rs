@@ -844,10 +844,7 @@ pub async fn execute_agent_run_channel(
                 tracing::Span::current().record("otel.status_code", "ok");
                 tracing::Span::current().record("otel.status_description", "agent run completed");
                 crate::observability::flush_tracing();
-                if !suppress_output
-                    && !last_tool_was_answer(&tool_events)
-                    && !last_tool_was_channel_notify(&tool_events)
-                {
+                if !suppress_output && !last_tool_was_answer(&tool_events) {
                     let event = that_channels::ChannelEvent::Done {
                         text: text.clone(),
                         input_tokens: usage.input_tokens as u64,
