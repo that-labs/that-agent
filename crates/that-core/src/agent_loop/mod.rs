@@ -438,6 +438,7 @@ async fn run_from_checkpoint(
         // Results are collected into a vec indexed by original position to preserve order.
         type ToolResult = (String, Vec<(Vec<u8>, String)>);
         let mut tool_results: Vec<Option<ToolResult>> = vec![None; tool_calls.len()];
+        let mut terminal_output: Option<String> = None;
 
         // Partition: identify which tools can run in parallel.
         let parallel_indices: Vec<usize> = tool_calls
@@ -537,34 +538,56 @@ async fn run_from_checkpoint(
                 .await;
 
             let mut tool_images: Vec<(Vec<u8>, String)> = Vec::new();
-            let result = match action {
-                HookAction::Skip { result_json } => {
-                    tool_span.in_scope(|| {
-                        tracing::Span::current().record("tool.skipped", true);
-                    });
-                    result_json
-                }
-                HookAction::Continue => {
-                    if tc.name == "code_edit" {
-                        if let Some(edit_path) = tool_arg_path(&tc.args_json) {
-                            if let Some(previous_call_id) =
-                                pending_edit_verification.get(&edit_path).cloned()
-                            {
-                                tool_span.in_scope(|| {
-                                    tracing::Span::current().record(
-                                        "tool.guard_reason",
-                                        "edit_requires_read_verification",
-                                    );
-                                });
-                                edit_verification_guard_result(&edit_path, &previous_call_id)
+            let result = if terminal_output.is_some() {
+                r#"{"skipped":true,"reason":"run already finalized via answer"}"#.to_string()
+            } else {
+                match action {
+                    HookAction::Skip { result_json } => {
+                        tool_span.in_scope(|| {
+                            tracing::Span::current().record("tool.skipped", true);
+                        });
+                        result_json
+                    }
+                    HookAction::Finish {
+                        result_json,
+                        output_text,
+                    } => {
+                        tool_span.in_scope(|| {
+                            tracing::Span::current().record("tool.skipped", true);
+                        });
+                        terminal_output = Some(output_text);
+                        result_json
+                    }
+                    HookAction::Continue => {
+                        if tc.name == "code_edit" {
+                            if let Some(edit_path) = tool_arg_path(&tc.args_json) {
+                                if let Some(previous_call_id) =
+                                    pending_edit_verification.get(&edit_path).cloned()
+                                {
+                                    tool_span.in_scope(|| {
+                                        tracing::Span::current().record(
+                                            "tool.guard_reason",
+                                            "edit_requires_read_verification",
+                                        );
+                                    });
+                                    edit_verification_guard_result(&edit_path, &previous_call_id)
+                                } else {
+                                    let dr =
+                                        dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
+                                            .instrument(tool_span.clone())
+                                            .await;
+                                    tool_images = dr.images;
+                                    if !is_tool_error_result(&dr.text) {
+                                        pending_edit_verification
+                                            .insert(edit_path, tc.call_id.clone());
+                                    }
+                                    dr.text
+                                }
                             } else {
                                 let dr = dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
                                     .instrument(tool_span.clone())
                                     .await;
                                 tool_images = dr.images;
-                                if !is_tool_error_result(&dr.text) {
-                                    pending_edit_verification.insert(edit_path, tc.call_id.clone());
-                                }
                                 dr.text
                             }
                         } else {
@@ -572,19 +595,13 @@ async fn run_from_checkpoint(
                                 .instrument(tool_span.clone())
                                 .await;
                             tool_images = dr.images;
+                            if tc.name == "code_read" && !is_tool_error_result(&dr.text) {
+                                if let Some(read_path) = tool_arg_path(&tc.args_json) {
+                                    pending_edit_verification.remove(&read_path);
+                                }
+                            }
                             dr.text
                         }
-                    } else {
-                        let dr = dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
-                            .instrument(tool_span.clone())
-                            .await;
-                        tool_images = dr.images;
-                        if tc.name == "code_read" && !is_tool_error_result(&dr.text) {
-                            if let Some(read_path) = tool_arg_path(&tc.args_json) {
-                                pending_edit_verification.remove(&read_path);
-                            }
-                        }
-                        dr.text
                     }
                 }
             };
@@ -649,6 +666,10 @@ async fn run_from_checkpoint(
                 content,
                 images: tool_images,
             });
+        }
+
+        if let Some(output) = terminal_output {
+            return Ok((output, total_usage));
         }
 
         // If context is getting large, warn the agent before its next turn so it

@@ -11,6 +11,11 @@ pub enum HookAction {
     Continue,
     /// Skip tool execution and inject this JSON string as the result instead.
     Skip { result_json: String },
+    /// Skip tool execution, inject this JSON string as the result, and finish the run now.
+    Finish {
+        result_json: String,
+        output_text: String,
+    },
 }
 
 /// Callback interface invoked at each observable event in the agentic loop.

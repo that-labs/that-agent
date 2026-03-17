@@ -620,7 +620,7 @@ impl LoopHook for ChannelHook {
 
                 if !message.is_empty() {
                     let event = ChannelEvent::Done {
-                        text: message,
+                        text: message.clone(),
                         input_tokens: 0,
                         output_tokens: 0,
                         cached_input_tokens: 0,
@@ -632,8 +632,9 @@ impl LoopHook for ChannelHook {
                         self.router.broadcast(&event).await;
                     }
                 }
-                HookAction::Skip {
+                HookAction::Finish {
                     result_json: r#"{"delivered":true}"#.to_string(),
+                    output_text: message,
                 }
             }
             "channel_notify" => {
@@ -1006,4 +1007,30 @@ fn mime_type_hint(filename: &str) -> Option<String> {
         }
         .to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_loop::hook::LoopHook;
+
+    #[tokio::test]
+    async fn answer_tool_finishes_the_run() {
+        let (router, _rx) = that_channels::ChannelRouter::new(vec![], 0);
+        let router = Arc::new(router);
+        let hook = ChannelHook::silent(router, None);
+        let action = hook
+            .on_tool_call("answer", "call-1", r#"{"message":"done"}"#)
+            .await;
+        match action {
+            HookAction::Finish {
+                result_json,
+                output_text,
+            } => {
+                assert_eq!(result_json, r#"{"delivered":true}"#);
+                assert_eq!(output_text, "done");
+            }
+            other => panic!("expected terminal answer hook action, got {other:?}"),
+        }
+    }
 }

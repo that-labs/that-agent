@@ -63,6 +63,44 @@ pub(super) struct ActiveSenderRun {
 pub(super) type ActiveSenderRuns =
     Arc<tokio::sync::Mutex<std::collections::HashMap<String, ActiveSenderRun>>>;
 
+fn is_zero_git_oid(oid: &str) -> bool {
+    !oid.is_empty() && oid.chars().all(|ch| ch == '0')
+}
+
+fn heartbeat_sender_key(
+    channel_id: &str,
+    conversation_id: Option<&str>,
+    sender_id: &str,
+) -> String {
+    format!(
+        "heartbeat:{}:{}:{}",
+        channel_id,
+        conversation_id.unwrap_or_default(),
+        sender_id
+    )
+}
+
+fn should_queue_notification(text: &str, metadata: Option<&serde_json::Value>) -> bool {
+    if let Some(meta) = metadata {
+        if let Some(state) = meta.get("task_state").and_then(|value| value.as_str()) {
+            return matches!(
+                state,
+                "completed" | "failed" | "canceled" | "input_required"
+            );
+        }
+        if let Some(event) = meta.get("event").and_then(|value| value.as_str()) {
+            return matches!(event, "merge_conflict");
+        }
+    }
+
+    let text = text.trim();
+    !(text.starts_with('[')
+        && text.contains(" turn ")
+        && text.contains('/')
+        && text.ends_with(')')
+        && text.contains(" ("))
+}
+
 fn mirror_notify_event_to_scratchpad(meta: &serde_json::Value) {
     let cluster_dir = dirs::home_dir()
         .unwrap_or_default()
@@ -119,6 +157,14 @@ fn branch_task_id(branch: &str) -> Option<&str> {
 fn notify_scratchpad_event(meta: &serde_json::Value) -> Option<NotifyScratchpadEvent<'_>> {
     let event = meta.get("event").and_then(|v| v.as_str())?;
     let kind = match event {
+        "push"
+            if meta
+                .get("commit")
+                .and_then(|v| v.as_str())
+                .is_some_and(is_zero_git_oid) =>
+        {
+            "branch_deleted"
+        }
         "push" => "commit",
         "auto_merge" => "auto_merge",
         "merge_conflict" => "merge_conflict",
@@ -135,6 +181,9 @@ fn notify_scratchpad_event(meta: &serde_json::Value) -> Option<NotifyScratchpadE
     let branch = meta.get("branch").and_then(|v| v.as_str()).unwrap_or("");
     let commit = meta.get("commit").and_then(|v| v.as_str()).unwrap_or("");
     let note = match event {
+        "push" if is_zero_git_oid(commit) => {
+            format!("Git branch deletion visible to parent: repo={repo}, branch={branch}")
+        }
         "push" => {
             format!("Git activity visible to parent: repo={repo}, branch={branch}, commit={commit}")
         }
@@ -214,15 +263,56 @@ pub async fn evict_sender_lock_if_idle(
     }
 }
 
-/// Abort and clear the currently active run for a sender key, if any.
-/// Also cleans up any ephemeral K8s Jobs spawned by this agent.
-pub(super) async fn stop_active_sender_run(
+async fn stop_matching_runs<F>(active_runs: &ActiveSenderRuns, matches: F) -> usize
+where
+    F: Fn(&str) -> bool,
+{
+    let mut runs = active_runs.lock().await;
+    let keys: Vec<String> = runs.keys().filter(|key| matches(key)).cloned().collect();
+    for key in &keys {
+        if let Some(run) = runs.remove(key) {
+            run.abort.abort();
+        }
+    }
+    keys.len()
+}
+
+pub(super) async fn stop_run_scope(
     active_runs: &ActiveSenderRuns,
+    channel_id: &str,
+    conversation_id: Option<&str>,
+    sender_id: &str,
+    sender_key: &str,
+) -> usize {
+    let scoped_heartbeat_key = heartbeat_sender_key(channel_id, conversation_id, sender_id);
+    stop_matching_runs(active_runs, |key| {
+        key == sender_key || key == scoped_heartbeat_key || key == "heartbeat:system"
+    })
+    .await
+}
+
+async fn cleanup_after_stop(notification_queue: &Arc<tokio::sync::Mutex<Vec<String>>>) {
+    notification_queue.lock().await.clear();
+}
+
+pub(super) async fn stop_run_scope_and_cleanup(
+    active_runs: &ActiveSenderRuns,
+    notification_queue: &Arc<tokio::sync::Mutex<Vec<String>>>,
+    channel_id: &str,
+    conversation_id: Option<&str>,
+    sender_id: &str,
     sender_key: &str,
 ) -> bool {
-    let active = active_runs.lock().await.remove(sender_key);
-    if let Some(run) = active {
-        run.abort.abort();
+    let stopped = stop_run_scope(
+        active_runs,
+        channel_id,
+        conversation_id,
+        sender_id,
+        sender_key,
+    )
+    .await;
+    if stopped > 0 {
+        cleanup_after_stop(notification_queue).await;
         // Clean up ephemeral child Jobs in K8s (fire-and-forget)
         if crate::agents::is_k8s_mode() {
             tokio::spawn(async {
@@ -231,10 +321,8 @@ pub(super) async fn stop_active_sender_run(
                 }
             });
         }
-        true
-    } else {
-        false
     }
+    stopped > 0
 }
 
 fn apply_channel_preferences(agent: &AgentDef, prefs: &ChannelPreferences) -> AgentDef {
@@ -917,6 +1005,7 @@ pub async fn run_listen(
         let notification_queue_hb = Arc::clone(&notification_queue);
         let inbound_queue_hb = Arc::clone(&inbound_queue);
         let active_runs_hb = Arc::clone(&active_sender_runs);
+        let sender_run_seq_hb = Arc::clone(&sender_run_seq);
         let interval_secs = agent.heartbeat_interval.unwrap_or(10).max(1);
 
         let plugin_dir_hb = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -1232,7 +1321,7 @@ pub async fn run_listen(
                         "Dispatching global heartbeat run"
                     );
 
-                    run_agent_for_sender(
+                    run_agent_for_sender_tracked(
                         task,
                         "heartbeat".to_string(),
                         "system".to_string(),
@@ -1247,12 +1336,13 @@ pub async fn run_listen(
                         container_hb.clone(),
                         preamble_hb.clone(),
                         Arc::clone(&router_hb),
+                        Arc::clone(&active_runs_hb),
+                        Arc::clone(&sender_run_seq_hb),
                         vec![],
                         Some(Arc::clone(&cluster_registry_hb)),
                         Some(Arc::clone(&channel_registry_hb)),
                         Some(Arc::clone(&route_registry_hb)),
                         skill_roots_hb.clone(),
-                        None,
                         None,
                         None,
                     )
@@ -1289,7 +1379,7 @@ pub async fn run_listen(
                         "Dispatching scoped heartbeat run"
                     );
 
-                    run_agent_for_sender(
+                    run_agent_for_sender_tracked(
                         task,
                         route_channel_id,
                         sender_for_route,
@@ -1304,12 +1394,13 @@ pub async fn run_listen(
                         container_hb.clone(),
                         preamble_hb.clone(),
                         Arc::clone(&router_hb),
+                        Arc::clone(&active_runs_hb),
+                        Arc::clone(&sender_run_seq_hb),
                         vec![],
                         Some(Arc::clone(&cluster_registry_hb)),
                         Some(Arc::clone(&channel_registry_hb)),
                         Some(Arc::clone(&route_registry_hb)),
                         skill_roots_hb.clone(),
-                        None,
                         None,
                         None,
                     )
@@ -1414,12 +1505,14 @@ pub async fn run_listen(
                             mirror_notify_event_to_scratchpad(meta);
                         }
                     }
-                    // Queue for parent LLM context at next heartbeat turn.
-                    let mut q = notification_queue.lock().await;
-                    if q.len() < 500 {
-                        q.push(msg.text);
-                    } else {
-                        warn!("notification_queue full (500), dropping notification");
+                    // Queue only actionable notifications for parent LLM context at next heartbeat turn.
+                    if should_queue_notification(&msg.text, msg.metadata.as_ref()) {
+                        let mut q = notification_queue.lock().await;
+                        if q.len() < 500 {
+                            q.push(msg.text);
+                        } else {
+                            warn!("notification_queue full (500), dropping notification");
+                        }
                     }
                     return;
                 }
@@ -1442,7 +1535,15 @@ pub async fn run_listen(
                         reply_to_message_id: msg.message_id.clone(),
                         request_id: msg.session_hint.clone(),
                     };
-                    let stopped = stop_active_sender_run(&active_sender_runs, &sender_key).await;
+                    let stopped = stop_run_scope_and_cleanup(
+                        &active_sender_runs,
+                        &notification_queue,
+                        &msg.channel_id,
+                        msg.conversation_id.as_deref(),
+                        &msg.sender_id,
+                        &sender_key,
+                    )
+                    .await;
                     let text = if stopped {
                         "Stopped current run."
                     } else {
@@ -1467,8 +1568,14 @@ pub async fn run_listen(
                         if let Some(mid) = msg.message_id.clone() {
                             let r = Arc::clone(&router);
                             let ch = msg.channel_id.clone();
-                            let chat = msg.conversation_id.clone().unwrap_or_default();
-                            tokio::spawn(async move { r.react_to_message(&ch, &chat, &mid, "\u{1FAE1}").await });
+                            let chat = msg
+                                .conversation_id
+                                .clone()
+                                .unwrap_or_else(|| msg.sender_id.clone());
+                            tokio::spawn(async move {
+                                r.react_to_message(&ch, &chat, &mid, "\u{1FAE1}")
+                                    .await
+                            });
                         }
                         return;
                     }
@@ -1701,8 +1808,15 @@ pub async fn run_listen(
                                 return;
                             }
                             "stop" => {
-                                let stopped =
-                                    stop_active_sender_run(&active_sender_runs, &sender_key).await;
+                                let stopped = stop_run_scope_and_cleanup(
+                                    &active_sender_runs,
+                                    &notification_queue,
+                                    &msg.channel_id,
+                                    msg.conversation_id.as_deref(),
+                                    &msg.sender_id,
+                                    &sender_key,
+                                )
+                                .await;
                                 let text = if stopped {
                                     "Stopped current run."
                                 } else {
@@ -2374,10 +2488,13 @@ async fn run_agent_for_sender(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_config_slug, effective_channel_config_visible_path,
-        mirror_notify_event_to_registry, notify_scratchpad_event,
+        channel_config_slug, effective_channel_config_visible_path, heartbeat_sender_key,
+        mirror_notify_event_to_registry, notify_scratchpad_event, should_queue_notification,
+        stop_run_scope,
     };
     use crate::agents::AgentTaskRegistry;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     #[test]
     fn channel_config_slug_normalizes_sender_keys() {
@@ -2411,6 +2528,105 @@ mod tests {
             vec!["developer".to_string(), "reviewer".to_string()]
         );
         assert!(event.task_id.is_none());
+    }
+
+    #[test]
+    fn notify_scratchpad_event_marks_branch_deletion() {
+        let meta = serde_json::json!({
+            "event": "push",
+            "agent": "git-server/developer",
+            "repo": "workspace",
+            "branch": "task/developer/task-1",
+            "commit": "0000000000000000000000000000000000000000",
+        });
+        let event = notify_scratchpad_event(&meta).unwrap();
+        assert_eq!(event.kind, "branch_deleted");
+        assert!(event.note.contains("branch deletion"));
+    }
+
+    #[test]
+    fn should_queue_notification_filters_progress_and_git_push_noise() {
+        assert!(!should_queue_notification(
+            "[backend-dev] turn 17/300 (64s)",
+            None
+        ));
+        assert!(!should_queue_notification(
+            "[git-server/orchestrator] git push: orchestrator pushed task/backend-dev to workspace (830fd6dc)",
+            Some(&serde_json::json!({
+                "event": "push",
+                "commit": "830fd6dc"
+            }))
+        ));
+        assert!(should_queue_notification(
+            "[task:abc/backend-dev] completed: shipped",
+            Some(&serde_json::json!({
+                "task_id": "abc",
+                "task_state": "completed"
+            }))
+        ));
+        assert!(should_queue_notification(
+            "[git-server] merge conflict",
+            Some(&serde_json::json!({
+                "event": "merge_conflict"
+            }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_run_scope_aborts_matching_heartbeat_run() {
+        let active_runs: super::ActiveSenderRuns =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let sender_key = "telegram:309052368:309052368".to_string();
+        let hb_key = heartbeat_sender_key("telegram", Some("309052368"), "309052368");
+        let direct = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let heartbeat = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        {
+            let mut runs = active_runs.lock().await;
+            runs.insert(
+                sender_key.clone(),
+                super::ActiveSenderRun {
+                    run_id: 1,
+                    abort: direct.abort_handle(),
+                    steering: Arc::new(Mutex::new(Vec::new())),
+                },
+            );
+            runs.insert(
+                hb_key.clone(),
+                super::ActiveSenderRun {
+                    run_id: 2,
+                    abort: heartbeat.abort_handle(),
+                    steering: Arc::new(Mutex::new(Vec::new())),
+                },
+            );
+            runs.insert(
+                "heartbeat:system".to_string(),
+                super::ActiveSenderRun {
+                    run_id: 3,
+                    abort: tokio::spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    })
+                    .abort_handle(),
+                    steering: Arc::new(Mutex::new(Vec::new())),
+                },
+            );
+        }
+
+        let stopped = stop_run_scope(
+            &active_runs,
+            "telegram",
+            Some("309052368"),
+            "309052368",
+            &sender_key,
+        )
+        .await;
+        assert_eq!(stopped, 3);
+        assert!(active_runs.lock().await.is_empty());
+        direct.abort();
+        heartbeat.abort();
     }
 
     #[test]
