@@ -49,7 +49,7 @@ pub(super) async fn stream_turn(
     let adaptive_thinking = supports_adaptive_thinking(model);
 
     // Build request body.
-    let effective_caching = prompt_caching && !is_oauth;
+    let effective_caching = prompt_caching;
     let body = build_request(
         system,
         messages,
@@ -743,6 +743,47 @@ mod tests {
         let system = parsed["system"].as_array().unwrap();
         assert_eq!(system[0]["text"], CLAUDE_CODE_IDENTITY);
         assert_eq!(system[1]["text"], "system");
+    }
+
+    #[test]
+    fn build_request_oauth_preserves_cache_markers() {
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant("ok"),
+            Message::user("again"),
+        ];
+        let tools = vec![ToolDef {
+            name: "shell_exec".into(),
+            description: "Run a command".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "cmd": { "type": "string" } },
+                "required": ["cmd"]
+            }),
+        }];
+        let body = build_request(
+            "system",
+            &messages,
+            &tools,
+            "claude-opus-4-6",
+            4096,
+            true,
+            true,
+            true,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["system"][1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(parsed["tools"][0]["cache_control"]["type"], "ephemeral");
+        let last_user = parsed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rposition(|m| m["role"] == "user")
+            .unwrap();
+        assert_eq!(
+            parsed["messages"][last_user]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
