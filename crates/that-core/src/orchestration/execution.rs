@@ -24,8 +24,8 @@ const FINALIZATION_SNIPPET_CHARS: usize = 160;
 
 /// Resolve the provider API key from environment variables.
 ///
-/// For Anthropic, checks `CLAUDE_CODE_OAUTH_TOKEN` first (OAuth flow),
-/// then falls back to `ANTHROPIC_API_KEY`.
+/// For Anthropic, checks `CLAUDE_CODE_OAUTH_TOKEN` first (subscription OAuth),
+/// then falls back to `ANTHROPIC_API_KEY` (console pay-per-use).
 pub fn api_key_for_provider(provider: &str) -> Result<String> {
     match provider {
         "anthropic" => std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
