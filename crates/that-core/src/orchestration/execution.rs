@@ -24,12 +24,12 @@ const FINALIZATION_SNIPPET_CHARS: usize = 160;
 
 /// Resolve the provider API key from environment variables.
 ///
-/// For Anthropic, prefers `ANTHROPIC_API_KEY` (console pay-per-use), then
-/// falls back to Claude Code OAuth aliases.
+/// For Anthropic, checks Claude Code OAuth aliases first, then falls back to
+/// `ANTHROPIC_API_KEY` (console pay-per-use).
 pub fn api_key_for_provider(provider: &str) -> Result<String> {
     match provider {
         "anthropic" => crate::auth::anthropic_api_key_from_env().context(
-            "Set ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_AUTH_TOKEN, or CLAUDE_CODE_AUTH",
+            "Set CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_AUTH_TOKEN, CLAUDE_CODE_AUTH, or ANTHROPIC_API_KEY",
         ),
         "openai" => std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set"),
         "openrouter" => std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set"),

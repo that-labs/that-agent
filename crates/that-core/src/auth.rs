@@ -13,7 +13,7 @@ pub fn anthropic_oauth_token_from_env() -> Option<String> {
 }
 
 pub fn anthropic_api_key_from_env() -> Option<String> {
-    first_nonempty_env(&["ANTHROPIC_API_KEY"]).or_else(anthropic_oauth_token_from_env)
+    anthropic_oauth_token_from_env().or_else(|| first_nonempty_env(&["ANTHROPIC_API_KEY"]))
 }
 
 pub fn anthropic_provider_available() -> bool {
@@ -67,7 +67,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_api_key_wins_over_oauth_aliases() {
+    fn oauth_aliases_win_over_api_key() {
         let _guard = ENV_LOCK.lock().unwrap();
         let keys = [
             "ANTHROPIC_API_KEY",
@@ -82,8 +82,8 @@ mod tests {
         for key in keys {
             std::env::remove_var(key);
         }
-        std::env::set_var("ANTHROPIC_API_KEY", "api-key");
         std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token");
+        std::env::set_var("ANTHROPIC_API_KEY", "api-key");
 
         let resolved = anthropic_api_key_from_env();
 
@@ -94,7 +94,7 @@ mod tests {
                 std::env::remove_var(key);
             }
         }
-        assert_eq!(resolved.as_deref(), Some("api-key"));
+        assert_eq!(resolved.as_deref(), Some("oauth-token"));
     }
 
     #[test]

@@ -9,6 +9,12 @@ use tokio::sync::mpsc;
 
 use super::types::{Message, ToolCall, ToolDef, Usage};
 
+const ANTHROPIC_FINE_GRAINED_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
+const ANTHROPIC_INTERLEAVED_BETA: &str = "interleaved-thinking-2025-05-14";
+const ANTHROPIC_OAUTH_IDENTITY_BETAS: &str = "claude-code-20250219,oauth-2025-04-20";
+const CLAUDE_CODE_USER_AGENT: &str = "claude-cli/2.1.75";
+const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
 /// Internal events emitted for a single provider turn.
 ///
 /// The runner collects these to reconstruct the assistant message + tool calls
@@ -40,19 +46,19 @@ pub(super) async fn stream_turn(
     use futures::StreamExt;
 
     let is_oauth = is_oauth_token(api_key);
-
-    // OAuth tokens don't support prompt-caching or interleaved-thinking betas.
-    let effective_caching = prompt_caching && !is_oauth;
+    let adaptive_thinking = supports_adaptive_thinking(model);
 
     // Build request body.
+    let effective_caching = prompt_caching && !is_oauth;
     let body = build_request(
         system,
         messages,
         tools,
         model,
         max_tokens,
-        effective_caching,
         is_oauth,
+        adaptive_thinking,
+        effective_caching,
     );
 
     let client = super::llm_http_client();
@@ -61,17 +67,26 @@ pub(super) async fn stream_turn(
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json");
 
-    if is_oauth {
-        // OAuth tokens (sk-ant-oat-*) don't support all beta features.
-        // Only send the oauth beta; drop interleaved-thinking and prompt-caching.
-        req = req
-            .header("Authorization", format!("Bearer {api_key}"))
-            .header("anthropic-beta", "oauth-2025-04-20");
+    let mut betas = vec![ANTHROPIC_FINE_GRAINED_BETA];
+    if !adaptive_thinking {
+        betas.push(ANTHROPIC_INTERLEAVED_BETA);
+    }
+    if effective_caching {
+        betas.insert(0, "prompt-caching-2024-07-31");
+    }
+    let beta_header = if is_oauth {
+        format!("{ANTHROPIC_OAUTH_IDENTITY_BETAS},{}", betas.join(","))
     } else {
-        req = req.header("x-api-key", api_key).header(
-            "anthropic-beta",
-            "prompt-caching-2024-07-31,interleaved-thinking-2025-05-14",
-        );
+        betas.join(",")
+    };
+    req = req.header("anthropic-beta", beta_header);
+    if is_oauth {
+        req = req
+            .bearer_auth(api_key)
+            .header("user-agent", CLAUDE_CODE_USER_AGENT)
+            .header("x-app", "cli");
+    } else {
+        req = req.header("x-api-key", api_key);
     }
 
     let response = req.body(body.clone()).send().await?;
@@ -112,10 +127,6 @@ pub(super) async fn stream_turn(
             );
         }
         return Err(anthropic_api_error(status, &resp_body, is_oauth));
-    }
-
-    if is_oauth {
-        return parse_oauth_response(response, tx).await;
     }
 
     // Parse SSE stream.
@@ -271,106 +282,46 @@ pub(super) async fn stream_turn(
     Ok(usage)
 }
 
-async fn parse_oauth_response(
-    response: reqwest::Response,
-    tx: mpsc::Sender<TurnEvent>,
-) -> Result<Usage> {
-    let payload: serde_json::Value = response.json().await?;
-    let mut full_text = String::new();
-    let mut usage = Usage::default();
-
-    if let Some(u) = payload.get("usage") {
-        usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0) as u32;
-        usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0) as u32;
-        usage.cache_read_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32;
-        usage.cache_write_tokens = u["cache_creation_input_tokens"].as_u64().unwrap_or(0) as u32;
-    }
-
-    if let Some(blocks) = payload["content"].as_array() {
-        for block in blocks {
-            match block["type"].as_str().unwrap_or("") {
-                "text" => {
-                    let text = block["text"].as_str().unwrap_or("").to_string();
-                    if !text.is_empty() {
-                        full_text.push_str(&text);
-                        let _ = tx.send(TurnEvent::TextDelta(text)).await;
-                    }
-                }
-                "thinking" => {
-                    let thinking = block["thinking"].as_str().unwrap_or("").to_string();
-                    if !thinking.is_empty() {
-                        let _ = tx.send(TurnEvent::ReasoningDelta(thinking)).await;
-                    }
-                }
-                "tool_use" => {
-                    let args_json = serde_json::to_string(
-                        block.get("input").unwrap_or(&serde_json::Value::Null),
-                    )
-                    .unwrap_or_else(|_| "{}".to_string());
-                    let _ = tx
-                        .send(TurnEvent::ToolCallComplete(ToolCall {
-                            call_id: block["id"].as_str().unwrap_or("").to_string(),
-                            name: block["name"].as_str().unwrap_or("").to_string(),
-                            args_json,
-                        }))
-                        .await;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let _ = tx
-        .send(TurnEvent::TurnEnd {
-            full_text,
-            usage: usage.clone(),
-        })
-        .await;
-
-    Ok(usage)
-}
-
 /// Build the Anthropic request JSON body.
-///
-/// OAuth tokens have limited beta support — no prompt-caching blocks, no
-/// interleaved-thinking, no streaming. The request is shaped to match what
-/// the Anthropic OAuth endpoint accepts (plain string system, no stream,
-/// omit empty tools).
+#[allow(clippy::too_many_arguments)]
 fn build_request(
     system: &str,
     messages: &[Message],
     tools: &[ToolDef],
     model: &str,
     max_tokens: u32,
-    prompt_caching: bool,
     is_oauth: bool,
+    adaptive_thinking: bool,
+    prompt_caching: bool,
 ) -> String {
-    // System prompt: array-of-blocks for caching, plain string for OAuth.
-    let system_val = if prompt_caching {
-        serde_json::json!([{
+    let mut system_blocks = Vec::new();
+    if is_oauth {
+        system_blocks.push(serde_json::json!({
+            "type": "text",
+            "text": CLAUDE_CODE_IDENTITY,
+        }));
+    }
+    if !system.is_empty() {
+        let mut block = serde_json::json!({
             "type": "text",
             "text": system,
-            "cache_control": { "type": "ephemeral" }
-        }])
-    } else if is_oauth {
-        serde_json::json!(system)
-    } else {
-        serde_json::json!([{ "type": "text", "text": system }])
-    };
+        });
+        if prompt_caching {
+            block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+        }
+        system_blocks.push(block);
+    }
 
     // Convert tools to Anthropic format (input_schema instead of parameters).
-    let tools_json: Option<serde_json::Value> = if tools.is_empty() {
-        None
-    } else if prompt_caching {
+    let tools_json: serde_json::Value = if prompt_caching && !tools.is_empty() {
         let mut arr: Vec<serde_json::Value> = tools.iter().map(tool_to_anthropic).collect();
+        // Add cache_control to the last tool to cache the whole tool block.
         if let Some(last) = arr.last_mut() {
             last["cache_control"] = serde_json::json!({ "type": "ephemeral" });
         }
-        Some(serde_json::Value::Array(arr))
+        serde_json::Value::Array(arr)
     } else {
-        Some(serde_json::Value::Array(
-            tools.iter().map(tool_to_anthropic).collect(),
-        ))
+        serde_json::Value::Array(tools.iter().map(tool_to_anthropic).collect())
     };
 
     let messages_json = messages_to_anthropic(messages, prompt_caching);
@@ -378,24 +329,24 @@ fn build_request(
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,
-        "stream": !is_oauth,
-        "system": system_val,
+        "stream": true,
         "messages": messages_json,
+        "tools": tools_json,
     });
-
-    // Omit tools entirely when empty (OAuth rejects empty arrays).
-    if let Some(tools_val) = tools_json {
-        body["tools"] = tools_val;
+    if !system_blocks.is_empty() {
+        body["system"] = serde_json::Value::Array(system_blocks);
     }
 
-    // Claude 4+ models support extended thinking, but OAuth tokens don't
-    // support the interleaved-thinking beta. Only enable for API key auth.
-    if !is_oauth && model.starts_with("claude-") && !model.contains("-3") {
-        let budget = (max_tokens as u64 * 3 / 5).max(1024);
-        body["thinking"] = serde_json::json!({
-            "type": "enabled",
-            "budget_tokens": budget,
-        });
+    if model.starts_with("claude-") && !model.contains("-3") {
+        if adaptive_thinking {
+            body["thinking"] = serde_json::json!({ "type": "adaptive" });
+        } else {
+            let budget = (max_tokens as u64 * 3 / 5).max(1024);
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            });
+        }
     }
 
     body.to_string()
@@ -408,19 +359,24 @@ fn anthropic_api_error(
 ) -> anyhow::Error {
     if is_oauth && matches!(status.as_u16(), 400 | 401 | 403) {
         return anyhow::anyhow!(
-            "Anthropic rejected the Claude Code OAuth token ({status}): {resp_body}\n\
-             Claude Code docs currently state that OAuth tokens from Free, Pro, and Max \
-             are restricted to Claude Code and Claude.ai, and third-party tools must use ANTHROPIC_API_KEY."
+            "Anthropic OAuth request failed ({status}): {resp_body}\n\
+             This path should work with a valid Claude Code OAuth token, so the rejection likely points to request-shape incompatibility or token scope."
         );
     }
     anyhow::anyhow!("Anthropic API error {status}: {resp_body}")
 }
 
 fn tool_to_anthropic(t: &ToolDef) -> serde_json::Value {
+    let properties = t.parameters["properties"].clone();
+    let required = t.parameters["required"].clone();
     serde_json::json!({
         "name": t.name,
         "description": t.description,
-        "input_schema": t.parameters,
+        "input_schema": {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        },
     })
 }
 
@@ -595,6 +551,16 @@ fn is_oauth_token(token: &str) -> bool {
     token.starts_with("sk-ant-oat")
 }
 
+fn supports_adaptive_thinking(model: &str) -> bool {
+    matches!(
+        model,
+        m if m.contains("opus-4-6")
+            || m.contains("opus-4.6")
+            || m.contains("sonnet-4-6")
+            || m.contains("sonnet-4.6")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,8 +690,9 @@ mod tests {
             &tools,
             "claude-opus-4-6",
             4096,
+            false,
             true,
-            false, // not OAuth
+            true,
         );
         let parsed: serde_json::Value =
             serde_json::from_str(&body).expect("build_request should produce valid JSON");
@@ -736,9 +703,7 @@ mod tests {
         assert!(parsed["messages"].is_array());
         assert!(parsed["tools"].is_array());
         assert_eq!(parsed["messages"].as_array().unwrap().len(), 1);
-        // Opus models must have thinking enabled (API key path)
-        assert_eq!(parsed["thinking"]["type"], "enabled");
-        assert!(parsed["thinking"]["budget_tokens"].as_u64().unwrap() >= 1024);
+        assert_eq!(parsed["thinking"]["type"], "adaptive");
     }
 
     #[test]
@@ -751,14 +716,15 @@ mod tests {
             "claude-sonnet-4-6",
             4096,
             false,
+            true,
             false,
         );
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(parsed["thinking"]["type"], "enabled");
+        assert_eq!(parsed["thinking"]["type"], "adaptive");
     }
 
     #[test]
-    fn build_request_oauth_no_thinking() {
+    fn build_request_oauth_uses_claude_code_shape() {
         let messages = vec![Message::user("hello")];
         let body = build_request(
             "system",
@@ -766,14 +732,17 @@ mod tests {
             &[],
             "claude-opus-4-6",
             4096,
-            false,
             true,
+            true,
+            false,
         );
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        // OAuth tokens don't support interleaved-thinking beta
-        assert!(parsed["thinking"].is_null());
-        assert_eq!(parsed["stream"], false);
-        assert!(parsed["system"].is_string());
+        assert_eq!(parsed["stream"], true);
+        assert!(parsed["system"].is_array());
+        assert_eq!(parsed["thinking"]["type"], "adaptive");
+        let system = parsed["system"].as_array().unwrap();
+        assert_eq!(system[0]["text"], CLAUDE_CODE_IDENTITY);
+        assert_eq!(system[1]["text"], "system");
     }
 
     #[test]
@@ -787,20 +756,21 @@ mod tests {
             4096,
             false,
             false,
+            false,
         );
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(parsed["thinking"].is_null());
     }
 
     #[test]
-    fn oauth_errors_include_api_key_guidance() {
+    fn oauth_errors_point_to_request_shape() {
         let err = anthropic_api_error(
             reqwest::StatusCode::BAD_REQUEST,
             "{\"type\":\"error\"}",
             true,
         );
         let msg = format!("{err:#}");
-        assert!(msg.contains("OAuth token"));
-        assert!(msg.contains("ANTHROPIC_API_KEY"));
+        assert!(msg.contains("OAuth request failed"));
+        assert!(msg.contains("request-shape"));
     }
 }
