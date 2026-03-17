@@ -1032,38 +1032,21 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "provider_list".into(),
-            description: "List dynamically registered inference providers available for /models.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        },
-        ToolDef {
-            name: "provider_register".into(),
-            description: "Register a new OpenAI-compatible inference provider at runtime. \
-                Use the provider id later in /models and set the API key in the referenced env var.".into(),
+            name: "provider_admin".into(),
+            description: "Manage dynamically registered inference providers. \
+                Use action=list to inspect providers, action=register to add a new OpenAI-compatible provider, \
+                or action=unregister to remove one.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "Unique provider id, for example groq" },
-                    "base_url": { "type": "string", "description": "OpenAI-compatible API base URL, for example https://api.groq.com/openai/v1" },
-                    "api_key_env": { "type": "string", "description": "Environment variable name that holds the provider API key" },
-                    "models": { "type": "array", "items": { "type": "string" }, "description": "Suggested models to show in /models" },
-                    "transport": { "type": "string", "enum": ["openai_chat"], "description": "Provider transport type. Only openai_chat is supported right now." }
+                    "action": { "type": "string", "enum": ["list", "register", "unregister"], "description": "Provider admin action to perform" },
+                    "id": { "type": "string", "description": "Provider id for register/unregister, for example groq" },
+                    "base_url": { "type": "string", "description": "OpenAI-compatible API base URL for register, for example https://api.groq.com/openai/v1" },
+                    "api_key_env": { "type": "string", "description": "Environment variable name that holds the provider API key for register" },
+                    "models": { "type": "array", "items": { "type": "string" }, "description": "Suggested models to show in /models for register" },
+                    "transport": { "type": "string", "enum": ["openai_chat"], "description": "Provider transport type for register. Only openai_chat is supported right now." }
                 },
-                "required": ["id", "base_url", "api_key_env"]
-            }),
-        },
-        ToolDef {
-            name: "provider_unregister".into(),
-            description: "Remove a dynamically registered inference provider.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Provider id to unregister" }
-                },
-                "required": ["id"]
+                "required": ["action"]
             }),
         },
         // ── Dynamic gateway route tools ──────────────────────────────────────
@@ -1179,18 +1162,9 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "agent_list".into(),
-            description: "List all agents — persistent Deployments and ephemeral Jobs — with their \
-                role, gateway URL, and status.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        },
-        ToolDef {
             name: "agent_query".into(),
             description: "Send a synchronous message to a persistent agent and block until response. \
-                Best for quick one-shot questions (<30s). For longer work, prefer agent_task_send. \
+                Best for quick one-shot questions (<30s). For longer work, prefer agent_task with action=send. \
                 Set stream=true to relay the sub-agent's tool calls to the channel in real-time.".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -1204,212 +1178,55 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "agent_query_async".into(),
-            description: "Deprecated — use agent_task_send for tracked async delegation. \
-                Sends a fire-and-forget message with no task tracking.".into(),
+            name: "agent_task".into(),
+            description: "Manage asynchronous sub-agent tasks and shared scratchpads. \
+                Use action=send to start or steer a task, action=status to inspect it, \
+                action=scratchpad_read or scratchpad_write for shared notes, action=cancel or resume to control execution, \
+                or action=query_async for deprecated fire-and-forget delivery.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Name of the target agent" },
-                    "message": { "type": "string", "description": "Message to send" }
+                    "action": { "type": "string", "enum": ["send", "status", "scratchpad_read", "scratchpad_write", "cancel", "resume", "query_async"], "description": "Agent task action to perform" },
+                    "name": { "type": "string", "description": "Target agent name for send/query_async" },
+                    "message": { "type": "string", "description": "Task description, follow-up message, or async query message" },
+                    "task_id": { "type": "string", "description": "Existing task ID for send/status/scratchpad/cancel/resume" },
+                    "note": { "type": "string", "description": "Scratchpad note for scratchpad_write" }
                 },
-                "required": ["name", "message"]
+                "required": ["action"]
             }),
         },
         ToolDef {
-            name: "agent_task_send".into(),
-            description: "Dispatch a task to a sub-agent asynchronously and return immediately with a \
-                task_id for tracking. The sub-agent processes the task in the background. \
-                Automatically writes workspace path and parent gateway URL to the task scratchpad. \
-                Use agent_task_status to check progress. Pass an existing task_id to send a \
-                follow-up message (steering) to a running task.".into(),
+            name: "agent_admin".into(),
+            description: "Inspect or manage child agents. \
+                Use action=list to inspect all agents, action=status or logs for one agent, \
+                or action=stop or unregister to clean up child agents.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Name of the target agent" },
-                    "message": { "type": "string", "description": "Task description or follow-up message" },
-                    "task_id": { "type": "string", "description": "Existing task ID to send a follow-up to. Omit to create a new task." }
+                    "action": { "type": "string", "enum": ["list", "status", "logs", "stop", "unregister"], "description": "Agent admin action to perform" },
+                    "name": { "type": "string", "description": "Agent name for status/logs/stop/unregister" },
+                    "tail": { "type": "integer", "description": "Number of log lines from the end for action=logs (default: 50)" }
                 },
-                "required": ["name", "message"]
+                "required": ["action"]
             }),
         },
         ToolDef {
-            name: "agent_task_status".into(),
-            description: "Check agent task status. Zero cost — reads from local file, no API call. \
-                Without task_id returns a summary of all active tasks. With task_id returns full \
-                detail including message history.".into(),
+            name: "workspace_admin".into(),
+            description: "Manage shared workspaces used by sub-agents. \
+                Use action=share to publish a repo, action=collect to merge or review worker output, \
+                or action=activity, diff, or conflicts for read-only inspection.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "string", "description": "Specific task ID to query. Omit for all active tasks." }
-                }
-            }),
-        },
-        ToolDef {
-            name: "scratchpad_read".into(),
-            description: "Read a task's scratchpad — shared notes between parent and sub-agent. \
-                Tries local file first (zero cost); if task not found locally, falls back to \
-                parent gateway via HTTP. Use before starting work to check for context hints, \
-                workspace paths, or blockers left by the other side.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "Task ID to read scratchpad for" }
+                    "action": { "type": "string", "enum": ["share", "collect", "activity", "diff", "conflicts"], "description": "Workspace admin action to perform" },
+                    "path": { "type": "string", "description": "Local git repo path for action=share or local working tree for action=collect" },
+                    "name": { "type": "string", "description": "Optional shared repo name for action=share" },
+                    "worker": { "type": "string", "description": "Worker name for action=collect" },
+                    "strategy": { "type": "string", "description": "\"merge\" (default) or \"review\" for action=collect" },
+                    "repo": { "type": "string", "description": "Shared repo name for action=activity/diff/conflicts (defaults to \"workspace\")" },
+                    "branch": { "type": "string", "description": "Branch for action=diff or action=conflicts, for example \"task/worker-1\"" }
                 },
-                "required": ["task_id"]
-            }),
-        },
-        ToolDef {
-            name: "scratchpad_write".into(),
-            description: "Append a note to a task's scratchpad. Tries local file first; falls back to \
-                parent gateway via HTTP if task not found locally. Use to share context, report \
-                progress, flag blockers, or ask questions. Both parent and sub-agent can read and write.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "Task ID" },
-                    "note": { "type": "string", "description": "Note to append (context, progress, blocker, question)" }
-                },
-                "required": ["task_id", "note"]
-            }),
-        },
-        ToolDef {
-            name: "agent_task_cancel".into(),
-            description: "Cancel a running task. Sets the task state to canceled and sends a \
-                cancellation message to the sub-agent. The sub-agent winds down at its next \
-                processing cycle. Use agent_task_resume to restart later.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "Task ID to cancel" }
-                },
-                "required": ["task_id"]
-            }),
-        },
-        ToolDef {
-            name: "agent_task_resume".into(),
-            description: "Resume a previously canceled task. Re-sends the original task message \
-                to the sub-agent with resume context so it can pick up where it left off.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_id": { "type": "string", "description": "Task ID to resume" }
-                },
-                "required": ["task_id"]
-            }),
-        },
-        ToolDef {
-            name: "agent_unregister".into(),
-            description: "Remove a child agent and all its resources. In K8s mode uses label-scoped \
-                deletion; locally removes the registry entry and kills the process.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Name of the agent to remove" }
-                },
-                "required": ["name"]
-            }),
-        },
-        ToolDef {
-            name: "agent_stop".into(),
-            description: "Stop and clean up a running child agent (ephemeral or persistent). \
-                Deletes the Job/Deployment and all associated resources. Use when a child is stuck, \
-                timed out, or no longer needed.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Name of the agent to stop" }
-                },
-                "required": ["name"]
-            }),
-        },
-        ToolDef {
-            name: "agent_status".into(),
-            description: "Get detailed status of a child agent — running, completed, failed, \
-                pod phase, and start time. Works for both ephemeral Jobs and persistent Deployments.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Name of the agent to check" }
-                },
-                "required": ["name"]
-            }),
-        },
-        ToolDef {
-            name: "agent_logs".into(),
-            description: "Get recent log output from a child agent. Works for running or completed agents. \
-                Use to inspect what an agent is doing or why it failed.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Name of the agent" },
-                    "tail": { "type": "integer", "description": "Number of log lines from the end (default: 50)" }
-                },
-                "required": ["name"]
-            }),
-        },
-        ToolDef {
-            name: "workspace_share".into(),
-            description: "Share a local git repository with sub-agents via the in-cluster git server. \
-                Workers can clone this workspace for coding tasks. Call before agent_run with workspace param.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Path to a git repo to share" },
-                    "name": { "type": "string", "description": "Optional repo name (defaults to folder basename)" }
-                },
-                "required": ["path"]
-            }),
-        },
-        ToolDef {
-            name: "workspace_collect".into(),
-            description: "Merge or review a worker's code changes back into your local workspace. \
-                Call after agent_run completes for coding tasks.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "Local working tree to merge into" },
-                    "worker": { "type": "string", "description": "Worker name whose branch to merge" },
-                    "strategy": { "type": "string", "description": "\"merge\" (default) or \"review\" (diff only, no merge)" }
-                },
-                "required": ["path", "worker"]
-            }),
-        },
-        ToolDef {
-            name: "workspace_activity".into(),
-            description: "Check worker progress on the shared workspace — lists branches, ahead/behind \
-                counts vs main, and last commit per branch. Use to monitor parallel workers without cloning.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "repo": { "type": "string", "description": "Repo name (defaults to \"workspace\")" }
-                }
-            }),
-        },
-        ToolDef {
-            name: "workspace_diff".into(),
-            description: "Get a unified diff of a worker's branch vs main, without cloning. \
-                Use to review worker output before collecting.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "branch": { "type": "string", "description": "Branch to diff, e.g. \"task/worker-1\"" },
-                    "repo": { "type": "string", "description": "Repo name (defaults to \"workspace\")" }
-                },
-                "required": ["branch"]
-            }),
-        },
-        ToolDef {
-            name: "workspace_conflicts".into(),
-            description: "Analyze merge conflicts between a worker's branch and main. Returns the list \
-                of conflicting files and both sides of the diff. Use when workspace_collect reports a merge failure.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "branch": { "type": "string", "description": "Branch to check, e.g. \"task/worker-1\"" },
-                    "repo": { "type": "string", "description": "Repo name (defaults to \"workspace\")" }
-                },
-                "required": ["branch"]
+                "required": ["action"]
             }),
         },
     ]
@@ -1503,6 +1320,167 @@ async fn dispatch_image_read(args_json: &str, ctx: &ToolContext) -> DispatchResu
     }
 }
 
+fn remap_grouped_tool_call(
+    name: &str,
+    args_json: &str,
+) -> Result<Option<(String, String)>, ToolError> {
+    match name {
+        "provider_admin" => {
+            #[derive(Deserialize)]
+            struct Args {
+                action: String,
+                id: Option<String>,
+                base_url: Option<String>,
+                api_key_env: Option<String>,
+                #[serde(default)]
+                models: Vec<String>,
+                transport: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let (legacy_name, legacy_args) = match args.action.as_str() {
+                "list" => ("provider_list", serde_json::json!({})),
+                "register" => (
+                    "provider_register",
+                    serde_json::json!({
+                        "id": args.id,
+                        "base_url": args.base_url,
+                        "api_key_env": args.api_key_env,
+                        "models": args.models,
+                        "transport": args.transport.unwrap_or_else(|| "openai_chat".into()),
+                    }),
+                ),
+                "unregister" => ("provider_unregister", serde_json::json!({ "id": args.id })),
+                other => return Err(ToolError(format!("unknown provider_admin action: {other}"))),
+            };
+            Ok(Some((legacy_name.into(), legacy_args.to_string())))
+        }
+        "agent_task" => {
+            #[derive(Deserialize)]
+            struct Args {
+                action: String,
+                name: Option<String>,
+                message: Option<String>,
+                task_id: Option<String>,
+                note: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let (legacy_name, legacy_args) = match args.action.as_str() {
+                "send" => (
+                    "agent_task_send",
+                    serde_json::json!({
+                        "name": args.name,
+                        "message": args.message,
+                        "task_id": args.task_id,
+                    }),
+                ),
+                "status" => (
+                    "agent_task_status",
+                    serde_json::json!({ "task_id": args.task_id }),
+                ),
+                "scratchpad_read" => (
+                    "scratchpad_read",
+                    serde_json::json!({ "task_id": args.task_id }),
+                ),
+                "scratchpad_write" => (
+                    "scratchpad_write",
+                    serde_json::json!({
+                        "task_id": args.task_id,
+                        "note": args.note,
+                    }),
+                ),
+                "cancel" => (
+                    "agent_task_cancel",
+                    serde_json::json!({ "task_id": args.task_id }),
+                ),
+                "resume" => (
+                    "agent_task_resume",
+                    serde_json::json!({ "task_id": args.task_id }),
+                ),
+                "query_async" => (
+                    "agent_query_async",
+                    serde_json::json!({
+                        "name": args.name,
+                        "message": args.message,
+                    }),
+                ),
+                other => return Err(ToolError(format!("unknown agent_task action: {other}"))),
+            };
+            Ok(Some((legacy_name.into(), legacy_args.to_string())))
+        }
+        "agent_admin" => {
+            #[derive(Deserialize)]
+            struct Args {
+                action: String,
+                name: Option<String>,
+                tail: Option<u32>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let (legacy_name, legacy_args) = match args.action.as_str() {
+                "list" => ("agent_list", serde_json::json!({})),
+                "status" => ("agent_status", serde_json::json!({ "name": args.name })),
+                "logs" => (
+                    "agent_logs",
+                    serde_json::json!({ "name": args.name, "tail": args.tail }),
+                ),
+                "stop" => ("agent_stop", serde_json::json!({ "name": args.name })),
+                "unregister" => ("agent_unregister", serde_json::json!({ "name": args.name })),
+                other => return Err(ToolError(format!("unknown agent_admin action: {other}"))),
+            };
+            Ok(Some((legacy_name.into(), legacy_args.to_string())))
+        }
+        "workspace_admin" => {
+            #[derive(Deserialize)]
+            struct Args {
+                action: String,
+                path: Option<String>,
+                name: Option<String>,
+                worker: Option<String>,
+                strategy: Option<String>,
+                repo: Option<String>,
+                branch: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let (legacy_name, legacy_args) = match args.action.as_str() {
+                "share" => (
+                    "workspace_share",
+                    serde_json::json!({ "path": args.path, "name": args.name }),
+                ),
+                "collect" => (
+                    "workspace_collect",
+                    serde_json::json!({
+                        "path": args.path,
+                        "worker": args.worker,
+                        "strategy": args.strategy,
+                    }),
+                ),
+                "activity" => (
+                    "workspace_activity",
+                    serde_json::json!({ "repo": args.repo }),
+                ),
+                "diff" => (
+                    "workspace_diff",
+                    serde_json::json!({ "branch": args.branch, "repo": args.repo }),
+                ),
+                "conflicts" => (
+                    "workspace_conflicts",
+                    serde_json::json!({ "branch": args.branch, "repo": args.repo }),
+                ),
+                other => {
+                    return Err(ToolError(format!(
+                        "unknown workspace_admin action: {other}"
+                    )))
+                }
+            };
+            Ok(Some((legacy_name.into(), legacy_args.to_string())))
+        }
+        _ => Ok(None),
+    }
+}
+
 async fn dispatch_inner(
     name: &str,
     args_json: &str,
@@ -1515,6 +1493,11 @@ async fn dispatch_inner(
     let channel_registry = ctx.channel_registry.as_deref();
     let router = ctx.router.clone();
     let route_registry = ctx.route_registry.clone();
+    let remapped = remap_grouped_tool_call(name, args_json)?;
+    let (name, args_json) = match remapped.as_ref() {
+        Some((mapped_name, mapped_args)) => (mapped_name.as_str(), mapped_args.as_str()),
+        None => (name, args_json),
+    };
     match name {
         "fs_ls" => {
             let args: FsLsArgs = serde_json::from_str(args_json)

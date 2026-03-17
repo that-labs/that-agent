@@ -24,12 +24,12 @@ const FINALIZATION_SNIPPET_CHARS: usize = 160;
 
 /// Resolve the provider API key from environment variables.
 ///
-/// For Anthropic, checks Claude Code OAuth aliases first, then falls back to
-/// `ANTHROPIC_API_KEY` (console pay-per-use).
+/// For Anthropic, prefers `ANTHROPIC_API_KEY` (console pay-per-use), then
+/// falls back to Claude Code OAuth aliases.
 pub fn api_key_for_provider(provider: &str) -> Result<String> {
     match provider {
         "anthropic" => crate::auth::anthropic_api_key_from_env().context(
-            "Set CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_AUTH_TOKEN, CLAUDE_CODE_AUTH, or ANTHROPIC_API_KEY",
+            "Set ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_AUTH_TOKEN, or CLAUDE_CODE_AUTH",
         ),
         "openai" => std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set"),
         "openrouter" => std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set"),
@@ -598,7 +598,7 @@ pub async fn execute_agent_run_channel(
          - `POST {gateway_url}/v1/notify` — zero-cost queue (returns 202). No LLM turn, batched into next heartbeat.\n\
          - `GET {gateway_url}/v1/schema` — introspection endpoint for bridge plugins at startup.\n\
          Use `channel_register` to hot-register a bridge and `channel_list` to see active bridges.\n\
-         Use `provider_register` to add an OpenAI-compatible inference provider at runtime. \
+         Use `provider_admin(action=register, ...)` to add an OpenAI-compatible inference provider at runtime. \
          Once its API key env var is configured, it will show up in `/models`.\n\
          When building or deploying a bridge plugin, give it this gateway URL and configure it to use `/v1/inbound` (not `/v1/chat`).",
         ids = router.channel_ids().await,

@@ -8,8 +8,8 @@ pub const MODEL_OPTIONS: &[(&str, &str)] = &[
     ("anthropic", "claude-haiku-4-5"),
     ("openai", "gpt-5.2-codex"),
     ("openai", "gpt-5.1-codex-mini"),
-    ("openrouter", "anthropic/claude-sonnet-4-6"),
-    ("openrouter", "anthropic/claude-opus-4-6"),
+    ("openrouter", "anthropic/claude-sonnet-4.6"),
+    ("openrouter", "anthropic/claude-opus-4.6"),
     ("openrouter", "google/gemini-3.1-pro"),
     ("openrouter", "deepseek/deepseek-r1"),
 ];

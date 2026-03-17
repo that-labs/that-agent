@@ -447,7 +447,7 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
             lines.push(
                 "multi_agent_hint: Use agent_run(name, task) to delegate work to \
                  ephemeral K8s Jobs. Use spawn_agent(name, role) for persistent agents. \
-                 Use workspace_share before agent_run with workspace=true for coding tasks. \
+                 Use workspace_admin(action=share, path) before agent_run with workspace=true for coding tasks. \
                  Do NOT use shell_exec to manually run agents or push to git servers."
                     .to_string(),
             );

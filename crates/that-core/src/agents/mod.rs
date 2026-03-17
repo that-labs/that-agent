@@ -708,6 +708,13 @@ pub async fn spawn_persistent_agent_k8s(
         "SLACK_BOT_TOKEN": "",
         "SLACK_APP_TOKEN": "",
     });
+    if let Some(api_key) = std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        config_data["ANTHROPIC_API_KEY"] = serde_json::json!(api_key);
+    }
     if let Some(token) = crate::auth::anthropic_oauth_token_from_env() {
         config_data["CLAUDE_CODE_OAUTH_TOKEN"] = serde_json::json!(&token);
         config_data["CLAUDE_CODE_AUTH_TOKEN"] = serde_json::json!(&token);
@@ -929,8 +936,15 @@ pub async fn run_ephemeral_agent_k8s(
         "THAT_SANDBOX_K8S_NAMESPACE": ns,
     });
 
-    // Forward Claude Code OAuth aliases so children inherit the parent's token
-    // even when only the parent Deployment has it set.
+    // Forward Anthropic credentials so children inherit the parent's settings
+    // even when only the parent Deployment has them set.
+    if let Some(api_key) = std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        config_data["ANTHROPIC_API_KEY"] = serde_json::json!(api_key);
+    }
     if let Some(token) = crate::auth::anthropic_oauth_token_from_env() {
         config_data["CLAUDE_CODE_OAUTH_TOKEN"] = serde_json::json!(&token);
         config_data["CLAUDE_CODE_AUTH_TOKEN"] = serde_json::json!(&token);
