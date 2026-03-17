@@ -543,12 +543,12 @@ mod tests {
         // Content must not be null or empty array
         for (i, msg) in arr.iter().enumerate() {
             let content = &msg["content"];
-            assert!(
-                !content.is_null(),
-                "message {i} has null content: {msg}"
-            );
+            assert!(!content.is_null(), "message {i} has null content: {msg}");
             if let Some(arr) = content.as_array() {
-                assert!(!arr.is_empty(), "message {i} has empty content array: {msg}");
+                assert!(
+                    !arr.is_empty(),
+                    "message {i} has empty content array: {msg}"
+                );
             }
         }
     }
@@ -581,9 +581,16 @@ mod tests {
                 "required": ["cmd"]
             }),
         }];
-        let body = build_request("system prompt", &messages, &tools, "claude-opus-4-6", 4096, true);
-        let parsed: serde_json::Value = serde_json::from_str(&body)
-            .expect("build_request should produce valid JSON");
+        let body = build_request(
+            "system prompt",
+            &messages,
+            &tools,
+            "claude-opus-4-6",
+            4096,
+            true,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("build_request should produce valid JSON");
 
         assert_eq!(parsed["model"], "claude-opus-4-6");
         assert_eq!(parsed["stream"], true);
