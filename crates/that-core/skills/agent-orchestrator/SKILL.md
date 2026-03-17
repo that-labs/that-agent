@@ -12,6 +12,17 @@ This skill describes how to deploy, scope, and manage child agents as a root (pa
 agent. Use it when you need to parallelize work, delegate specialized tasks, or
 build a team of agents that collaborate on a shared goal.
 
+## Core Rule
+
+For autonomous multi-agent work, default to `agent_task`, not ad hoc messaging.
+Each tracked task has one shared scratchpad:
+- `header`: stable shared contract for overall goal, workspace/repo context, participants, and policy
+- `entries`: live coordination tail for plans, steering, blockers, reviews, and git-visible progress
+
+The parent should supervise through task status plus scratchpad reads. Child agents
+should externalize concise coordination notes there instead of relying on hidden reasoning
+or direct peer chatter.
+
 ## Two Patterns for Delegation
 
 ### Ephemeral Agents — one-off tasks that run and return results
@@ -24,15 +35,32 @@ until the agent completes and returns its result. Best for:
 
 Fan out by calling multiple `agent_run` in parallel — each runs as an independent pod.
 
+Use `agent_run` when you do not need shared coordination state or mid-flight steering.
+If the parent may need to supervise, redirect, pause, or attach peers, use `agent_task`.
+
 ### Persistent Agents — long-running services you query repeatedly
 
 Use `spawn_agent(name, role)` to create a Deployment + Service that stays alive.
-Communicate via `agent_query(name, message)` for synchronous request/response. Best for:
+Communicate via `agent_task(action=send, name, message)` for tracked work and
+`agent_query(name, message)` for simple synchronous request/response. Best for:
 - Coordinators, channel listeners, always-on workers
 - Agents you need to query multiple times across different tasks
 - Services that maintain state between interactions
 
 Clean up with `agent_unregister(name)` when no longer needed.
+
+## Tracked Task Workflow
+
+1. `agent_task(action=send, name, message)` to create a task
+2. `agent_task(action=scratchpad_read, task_id)` to inspect the shared header and live tail
+3. `agent_task(action=send, task_id, message)` to steer a running task
+4. `agent_task(action=share, name, task_id)` to attach a peer to the same scratchpad-backed task
+5. `agent_task(action=status, task_id)` to supervise progress without blocking
+6. `agent_task(action=cancel, task_id)` if the worker is drifting or no longer needed
+
+Use `agent_task(action=scratchpad_write, task_id, section="header", kind=...)` only for durable
+shared context changes. Use the default activity section for progress, blockers, reviews, and
+steering notes.
 
 ## Coding Tasks — Shared Workspace
 
@@ -48,7 +76,8 @@ with workers and collect their results.
 5. `workspace_collect(path, worker)` — merge the worker's branch into your workspace
 
 Each worker pushes to its own isolated branch. Workers cannot interfere with each
-other or with main.
+other or with main. Git push, auto-merge, and merge-conflict events should be treated
+as parent-visible coordination signals and mirrored into the tracked task scratchpad when available.
 
 Load `read_skill git-workspace` for the full guide on conflict resolution,
 multi-worker merge strategy, and progress monitoring.
@@ -76,17 +105,21 @@ Effective orchestration depends on clear boundaries:
 
 While workers are running:
 
+- `agent_task(action=status)` — see tracked tasks with owners, participants, and scratchpad revision
+- `agent_task(action=scratchpad_read, task_id)` — inspect the shared header and recent coordination activity
 - `agent_list()` — see all children with their role, status, and type
 - `workspace_activity()` — branch list with ahead/behind counts and last commit
 - `workspace_diff(branch)` — read a worker's changes to decide if guidance is needed
 
-Use these to decide whether to wait, provide feedback via `agent_query`, or collect results.
+Use these to decide whether to wait, steer via `agent_task(action=send, task_id, ...)`,
+cancel the task, or collect results.
 
 ## Communication
 
-- **Parent → child**: use `agent_query(name, message)` for persistent agents
-- **Child → parent**: children POST to the parent's gateway via `$THAT_PARENT_GATEWAY_URL/v1/notify`
-- **Progress visibility**: ephemeral workers post progress to your gateway automatically
+- **Parent → child**: use `agent_task(action=send, ...)` for tracked work; use `agent_query(name, message)` only for simple blocking questions
+- **Peer ↔ peer**: share the same task with `agent_task(action=share, ...)` and coordinate through the task scratchpad
+- **Child → parent**: children POST to the parent's gateway via `$THAT_PARENT_GATEWAY_URL/v1/notify` for zero-cost status, and keep durable coordination context in the task scratchpad
+- **Progress visibility**: workspace git events and scratchpad activity are the parent-visible supervision log
 
 ## Result Collection
 

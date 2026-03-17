@@ -129,9 +129,21 @@ pub(super) async fn stream_turn(
         return Err(anthropic_api_error(status, &resp_body, is_oauth));
     }
 
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !content_type.contains("text/event-stream") {
+        return parse_json_response(response, tx).await;
+    }
+
     // Parse SSE stream.
     let mut stream = response.bytes_stream();
     let mut buf = String::new();
+    let mut raw = String::new();
+    let mut saw_turn_end = false;
 
     // Per-block state.
     #[derive(Default)]
@@ -168,7 +180,9 @@ pub(super) async fn stream_turn(
                 ));
             }
         };
-        buf.push_str(&String::from_utf8_lossy(&chunk));
+        let chunk_text = String::from_utf8_lossy(&chunk);
+        raw.push_str(&chunk_text);
+        buf.push_str(&chunk_text);
 
         while let Some(nl) = buf.find('\n') {
             let line = buf[..nl].trim_end_matches('\r').to_string();
@@ -266,6 +280,7 @@ pub(super) async fn stream_turn(
                 }
 
                 "message_stop" => {
+                    saw_turn_end = true;
                     let _ = tx
                         .send(TurnEvent::TurnEnd {
                             full_text: full_text.clone(),
@@ -278,6 +293,89 @@ pub(super) async fn stream_turn(
             }
         }
     }
+
+    if !saw_turn_end {
+        let trimmed = raw.trim();
+        if trimmed.starts_with('{') {
+            return parse_json_payload(trimmed, tx).await;
+        }
+    }
+
+    Ok(usage)
+}
+
+async fn parse_json_response(
+    response: reqwest::Response,
+    tx: mpsc::Sender<TurnEvent>,
+) -> Result<Usage> {
+    let payload: serde_json::Value = response.json().await?;
+    parse_json_payload_value(payload, tx).await
+}
+
+async fn parse_json_payload(payload: &str, tx: mpsc::Sender<TurnEvent>) -> Result<Usage> {
+    let payload: serde_json::Value = serde_json::from_str(payload)?;
+    parse_json_payload_value(payload, tx).await
+}
+
+async fn parse_json_payload_value(
+    payload: serde_json::Value,
+    tx: mpsc::Sender<TurnEvent>,
+) -> Result<Usage> {
+    let mut full_text = String::new();
+    let mut usage = Usage::default();
+
+    if let Some(u) = payload.get("usage") {
+        usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0) as u32;
+        usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0) as u32;
+        usage.cache_read_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0) as u32;
+        usage.cache_write_tokens = u["cache_creation_input_tokens"].as_u64().unwrap_or(0) as u32;
+    }
+
+    if let Some(blocks) = payload["content"].as_array() {
+        for block in blocks {
+            match block["type"].as_str().unwrap_or("") {
+                "text" => {
+                    let text = block["text"].as_str().unwrap_or("").to_string();
+                    if !text.is_empty() {
+                        full_text.push_str(&text);
+                        let _ = tx.send(TurnEvent::TextDelta(text)).await;
+                    }
+                }
+                "thinking" => {
+                    let thinking = block["thinking"].as_str().unwrap_or("").to_string();
+                    if !thinking.is_empty() {
+                        let _ = tx.send(TurnEvent::ReasoningDelta(thinking)).await;
+                    }
+                }
+                "redacted_thinking" => {
+                    let _ = tx
+                        .send(TurnEvent::ReasoningDelta("[Reasoning redacted]".into()))
+                        .await;
+                }
+                "tool_use" => {
+                    let args_json = serde_json::to_string(
+                        block.get("input").unwrap_or(&serde_json::Value::Null),
+                    )
+                    .unwrap_or_else(|_| "{}".to_string());
+                    let _ = tx
+                        .send(TurnEvent::ToolCallComplete(ToolCall {
+                            call_id: block["id"].as_str().unwrap_or("").to_string(),
+                            name: block["name"].as_str().unwrap_or("").to_string(),
+                            args_json,
+                        }))
+                        .await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let _ = tx
+        .send(TurnEvent::TurnEnd {
+            full_text,
+            usage: usage.clone(),
+        })
+        .await;
 
     Ok(usage)
 }
@@ -813,5 +911,33 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("OAuth request failed"));
         assert!(msg.contains("request-shape"));
+    }
+
+    #[tokio::test]
+    async fn parse_json_payload_emits_turn_end() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let usage = parse_json_payload(
+            r#"{
+                "content":[{"type":"text","text":"hello"}],
+                "usage":{"input_tokens":12,"output_tokens":3}
+            }"#,
+            tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 3);
+        match rx.recv().await {
+            Some(TurnEvent::TextDelta(text)) => assert_eq!(text, "hello"),
+            other => panic!("expected text delta, got {other:?}"),
+        }
+        match rx.recv().await {
+            Some(TurnEvent::TurnEnd { full_text, usage }) => {
+                assert_eq!(full_text, "hello");
+                assert_eq!(usage.input_tokens, 12);
+                assert_eq!(usage.output_tokens, 3);
+            }
+            other => panic!("expected turn end, got {other:?}"),
+        }
     }
 }

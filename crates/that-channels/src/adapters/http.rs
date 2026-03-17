@@ -69,6 +69,8 @@ struct NotifyRequest {
     /// Alias for `agent` — accepted for convenience when the caller uses
     /// the same field name as `/v1/inbound`.
     sender_id: Option<String>,
+    #[serde(flatten, default)]
+    metadata: HashMap<String, serde_json::Value>,
 }
 
 /// POST /v1/task_update request body — structured task state callback from sub-agents.
@@ -86,6 +88,8 @@ struct TaskUpdateRequest {
 struct ScratchpadWriteRequest {
     note: String,
     from: String,
+    section: Option<String>,
+    kind: Option<String>,
 }
 
 /// A single base64-encoded attachment in an inbound webhook request.
@@ -948,6 +952,17 @@ async fn handle_notify(
     } else {
         body.message.clone()
     };
+    let mut metadata = body.metadata;
+    if let Some(agent) = &body.agent {
+        metadata
+            .entry("agent".to_string())
+            .or_insert_with(|| serde_json::json!(agent));
+    }
+    if let Some(sender_id) = &body.sender_id {
+        metadata
+            .entry("sender_id".to_string())
+            .or_insert_with(|| serde_json::json!(sender_id));
+    }
     let msg = InboundMessage {
         channel_id: state.adapter_id.clone(),
         sender_id: NOTIFY_SENDER_ID.to_string(),
@@ -958,7 +973,8 @@ async fn handle_notify(
         attachments: vec![],
         callback_url: None,
         deferred: false,
-        metadata: None,
+        metadata: (!metadata.is_empty())
+            .then(|| serde_json::Value::Object(metadata.into_iter().collect())),
     };
 
     if tx.send(msg).is_err() {
@@ -1042,6 +1058,210 @@ async fn handle_task_update(
 
 /// Max scratchpad entries per task (matches that-core constant).
 const MAX_SCRATCHPAD_ENTRIES: usize = 50;
+/// Max stable header entries per task (matches that-core constant).
+const MAX_SCRATCHPAD_HEADER_ENTRIES: usize = 12;
+
+fn add_raw_participant(task: &mut serde_json::Map<String, serde_json::Value>, participant: &str) {
+    let participant = participant.trim();
+    if participant.is_empty() {
+        return;
+    }
+    let participants = task
+        .entry("participants")
+        .or_insert_with(|| serde_json::json!([]));
+    if let Some(arr) = participants.as_array_mut() {
+        if !arr.iter().any(|item| item.as_str() == Some(participant)) {
+            arr.push(serde_json::json!(participant));
+        }
+    }
+}
+
+fn apply_task_journal_event(
+    tasks: &mut Vec<serde_json::Value>,
+    event: crate::TaskJournalEvent,
+) -> anyhow::Result<()> {
+    match event {
+        crate::TaskJournalEvent::Snapshot { tasks: snapshot } => {
+            *tasks = serde_json::from_value(snapshot)?;
+        }
+        crate::TaskJournalEvent::Created { task } => {
+            let id = task
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            tasks.retain(|existing| {
+                existing.get("id").and_then(|value| value.as_str()) != Some(&id)
+            });
+            tasks.push(task);
+        }
+        crate::TaskJournalEvent::StateUpdated {
+            id,
+            state,
+            from,
+            message,
+            timestamp,
+        } => {
+            if let Some(task) = tasks
+                .iter_mut()
+                .find(|task| task.get("id").and_then(|value| value.as_str()) == Some(&id))
+                .and_then(|task| task.as_object_mut())
+            {
+                task.insert("state".into(), serde_json::json!(state));
+                task.insert("updated_at".into(), serde_json::json!(timestamp.clone()));
+                if let Some(msg) = message {
+                    let actor = from.unwrap_or_else(|| {
+                        task.get("agent")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    });
+                    add_raw_participant(task, &actor);
+                    let state = task
+                        .get("state")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    if matches!(state, "completed" | "failed" | "canceled") {
+                        task.insert("result".into(), serde_json::json!(msg.clone()));
+                    }
+                    let messages = task
+                        .entry("messages")
+                        .or_insert_with(|| serde_json::json!([]));
+                    if let Some(arr) = messages.as_array_mut() {
+                        arr.push(serde_json::json!({
+                            "from": actor,
+                            "text": msg,
+                            "timestamp": timestamp
+                        }));
+                        if arr.len() > 30 {
+                            let start = arr.len() - 30;
+                            *arr = arr[start..].to_vec();
+                        }
+                    }
+                }
+            }
+        }
+        crate::TaskJournalEvent::MessageAppended {
+            id,
+            from,
+            text,
+            timestamp,
+        } => {
+            if let Some(task) = tasks
+                .iter_mut()
+                .find(|task| task.get("id").and_then(|value| value.as_str()) == Some(&id))
+                .and_then(|task| task.as_object_mut())
+            {
+                task.insert("updated_at".into(), serde_json::json!(timestamp.clone()));
+                add_raw_participant(task, &from);
+                let messages = task
+                    .entry("messages")
+                    .or_insert_with(|| serde_json::json!([]));
+                if let Some(arr) = messages.as_array_mut() {
+                    arr.push(serde_json::json!({
+                        "from": from,
+                        "text": text,
+                        "timestamp": timestamp
+                    }));
+                    if arr.len() > 30 {
+                        let start = arr.len() - 30;
+                        *arr = arr[start..].to_vec();
+                    }
+                }
+            }
+        }
+        crate::TaskJournalEvent::ScratchpadAppended {
+            id,
+            from,
+            note,
+            kind,
+            section,
+            timestamp,
+        } => {
+            if let Some(task) = tasks
+                .iter_mut()
+                .find(|task| task.get("id").and_then(|value| value.as_str()) == Some(&id))
+                .and_then(|task| task.as_object_mut())
+            {
+                add_raw_participant(task, &from);
+                let revision = task
+                    .get("scratchpad_revision")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0)
+                    + 1;
+                task.insert("scratchpad_revision".into(), serde_json::json!(revision));
+                task.insert("updated_at".into(), serde_json::json!(timestamp.clone()));
+                let entry = serde_json::json!({
+                    "from": from,
+                    "note": note,
+                    "timestamp": timestamp,
+                    "kind": kind,
+                });
+                if section == "header" {
+                    let header = task
+                        .entry("scratchpad_header")
+                        .or_insert_with(|| serde_json::json!([]));
+                    if let Some(arr) = header.as_array_mut() {
+                        let kind = entry
+                            .get("kind")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default();
+                        arr.retain(|existing| {
+                            existing.get("kind").and_then(|value| value.as_str()) != Some(kind)
+                        });
+                        arr.push(entry);
+                        if arr.len() > MAX_SCRATCHPAD_HEADER_ENTRIES {
+                            let start = arr.len() - MAX_SCRATCHPAD_HEADER_ENTRIES;
+                            *arr = arr[start..].to_vec();
+                        }
+                    }
+                } else {
+                    let activity = task
+                        .entry("scratchpad")
+                        .or_insert_with(|| serde_json::json!([]));
+                    if let Some(arr) = activity.as_array_mut() {
+                        arr.push(entry);
+                        if arr.len() > MAX_SCRATCHPAD_ENTRIES {
+                            let start = arr.len() - MAX_SCRATCHPAD_ENTRIES;
+                            *arr = arr[start..].to_vec();
+                        }
+                    }
+                }
+            }
+        }
+        crate::TaskJournalEvent::ParticipantAdded {
+            id,
+            participant,
+            timestamp,
+        } => {
+            if let Some(task) = tasks
+                .iter_mut()
+                .find(|task| task.get("id").and_then(|value| value.as_str()) == Some(&id))
+                .and_then(|task| task.as_object_mut())
+            {
+                task.insert("updated_at".into(), serde_json::json!(timestamp));
+                add_raw_participant(task, &participant);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_raw_tasks(tasks_path: &std::path::Path) -> anyhow::Result<Vec<serde_json::Value>> {
+    let journal = crate::read_task_journal_events(tasks_path)?;
+    if !journal.is_empty() {
+        let mut tasks = Vec::new();
+        for event in journal {
+            apply_task_journal_event(&mut tasks, event)?;
+        }
+        return Ok(tasks);
+    }
+    match std::fs::read_to_string(tasks_path) {
+        Ok(data) => Ok(serde_json::from_str(&data).unwrap_or_default()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) => Err(err.into()),
+    }
+}
 
 /// GET /v1/scratchpad?task_id=X — read a task's scratchpad entries.
 async fn handle_scratchpad_read(
@@ -1068,22 +1288,42 @@ async fn handle_scratchpad_read(
                 .into_response()
         }
     };
-    let tasks: Vec<serde_json::Value> = match std::fs::read_to_string(&tasks_path) {
-        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-        Err(_) => Vec::new(),
+    let tasks = match load_raw_tasks(&tasks_path) {
+        Ok(tasks) => tasks,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("read failed: {err}") })),
+            )
+                .into_response()
+        }
     };
     let task = tasks
         .iter()
         .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(task_id));
     match task {
         Some(t) => {
+            let header = t
+                .get("scratchpad_header")
+                .cloned()
+                .unwrap_or(serde_json::json!([]));
             let entries = t
                 .get("scratchpad")
                 .cloned()
                 .unwrap_or(serde_json::json!([]));
+            let revision = t
+                .get("scratchpad_revision")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             (
                 StatusCode::OK,
-                Json(serde_json::json!({ "task_id": task_id, "entries": entries })),
+                Json(serde_json::json!({
+                    "task_id": task_id,
+                    "revision": revision,
+                    "header": header,
+                    "entries": entries,
+                    "cache_hint": "Treat header as the stable shared contract and entries as the live coordination/activity tail."
+                })),
             )
                 .into_response()
         }
@@ -1121,44 +1361,58 @@ async fn handle_scratchpad_write(
                 .into_response()
         }
     };
-    let mut tasks: Vec<serde_json::Value> = match std::fs::read_to_string(&tasks_path) {
-        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
-    let task = tasks
-        .iter_mut()
-        .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(&task_id));
-    match task {
-        Some(t) => {
-            let entry = serde_json::json!({
-                "from": body.from,
-                "note": body.note,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            });
-            let scratchpad = t
-                .as_object_mut()
-                .unwrap()
-                .entry("scratchpad")
-                .or_insert_with(|| serde_json::json!([]));
-            if let Some(arr) = scratchpad.as_array_mut() {
-                arr.push(entry);
-                if arr.len() > MAX_SCRATCHPAD_ENTRIES {
-                    let start = arr.len() - MAX_SCRATCHPAD_ENTRIES;
-                    *arr = arr[start..].to_vec();
-                }
-            }
-            if let Err(e) = crate::atomic_write_json(&tasks_path, &tasks) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": format!("write failed: {e}") })),
-                )
-                    .into_response();
-            }
-            (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+    let write_result = crate::with_path_lock(&tasks_path, || {
+        crate::seed_task_journal_from_snapshot(&tasks_path)?;
+        let mut tasks = load_raw_tasks(&tasks_path)?;
+        if !tasks
+            .iter()
+            .any(|task| task.get("id").and_then(|value| value.as_str()) == Some(&task_id))
+        {
+            anyhow::bail!("task '{}' not found", task_id);
         }
-        None => (
+        let section = body.section.as_deref().unwrap_or("activity").to_string();
+        let kind = body.kind.clone().unwrap_or_default();
+        if section == "header" && kind.trim().is_empty() {
+            anyhow::bail!("kind is required when writing scratchpad header");
+        }
+        let event = crate::TaskJournalEvent::ScratchpadAppended {
+            id: task_id.clone(),
+            from: body.from.clone(),
+            note: body.note,
+            kind,
+            section: section.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        apply_task_journal_event(&mut tasks, event.clone())?;
+        crate::append_task_journal_event(&tasks_path, &event)?;
+        crate::atomic_write_json(&tasks_path, &tasks)?;
+        Ok(section)
+    });
+    match write_result {
+        Ok(section) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "section": section })),
+        )
+            .into_response(),
+        Err(err)
+            if err
+                .to_string()
+                .contains("kind is required when writing scratchpad header") =>
+        {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response()
+        }
+        Err(err) if err.to_string().contains("not found") => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("task '{}' not found", task_id) })),
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("write failed: {err}") })),
         )
             .into_response(),
     }
@@ -1392,6 +1646,7 @@ fn channel_event_to_sse(_request_id: &str, event: &ChannelEvent) -> Option<SseEv
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
 
     #[test]
     fn channel_event_to_sse_maps_stream_token() {
@@ -1488,5 +1743,178 @@ mod tests {
     fn http_adapter_id() {
         let adapter = HttpAdapter::new("my-api", "127.0.0.1:0", None, 60);
         assert_eq!(adapter.id(), "my-api");
+    }
+
+    fn test_state(cluster_dir: Option<PathBuf>) -> Arc<HttpState> {
+        Arc::new(HttpState {
+            active_requests: DashMap::new(),
+            pending_asks: Mutex::new(HashMap::new()),
+            inbound_tx: Mutex::new(None),
+            shutdown_tx: Mutex::new(None),
+            adapter_id: "test-api".to_string(),
+            auth_token: RwLock::new(None),
+            #[cfg(feature = "pairing")]
+            pairing: Mutex::new(None),
+            request_timeout_secs: 60,
+            route_registry_path: None,
+            cluster_dir,
+            #[cfg(feature = "pairing")]
+            token_file: None,
+        })
+    }
+
+    async fn response_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn notify_preserves_structured_metadata() {
+        let state = test_state(None);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        *state.inbound_tx.lock().await = Some(tx);
+
+        let resp = handle_notify(
+            State(state),
+            Json(NotifyRequest {
+                message: "git push happened".into(),
+                agent: Some("git-server/developer".into()),
+                sender_id: None,
+                metadata: HashMap::from([
+                    ("event".into(), serde_json::json!("push")),
+                    ("branch".into(), serde_json::json!("task/developer")),
+                ]),
+            }),
+        )
+        .await;
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let msg = rx.recv().await.unwrap();
+        let meta = msg.metadata.unwrap();
+        assert_eq!(meta.get("event").and_then(|v| v.as_str()), Some("push"));
+        assert_eq!(
+            meta.get("branch").and_then(|v| v.as_str()),
+            Some("task/developer")
+        );
+        assert_eq!(
+            meta.get("agent").and_then(|v| v.as_str()),
+            Some("git-server/developer")
+        );
+    }
+
+    #[tokio::test]
+    async fn scratchpad_endpoints_support_header_and_revision() {
+        let dir =
+            std::env::temp_dir().join(format!("that-agent-http-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tasks_path = dir.join("agent_tasks.json");
+        std::fs::write(
+            &tasks_path,
+            serde_json::to_vec(&serde_json::json!([{
+                "id": "task-1",
+                "agent": "worker",
+                "owner": "parent",
+                "participants": ["parent", "worker"],
+                "state": "submitted",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "result": null,
+                "messages": [],
+                "scratchpad_header": [],
+                "scratchpad": [],
+                "scratchpad_revision": 0
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let state = test_state(Some(dir));
+        let mut query = HashMap::new();
+        query.insert("task_id".to_string(), "task-1".to_string());
+
+        let resp = handle_scratchpad_write(
+            State(Arc::clone(&state)),
+            axum::extract::Query(query.clone()),
+            Json(ScratchpadWriteRequest {
+                note: "Overall shared goal:\nShip it".into(),
+                from: "parent".into(),
+                section: Some("header".into()),
+                kind: Some("goal".into()),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = handle_scratchpad_write(
+            State(Arc::clone(&state)),
+            axum::extract::Query(query.clone()),
+            Json(ScratchpadWriteRequest {
+                note: "Developer pushed commit abc12345".into(),
+                from: "git-server/developer".into(),
+                section: Some("activity".into()),
+                kind: Some("commit".into()),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = handle_scratchpad_read(State(state), axum::extract::Query(query)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+        assert_eq!(body.get("revision").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(body["header"][0]["kind"], "goal");
+        assert_eq!(body["entries"][0]["kind"], "commit");
+        assert_eq!(body["entries"][0]["from"], "git-server/developer");
+    }
+
+    #[tokio::test]
+    async fn scratchpad_read_replays_from_journal_when_snapshot_is_missing() {
+        let dir =
+            std::env::temp_dir().join(format!("that-agent-http-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tasks_path = dir.join("agent_tasks.json");
+        crate::append_task_journal_event(
+            &tasks_path,
+            &crate::TaskJournalEvent::Snapshot {
+                tasks: serde_json::json!([{
+                    "id": "task-1",
+                    "agent": "worker",
+                    "owner": "parent",
+                    "participants": ["parent", "worker"],
+                    "state": "submitted",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "result": null,
+                    "messages": [],
+                    "scratchpad_header": [],
+                    "scratchpad": [],
+                    "scratchpad_revision": 0
+                }]),
+            },
+        )
+        .unwrap();
+        crate::append_task_journal_event(
+            &tasks_path,
+            &crate::TaskJournalEvent::ScratchpadAppended {
+                id: "task-1".into(),
+                from: "parent".into(),
+                note: "Overall shared goal:\nShip it".into(),
+                kind: "goal".into(),
+                section: "header".into(),
+                timestamp: "2026-01-01T00:00:01Z".into(),
+            },
+        )
+        .unwrap();
+        let state = test_state(Some(dir));
+        let mut query = HashMap::new();
+        query.insert("task_id".to_string(), "task-1".to_string());
+
+        let resp = handle_scratchpad_read(State(state), axum::extract::Query(query)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+        assert_eq!(body.get("revision").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(body["header"][0]["kind"], "goal");
+        assert_eq!(body["header"][0]["note"], "Overall shared goal:\nShip it");
     }
 }

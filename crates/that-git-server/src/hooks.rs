@@ -3,6 +3,16 @@ use tracing::{info, warn};
 
 use crate::{acl::RefCommand, state::AppState};
 
+fn branch_task_id(branch: &str) -> Option<&str> {
+    let mut parts = branch.split('/');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("task"), Some(_worker), Some(task_id), None) if !task_id.trim().is_empty() => {
+            Some(task_id)
+        }
+        _ => None,
+    }
+}
+
 /// Fire-and-forget post-receive hooks: webhook notification + optional auto-merge.
 pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: Vec<RefCommand>) {
     tokio::spawn(async move {
@@ -22,7 +32,7 @@ pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: 
             // Webhook notification (per-repo URL, then global fallback)
             // Payload must include "message" field for /v1/notify compatibility.
             if let Some(url) = state.webhook_url_for(&repo) {
-                let payload = serde_json::json!({
+                let mut payload = serde_json::json!({
                     "message": format!("git push: {agent_str} pushed {branch} to {repo} ({})", &r.new[..8.min(r.new.len())]),
                     "agent": format!("git-server/{agent_str}"),
                     "event": "push",
@@ -30,6 +40,9 @@ pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: 
                     "branch": branch,
                     "commit": r.new,
                 });
+                if let Some(task_id) = branch_task_id(branch) {
+                    payload["task_id"] = serde_json::json!(task_id);
+                }
                 match client
                     .post(&url)
                     .json(&payload)
@@ -50,6 +63,19 @@ pub fn on_push(state: Arc<AppState>, repo: String, agent: Option<String>, refs: 
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::branch_task_id;
+
+    #[test]
+    fn branch_task_id_extracts_only_task_scoped_suffix() {
+        assert_eq!(branch_task_id("task/worker/task-123"), Some("task-123"));
+        assert_eq!(branch_task_id("task/worker"), None);
+        assert_eq!(branch_task_id("main"), None);
+        assert_eq!(branch_task_id("task/worker/task-123/extra"), None);
+    }
 }
 
 /// Auto-merge a task branch into main in a bare repo.
@@ -151,7 +177,7 @@ async fn auto_merge(state: &AppState, client: &reqwest::Client, repo: &str, bran
                     info!("auto-merged {branch} into main in {repo} ({commit_oid})");
                     // Notify success via webhook
                     if let Some(url) = state.webhook_url_for(repo) {
-                        let payload = serde_json::json!({
+                        let mut payload = serde_json::json!({
                             "message": format!("auto-merged {branch} into main in {repo}"),
                             "agent": "git-server",
                             "event": "auto_merge",
@@ -159,6 +185,9 @@ async fn auto_merge(state: &AppState, client: &reqwest::Client, repo: &str, bran
                             "branch": branch,
                             "commit": commit_oid,
                         });
+                        if let Some(task_id) = branch_task_id(branch) {
+                            payload["task_id"] = serde_json::json!(task_id);
+                        }
                         let _ = reqwest::Client::new()
                             .post(url)
                             .json(&payload)
@@ -180,7 +209,7 @@ async fn auto_merge(state: &AppState, client: &reqwest::Client, repo: &str, bran
                 stdout.lines().skip(1).filter(|l| !l.is_empty()).collect();
             info!("auto-merge skipped (conflict) for {branch} in {repo}: {conflicting_files:?}");
             if let Some(url) = state.webhook_url_for(repo) {
-                let payload = serde_json::json!({
+                let mut payload = serde_json::json!({
                     "message": format!("merge conflict: {branch} in {repo} — files: {conflicting_files:?}"),
                     "agent": "git-server",
                     "event": "merge_conflict",
@@ -188,6 +217,9 @@ async fn auto_merge(state: &AppState, client: &reqwest::Client, repo: &str, bran
                     "branch": branch,
                     "conflicting_files": conflicting_files,
                 });
+                if let Some(task_id) = branch_task_id(branch) {
+                    payload["task_id"] = serde_json::json!(task_id);
+                }
                 let _ = client
                     .post(url)
                     .json(&payload)

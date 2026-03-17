@@ -810,13 +810,17 @@ impl LoopHook for ChannelHook {
                 }
             }
             "agent_query" => {
-                // Never block the main loop. Spawn background task, return immediately.
-                // Result arrives as a channel notification + queued for heartbeat context.
                 let parsed = serde_json::from_str::<JsonValue>(args_json).unwrap_or_default();
+                let stream = parsed.get("stream").and_then(|v| v.as_bool()) == Some(true);
+                if !stream {
+                    return HookAction::Continue;
+                }
+
+                // Streaming agent_query is relayed through the channel without blocking
+                // on tool-event rendering. The underlying query itself remains synchronous.
                 let agent_name = parsed["name"].as_str().unwrap_or("unknown").to_string();
                 let message = parsed["message"].as_str().unwrap_or("").to_string();
                 let timeout = parsed["timeout_secs"].as_u64().unwrap_or(120);
-                let stream = parsed.get("stream").and_then(|v| v.as_bool()) == Some(true);
 
                 let cluster_dir = dirs::home_dir()
                     .unwrap_or_default()
@@ -843,69 +847,60 @@ impl LoopHook for ChannelHook {
                 let target = self.target.clone();
                 let show_work = self.show_work.load(Ordering::Relaxed) && !self.suppress_streaming;
 
-                // Spawn the query as a background task — never blocks the agent loop.
+                // Spawn the streaming relay so work visibility continues while the
+                // synchronous query is in-flight.
                 let agent_name_ret = agent_name.clone();
                 tokio::spawn(async move {
-                    let result = if stream {
-                        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<
-                            crate::agents::AgentStreamEvent,
-                        >();
+                    let (event_tx, mut event_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<crate::agents::AgentStreamEvent>();
 
-                        // Relay SSE tool events to channel.
-                        let relay_router = Arc::clone(&router);
-                        let relay_cid = channel_id.clone();
-                        let relay_target = target.clone();
-                        let relay = tokio::spawn(async move {
-                            while let Some(event) = event_rx.recv().await {
-                                if !show_work {
-                                    continue;
-                                }
-                                let ch_event = match &event {
-                                    crate::agents::AgentStreamEvent::ToolCall { name, args } => {
-                                        ChannelEvent::ToolCall {
-                                            call_id: String::new(),
-                                            name: name.clone(),
-                                            args: args.clone(),
-                                        }
+                    let relay_router = Arc::clone(&router);
+                    let relay_cid = channel_id.clone();
+                    let relay_target = target.clone();
+                    let relay = tokio::spawn(async move {
+                        while let Some(event) = event_rx.recv().await {
+                            if !show_work {
+                                continue;
+                            }
+                            let ch_event = match &event {
+                                crate::agents::AgentStreamEvent::ToolCall { name, args } => {
+                                    ChannelEvent::ToolCall {
+                                        call_id: String::new(),
+                                        name: name.clone(),
+                                        args: args.clone(),
                                     }
-                                    crate::agents::AgentStreamEvent::ToolResult {
-                                        name,
-                                        result,
-                                    } => ChannelEvent::ToolResult {
+                                }
+                                crate::agents::AgentStreamEvent::ToolResult { name, result } => {
+                                    ChannelEvent::ToolResult {
                                         call_id: String::new(),
                                         name: name.clone(),
                                         result: result.clone(),
-                                    },
-                                    crate::agents::AgentStreamEvent::Done { .. } => continue,
-                                    crate::agents::AgentStreamEvent::Error { message } => {
-                                        ChannelEvent::Notify(format!(
-                                            "⚠ Sub-agent error: {message}"
-                                        ))
                                     }
-                                };
-                                if let Some(cid) = relay_cid.as_deref() {
-                                    let _ = relay_router
-                                        .send_to(cid, &ch_event, relay_target.as_ref())
-                                        .await;
-                                } else {
-                                    relay_router.broadcast(&ch_event).await;
                                 }
+                                crate::agents::AgentStreamEvent::Done { .. } => continue,
+                                crate::agents::AgentStreamEvent::Error { message } => {
+                                    ChannelEvent::Notify(format!("⚠ Sub-agent error: {message}"))
+                                }
+                            };
+                            if let Some(cid) = relay_cid.as_deref() {
+                                let _ = relay_router
+                                    .send_to(cid, &ch_event, relay_target.as_ref())
+                                    .await;
+                            } else {
+                                relay_router.broadcast(&ch_event).await;
                             }
-                        });
+                        }
+                    });
 
-                        let r = crate::agents::query_agent_stream(
-                            &gateway_url,
-                            &agent_name,
-                            &message,
-                            timeout,
-                            event_tx,
-                        )
-                        .await;
-                        let _ = relay.await;
-                        r
-                    } else {
-                        crate::agents::query_agent(&gateway_url, &message, timeout).await
-                    };
+                    let result = crate::agents::query_agent_stream(
+                        &gateway_url,
+                        &agent_name,
+                        &message,
+                        timeout,
+                        event_tx,
+                    )
+                    .await;
+                    let _ = relay.await;
 
                     // Deliver result as notification to channel + heartbeat queue.
                     let notification = match &result {

@@ -78,7 +78,7 @@ The agent diffs the current and previous deployments, reads rollout status, insp
 
 ### Persistent workspace, shared with sub-agents
 
-The agent runs with a persistent volume mounted at `/workspace`. Sub-agents are spawned with a scoped view of the same volume — the parent writes, children read and extend. Work survives restarts, spans multiple agents, and never leaves your cluster. A parent orchestrating a fleet of specialists shares context with all of them through the workspace.
+The agent keeps persistent state across runs, but workspace sharing depends on how a child is spawned. Ephemeral workers can be given an explicit shared repo/workspace flow; persistent agents keep their own state. Coordination between agents should happen through the task scratchpad, which gives every participant on that task a shared, persistent communication surface without assuming a single shared volume layout. Each task scratchpad has a stable header for goal/workspace/participant policy and a live activity tail for steering, blockers, reviews, and git-visible progress.
 
 ## 5-Minute Quickstart
 

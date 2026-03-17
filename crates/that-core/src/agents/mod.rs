@@ -130,25 +130,37 @@ pub struct ScratchpadEntry {
     pub from: String,
     pub note: String,
     pub timestamp: String,
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// Max scratchpad entries per task.
 const MAX_SCRATCHPAD_ENTRIES: usize = 50;
+/// Max stable header entries per task.
+const MAX_SCRATCHPAD_HEADER_ENTRIES: usize = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTask {
     pub id: String,
     pub agent: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub participants: Vec<String>,
     pub state: AgentTaskState,
     pub created_at: String,
     pub updated_at: String,
     pub result: Option<String>,
     pub messages: Vec<TaskMessage>,
     #[serde(default)]
+    pub scratchpad_header: Vec<ScratchpadEntry>,
+    #[serde(default)]
     pub scratchpad: Vec<ScratchpadEntry>,
+    #[serde(default)]
+    pub scratchpad_revision: u64,
 }
 
-/// File-backed registry of agent tasks at `<cluster_dir>/agent_tasks.json`.
+/// Append-only journal-backed registry of agent tasks at `<cluster_dir>/agent_tasks.json`.
 #[derive(Debug)]
 pub struct AgentTaskRegistry {
     path: PathBuf,
@@ -169,26 +181,29 @@ impl AgentTaskRegistry {
         cluster_dir_from_db(db_path).map(|d| Self::new(d.join("agent_tasks.json")))
     }
 
-    pub fn create(&self, agent: &str, message: &str) -> Result<AgentTask> {
+    pub fn create(&self, agent: &str, message: &str, owner: &str) -> Result<AgentTask> {
         let now = chrono::Utc::now().to_rfc3339();
         let task = AgentTask {
             id: uuid::Uuid::new_v4().to_string(),
             agent: agent.to_string(),
+            owner: owner.to_string(),
+            participants: vec![owner.to_string(), agent.to_string()],
             state: AgentTaskState::Submitted,
             created_at: now.clone(),
             updated_at: now.clone(),
             result: None,
             messages: vec![TaskMessage {
-                from: "parent".into(),
+                from: owner.to_string(),
                 text: message.to_string(),
                 timestamp: now,
             }],
+            scratchpad_header: Vec::new(),
             scratchpad: Vec::new(),
+            scratchpad_revision: 0,
         };
-        let mut tasks = self.load()?;
-        tasks.push(task.clone());
-        Self::prune_terminal(&mut tasks);
-        self.save(&tasks)?;
+        self.record_event(that_channels::TaskJournalEvent::Created {
+            task: serde_json::to_value(&task)?,
+        })?;
         Ok(task)
     }
 
@@ -200,84 +215,91 @@ impl AgentTaskRegistry {
         Ok(self
             .load()?
             .into_iter()
-            .filter(|t| !matches!(t.state, AgentTaskState::Completed | AgentTaskState::Failed))
+            .filter(|t| {
+                !matches!(
+                    t.state,
+                    AgentTaskState::Completed | AgentTaskState::Failed | AgentTaskState::Canceled
+                )
+            })
             .collect())
-    }
-
-    /// Get a task and update it in a single load/save cycle.
-    /// Returns the task snapshot *before* the mutation (for reading original data).
-    pub fn get_and_update<F>(&self, id: &str, mutate: F) -> Result<Option<AgentTask>>
-    where
-        F: FnOnce(&mut AgentTask),
-    {
-        let mut tasks = self.load()?;
-        let snapshot = tasks.iter().find(|t| t.id == id).cloned();
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
-            mutate(task);
-        }
-        self.save(&tasks)?;
-        Ok(snapshot)
     }
 
     pub fn update_state(
         &self,
         id: &str,
         state: AgentTaskState,
+        from: Option<&str>,
         message: Option<&str>,
     ) -> Result<()> {
-        let mut tasks = self.load()?;
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
-            let now = chrono::Utc::now().to_rfc3339();
-            task.state = state;
-            task.updated_at = now.clone();
-            if let Some(msg) = message {
-                if matches!(
-                    task.state,
-                    AgentTaskState::Completed | AgentTaskState::Failed
-                ) {
-                    task.result = Some(msg.to_string());
-                }
-                task.messages.push(TaskMessage {
-                    from: task.agent.clone(),
-                    text: msg.to_string(),
-                    timestamp: now,
-                });
-                Self::cap_messages(task);
-            }
-        }
-        self.save(&tasks)
+        self.record_event(that_channels::TaskJournalEvent::StateUpdated {
+            id: id.to_string(),
+            state: state.to_string(),
+            from: from.map(|value| value.to_string()),
+            message: message.map(|value| value.to_string()),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        })
     }
 
     pub fn append_message(&self, id: &str, from: &str, text: &str) -> Result<()> {
-        let mut tasks = self.load()?;
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
-            let now = chrono::Utc::now().to_rfc3339();
-            task.updated_at = now.clone();
-            task.messages.push(TaskMessage {
-                from: from.to_string(),
-                text: text.to_string(),
-                timestamp: now,
-            });
-            Self::cap_messages(task);
-        }
-        self.save(&tasks)
+        self.record_event(that_channels::TaskJournalEvent::MessageAppended {
+            id: id.to_string(),
+            from: from.to_string(),
+            text: text.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        })
     }
 
     pub fn scratchpad_append(&self, id: &str, from: &str, note: &str) -> Result<()> {
-        let mut tasks = self.load()?;
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
-            task.scratchpad.push(ScratchpadEntry {
-                from: from.to_string(),
-                note: note.to_string(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-            });
-            if task.scratchpad.len() > MAX_SCRATCHPAD_ENTRIES {
-                task.scratchpad = task
-                    .scratchpad
-                    .split_off(task.scratchpad.len() - MAX_SCRATCHPAD_ENTRIES);
-            }
+        self.scratchpad_append_kind(id, from, note, None)
+    }
+
+    pub fn scratchpad_append_kind(
+        &self,
+        id: &str,
+        from: &str,
+        note: &str,
+        kind: Option<&str>,
+    ) -> Result<()> {
+        self.record_event(that_channels::TaskJournalEvent::ScratchpadAppended {
+            id: id.to_string(),
+            from: from.to_string(),
+            note: note.to_string(),
+            kind: kind.unwrap_or_default().to_string(),
+            section: "activity".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+
+    pub fn scratchpad_set_header(
+        &self,
+        id: &str,
+        from: &str,
+        kind: &str,
+        note: &str,
+    ) -> Result<()> {
+        if self.get(id)?.is_some_and(|task| {
+            task.scratchpad_header
+                .iter()
+                .any(|entry| entry.kind == kind && entry.from == from && entry.note == note)
+        }) {
+            return Ok(());
         }
-        self.save(&tasks)
+        self.record_event(that_channels::TaskJournalEvent::ScratchpadAppended {
+            id: id.to_string(),
+            from: from.to_string(),
+            note: note.to_string(),
+            kind: kind.to_string(),
+            section: "header".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+
+    pub fn add_participant(&self, id: &str, participant: &str) -> Result<()> {
+        self.record_event(that_channels::TaskJournalEvent::ParticipantAdded {
+            id: id.to_string(),
+            participant: participant.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        })
     }
 
     fn cap_messages(task: &mut AgentTask) {
@@ -292,7 +314,12 @@ impl AgentTaskRegistry {
     fn prune_terminal(tasks: &mut Vec<AgentTask>) {
         let terminal: usize = tasks
             .iter()
-            .filter(|t| matches!(t.state, AgentTaskState::Completed | AgentTaskState::Failed))
+            .filter(|t| {
+                matches!(
+                    t.state,
+                    AgentTaskState::Completed | AgentTaskState::Failed | AgentTaskState::Canceled
+                )
+            })
             .count();
         if terminal > MAX_TERMINAL_TASKS {
             let to_remove = terminal - MAX_TERMINAL_TASKS;
@@ -301,7 +328,10 @@ impl AgentTaskRegistry {
                 if removed >= to_remove {
                     return true;
                 }
-                if matches!(t.state, AgentTaskState::Completed | AgentTaskState::Failed) {
+                if matches!(
+                    t.state,
+                    AgentTaskState::Completed | AgentTaskState::Failed | AgentTaskState::Canceled
+                ) {
                     removed += 1;
                     return false;
                 }
@@ -310,16 +340,194 @@ impl AgentTaskRegistry {
         }
     }
 
+    fn record_event(&self, event: that_channels::TaskJournalEvent) -> Result<()> {
+        that_channels::with_path_lock(&self.path, || {
+            that_channels::seed_task_journal_from_snapshot(&self.path)?;
+            let mut tasks = self.load_unlocked()?;
+            Self::apply_event(&mut tasks, event.clone())?;
+            that_channels::append_task_journal_event(&self.path, &event)?;
+            Self::prune_terminal(&mut tasks);
+            self.save_unlocked(&tasks)?;
+            Ok(())
+        })
+    }
+
     fn load(&self) -> Result<Vec<AgentTask>> {
+        self.load_unlocked()
+    }
+
+    fn load_unlocked(&self) -> Result<Vec<AgentTask>> {
+        let journal = that_channels::read_task_journal_events(&self.path)?;
+        if !journal.is_empty() {
+            let mut tasks = Vec::new();
+            for event in journal {
+                Self::apply_event(&mut tasks, event)?;
+            }
+            for task in &mut tasks {
+                Self::normalize_task(task);
+            }
+            Self::prune_terminal(&mut tasks);
+            return Ok(tasks);
+        }
         match std::fs::read_to_string(&self.path) {
-            Ok(data) => Ok(serde_json::from_str(&data)?),
+            Ok(data) => {
+                let mut tasks: Vec<AgentTask> = serde_json::from_str(&data)?;
+                for task in &mut tasks {
+                    Self::normalize_task(task);
+                }
+                Ok(tasks)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(e.into()),
         }
     }
 
-    fn save(&self, tasks: &[AgentTask]) -> Result<()> {
+    fn save_unlocked(&self, tasks: &[AgentTask]) -> Result<()> {
         that_channels::atomic_write_json(&self.path, tasks)
+    }
+
+    fn apply_event(
+        tasks: &mut Vec<AgentTask>,
+        event: that_channels::TaskJournalEvent,
+    ) -> Result<()> {
+        match event {
+            that_channels::TaskJournalEvent::Snapshot { tasks: snapshot } => {
+                *tasks = serde_json::from_value(snapshot)?;
+                for task in tasks.iter_mut() {
+                    Self::normalize_task(task);
+                }
+            }
+            that_channels::TaskJournalEvent::Created { task } => {
+                let mut task: AgentTask = serde_json::from_value(task)?;
+                Self::normalize_task(&mut task);
+                tasks.retain(|existing| existing.id != task.id);
+                tasks.push(task);
+            }
+            that_channels::TaskJournalEvent::StateUpdated {
+                id,
+                state,
+                from,
+                message,
+                timestamp,
+            } => {
+                if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
+                    task.state = state.parse().map_err(anyhow::Error::msg)?;
+                    task.updated_at = timestamp.clone();
+                    if let Some(msg) = message {
+                        let actor = from.unwrap_or_else(|| task.agent.clone());
+                        Self::add_participant_name(task, &actor);
+                        if matches!(
+                            task.state,
+                            AgentTaskState::Completed
+                                | AgentTaskState::Failed
+                                | AgentTaskState::Canceled
+                        ) {
+                            task.result = Some(msg.clone());
+                        }
+                        task.messages.push(TaskMessage {
+                            from: actor,
+                            text: msg,
+                            timestamp,
+                        });
+                        Self::cap_messages(task);
+                    }
+                }
+            }
+            that_channels::TaskJournalEvent::MessageAppended {
+                id,
+                from,
+                text,
+                timestamp,
+            } => {
+                if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
+                    task.updated_at = timestamp.clone();
+                    Self::add_participant_name(task, &from);
+                    task.messages.push(TaskMessage {
+                        from,
+                        text,
+                        timestamp,
+                    });
+                    Self::cap_messages(task);
+                }
+            }
+            that_channels::TaskJournalEvent::ScratchpadAppended {
+                id,
+                from,
+                note,
+                kind,
+                section,
+                timestamp,
+            } => {
+                if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
+                    Self::add_participant_name(task, &from);
+                    let entry = ScratchpadEntry {
+                        from,
+                        note,
+                        timestamp: timestamp.clone(),
+                        kind,
+                    };
+                    task.updated_at = timestamp;
+                    task.scratchpad_revision += 1;
+                    if section == "header" {
+                        task.scratchpad_header
+                            .retain(|existing| existing.kind != entry.kind);
+                        task.scratchpad_header.push(entry);
+                        if task.scratchpad_header.len() > MAX_SCRATCHPAD_HEADER_ENTRIES {
+                            task.scratchpad_header = task.scratchpad_header.split_off(
+                                task.scratchpad_header.len() - MAX_SCRATCHPAD_HEADER_ENTRIES,
+                            );
+                        }
+                    } else {
+                        task.scratchpad.push(entry);
+                        if task.scratchpad.len() > MAX_SCRATCHPAD_ENTRIES {
+                            task.scratchpad = task
+                                .scratchpad
+                                .split_off(task.scratchpad.len() - MAX_SCRATCHPAD_ENTRIES);
+                        }
+                    }
+                }
+            }
+            that_channels::TaskJournalEvent::ParticipantAdded {
+                id,
+                participant,
+                timestamp,
+            } => {
+                if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
+                    task.updated_at = timestamp;
+                    Self::add_participant_name(task, &participant);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn normalize_task(task: &mut AgentTask) {
+        if task.owner.trim().is_empty() {
+            task.owner = task
+                .messages
+                .first()
+                .map(|msg| msg.from.clone())
+                .filter(|from| !from.trim().is_empty())
+                .unwrap_or_else(|| "parent".to_string());
+        }
+        let owner = task.owner.clone();
+        let agent = task.agent.clone();
+        Self::add_participant_name(task, &owner);
+        Self::add_participant_name(task, &agent);
+        if task.scratchpad_revision == 0 {
+            task.scratchpad_revision =
+                (task.scratchpad_header.len() + task.scratchpad.len()) as u64;
+        }
+    }
+
+    fn add_participant_name(task: &mut AgentTask, participant: &str) {
+        let participant = participant.trim();
+        if participant.is_empty() {
+            return;
+        }
+        if !task.participants.iter().any(|p| p == participant) {
+            task.participants.push(participant.to_string());
+        }
     }
 }
 
@@ -396,7 +604,7 @@ pub async fn spawn_agent(
     // Start the agent binary.
     let binary = std::env::current_exe()?;
     let mut cmd = tokio::process::Command::new(&binary);
-    cmd.arg("--agent").arg(name).arg("run");
+    cmd.arg("--agent").arg(name).arg("run").arg("listen");
     if let Some(port) = gateway_port {
         cmd.env("THAT_GATEWAY_ADDR", format!("127.0.0.1:{port}"));
     }
@@ -1521,14 +1729,19 @@ pub async fn workspace_share(path: &str, repo_name: Option<&str>) -> Result<serd
 /// Merge or review a worker's code changes back into local workspace.
 pub async fn workspace_collect(
     path: &str,
-    worker: &str,
+    worker: Option<&str>,
+    branch: Option<&str>,
+    task_id: Option<&str>,
     strategy: &str,
 ) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let git_svc = git_server_url(&ns);
-    let safe_worker = sanitize_name(worker);
-    let branch = format!("task/{safe_worker}");
     let repo_url = format!("{git_svc}/workspace.git");
+    let branch = resolve_workspace_branch(worker, branch, task_id, Some("workspace")).await?;
+    let worker_label = worker
+        .map(str::to_string)
+        .or_else(|| task_branch_worker(&branch).map(str::to_string))
+        .unwrap_or_else(|| branch.clone());
 
     // Fetch the worker's branch
     let fetch = tokio::process::Command::new("git")
@@ -1558,7 +1771,7 @@ pub async fn workspace_collect(
             "FETCH_HEAD",
             "--no-ff",
             "-m",
-            &format!("Merge worker {worker} results"),
+            &format!("Merge worker {worker_label} results"),
         ])
         .output()
         .await?;
@@ -1641,11 +1854,127 @@ pub async fn workspace_activity(repo: Option<&str>) -> Result<serde_json::Value>
     }
 }
 
-/// Get a unified diff of a worker's branch vs main, without cloning.
-pub async fn workspace_branch_diff(branch: &str, repo: Option<&str>) -> Result<serde_json::Value> {
+#[derive(serde::Deserialize)]
+struct WorkspaceActivityBranch {
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceActivityResponse {
+    branches: Vec<WorkspaceActivityBranch>,
+}
+
+pub async fn resolve_workspace_worker_branch(worker: &str, repo: Option<&str>) -> Result<String> {
+    resolve_workspace_branch(Some(worker), None, None, repo).await
+}
+
+fn task_branch_worker(branch: &str) -> Option<&str> {
+    let mut parts = branch.split('/');
+    match (parts.next(), parts.next()) {
+        (Some("task"), Some(worker)) if !worker.trim().is_empty() => Some(worker),
+        _ => None,
+    }
+}
+
+fn task_branch_task_id(branch: &str) -> Option<&str> {
+    let mut parts = branch.split('/');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("task"), Some(_worker), Some(task_id), None) if !task_id.trim().is_empty() => {
+            Some(task_id)
+        }
+        _ => None,
+    }
+}
+
+fn select_workspace_branch(
+    branches: &[String],
+    worker: Option<&str>,
+    branch: Option<&str>,
+    task_id: Option<&str>,
+) -> Result<String> {
+    if let Some(branch) = branch
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+    {
+        return Ok(branch);
+    }
+    if let Some(task_id) = task_id.map(str::trim).filter(|task_id| !task_id.is_empty()) {
+        let expected_worker = worker.map(sanitize_name);
+        let matches: Vec<_> = branches
+            .iter()
+            .filter(|branch| {
+                task_branch_task_id(branch.as_str()) == Some(task_id)
+                    && expected_worker
+                        .as_deref()
+                        .map(|worker| task_branch_worker(branch.as_str()) == Some(worker))
+                        .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        return match matches.len() {
+            1 => Ok(matches[0].clone()),
+            0 => Err(anyhow::anyhow!(
+                "no workspace branch found for task_id '{task_id}'"
+            )),
+            _ => Err(anyhow::anyhow!(
+                "multiple workspace branches found for task_id '{task_id}'; specify branch explicitly"
+            )),
+        };
+    }
+    let worker = worker
+        .map(str::trim)
+        .filter(|worker| !worker.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("worker, branch, or task_id is required"))?;
+    let safe_worker = sanitize_name(worker);
+    let exact = format!("task/{safe_worker}");
+    let prefix = format!("{exact}/");
+    if branches.iter().any(|branch| branch == &exact) {
+        return Ok(exact);
+    }
+    let mut matches = branches
+        .iter()
+        .filter(|branch| branch.starts_with(&prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches.dedup();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(anyhow::anyhow!("no workspace branch found for worker '{worker}'")),
+        _ => Err(anyhow::anyhow!(
+            "multiple workspace branches found for worker '{worker}'; inspect workspace activity and choose a branch explicitly"
+        )),
+    }
+}
+
+pub async fn resolve_workspace_branch(
+    worker: Option<&str>,
+    branch: Option<&str>,
+    task_id: Option<&str>,
+    repo: Option<&str>,
+) -> Result<String> {
+    let activity = workspace_activity(repo).await?;
+    let parsed: WorkspaceActivityResponse = serde_json::from_value(activity)?;
+    let branches = parsed
+        .branches
+        .into_iter()
+        .map(|branch| branch.name)
+        .collect::<Vec<_>>();
+    select_workspace_branch(&branches, worker, branch, task_id)
+}
+
+/// Get a unified diff of a workspace branch vs main, without cloning.
+pub async fn workspace_branch_diff(
+    worker: Option<&str>,
+    branch: Option<&str>,
+    task_id: Option<&str>,
+    repo: Option<&str>,
+) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let git_svc = git_server_url(&ns);
     let repo_name = repo.unwrap_or("workspace");
+    let branch = resolve_workspace_branch(worker, branch, task_id, Some(repo_name)).await?;
     let url = format!("{git_svc}/api/repos/{repo_name}/diff/{branch}");
     let resp = reqwest::Client::new()
         .get(&url)
@@ -1663,10 +1992,16 @@ pub async fn workspace_branch_diff(branch: &str, repo: Option<&str>) -> Result<s
 }
 
 /// Analyze merge conflicts between a worker's branch and main.
-pub async fn workspace_conflicts(branch: &str, repo: Option<&str>) -> Result<serde_json::Value> {
+pub async fn workspace_conflicts(
+    worker: Option<&str>,
+    branch: Option<&str>,
+    task_id: Option<&str>,
+    repo: Option<&str>,
+) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let git_svc = git_server_url(&ns);
     let repo_name = repo.unwrap_or("workspace");
+    let branch = resolve_workspace_branch(worker, branch, task_id, Some(repo_name)).await?;
     let url = format!("{git_svc}/api/repos/{repo_name}/conflicts/{branch}");
     let resp = reqwest::Client::new()
         .get(&url)
@@ -1832,4 +2167,171 @@ async fn kubectl_delete_by_label(name: &str, ns: &str) -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_registry() -> AgentTaskRegistry {
+        let dir =
+            std::env::temp_dir().join(format!("that-agent-task-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        AgentTaskRegistry::new(dir.join("agent_tasks.json"))
+    }
+
+    #[test]
+    fn scratchpad_header_replaces_by_kind_without_duplicate_revision() {
+        let reg = temp_registry();
+        let task = reg.create("worker", "finish the task", "parent").unwrap();
+
+        reg.scratchpad_set_header(&task.id, "parent", "goal", "Overall shared goal:\nA")
+            .unwrap();
+        reg.scratchpad_set_header(&task.id, "parent", "goal", "Overall shared goal:\nA")
+            .unwrap();
+        reg.scratchpad_set_header(&task.id, "parent", "goal", "Overall shared goal:\nB")
+            .unwrap();
+
+        let task = reg.get(&task.id).unwrap().unwrap();
+        assert_eq!(task.scratchpad_header.len(), 1);
+        assert_eq!(task.scratchpad_header[0].kind, "goal");
+        assert_eq!(task.scratchpad_header[0].note, "Overall shared goal:\nB");
+        assert_eq!(task.scratchpad_revision, 2);
+    }
+
+    #[test]
+    fn scratchpad_activity_tracks_kind_and_participants() {
+        let reg = temp_registry();
+        let task = reg.create("worker", "finish the task", "parent").unwrap();
+
+        reg.scratchpad_append_kind(
+            &task.id,
+            "peer",
+            "Need feedback on the diff",
+            Some("review"),
+        )
+        .unwrap();
+
+        let task = reg.get(&task.id).unwrap().unwrap();
+        assert_eq!(task.scratchpad.len(), 1);
+        assert_eq!(task.scratchpad[0].kind, "review");
+        assert!(task.participants.iter().any(|p| p == "peer"));
+        assert_eq!(task.scratchpad_revision, 1);
+    }
+
+    #[test]
+    fn normalize_legacy_task_backfills_owner_participants_and_revision() {
+        let reg = temp_registry();
+        let legacy = serde_json::json!([{
+            "id": "task-1",
+            "agent": "worker",
+            "state": "submitted",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "result": null,
+            "messages": [{
+                "from": "dispatcher",
+                "text": "legacy task",
+                "timestamp": "2026-01-01T00:00:00Z"
+            }],
+            "scratchpad": [{
+                "from": "worker",
+                "note": "old note",
+                "timestamp": "2026-01-01T00:00:01Z"
+            }]
+        }]);
+        std::fs::write(reg.path.clone(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let task = reg.get("task-1").unwrap().unwrap();
+        assert_eq!(task.owner, "dispatcher");
+        assert!(task.participants.iter().any(|p| p == "dispatcher"));
+        assert!(task.participants.iter().any(|p| p == "worker"));
+        assert_eq!(task.scratchpad_revision, 1);
+        assert_eq!(task.scratchpad[0].kind, "");
+    }
+
+    #[test]
+    fn journal_replays_task_state_without_snapshot_file() {
+        let reg = temp_registry();
+        let task = reg.create("worker", "finish the task", "parent").unwrap();
+        reg.scratchpad_set_header(&task.id, "parent", "goal", "Overall shared goal:\nShip")
+            .unwrap();
+        reg.scratchpad_append_kind(&task.id, "worker", "Pushed commit abc123", Some("commit"))
+            .unwrap();
+        std::fs::remove_file(&reg.path).unwrap();
+
+        let task = reg.get(&task.id).unwrap().unwrap();
+        assert_eq!(task.scratchpad_header.len(), 1);
+        assert_eq!(task.scratchpad_header[0].kind, "goal");
+        assert_eq!(task.scratchpad.len(), 1);
+        assert_eq!(task.scratchpad[0].kind, "commit");
+        assert_eq!(task.scratchpad_revision, 2);
+    }
+
+    #[test]
+    fn select_workspace_branch_prefers_explicit_branch() {
+        let branches = vec!["task/dev/task-1".to_string()];
+        assert_eq!(
+            select_workspace_branch(&branches, Some("dev"), Some("task/custom"), Some("task-1"))
+                .unwrap(),
+            "task/custom"
+        );
+    }
+
+    #[test]
+    fn select_workspace_branch_uses_task_id_deterministically() {
+        let branches = vec!["task/dev/task-1".to_string(), "task/dev/task-2".to_string()];
+        assert_eq!(
+            select_workspace_branch(&branches, None, None, Some("task-2")).unwrap(),
+            "task/dev/task-2"
+        );
+    }
+
+    #[test]
+    fn select_workspace_branch_rejects_ambiguous_task_id() {
+        let branches = vec![
+            "task/dev/task-1".to_string(),
+            "task/reviewer/task-1".to_string(),
+        ];
+        assert!(select_workspace_branch(&branches, None, None, Some("task-1")).is_err());
+    }
+
+    #[test]
+    fn select_workspace_branch_uses_unique_worker_subbranch_fallback() {
+        let branches = vec!["task/dev/task-1".to_string()];
+        assert_eq!(
+            select_workspace_branch(&branches, Some("dev"), None, None).unwrap(),
+            "task/dev/task-1"
+        );
+    }
+
+    #[test]
+    fn concurrent_scratchpad_appends_do_not_drop_entries() {
+        let reg = temp_registry();
+        let path = reg.path.clone();
+        let task = reg.create("worker", "finish the task", "parent").unwrap();
+
+        std::thread::scope(|scope| {
+            for worker_id in 0..8 {
+                let path = path.clone();
+                let task_id = task.id.clone();
+                scope.spawn(move || {
+                    let reg = AgentTaskRegistry::new(path);
+                    for note_id in 0..5 {
+                        reg.scratchpad_append_kind(
+                            &task_id,
+                            &format!("worker-{worker_id}"),
+                            &format!("note-{note_id}"),
+                            Some("progress"),
+                        )
+                        .unwrap();
+                    }
+                });
+            }
+        });
+
+        let task = reg.get(&task.id).unwrap().unwrap();
+        assert_eq!(task.scratchpad.len(), 40);
+        assert_eq!(task.scratchpad_revision, 40);
+    }
 }

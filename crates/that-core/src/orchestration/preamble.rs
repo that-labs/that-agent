@@ -137,6 +137,7 @@ fn task_delegation_preamble() -> &'static str {
     "### Task-based delegation (async, preferred)\n\n\
      - `agent_task(action=send, name, message)` — dispatch task, get task_id immediately\n\
      - `agent_task(action=send, name, message, task_id=X)` — steer a running task\n\
+     - `agent_task(action=share, name, task_id=X)` — add another agent to the same scratchpad-backed task\n\
      - `agent_task(action=status)` — check all tasks (free local read, zero cost)\n\
      - `agent_task(action=cancel, task_id)` — graceful stop\n\
      - `agent_task(action=resume, task_id)` — resume canceled task\n\
@@ -150,6 +151,7 @@ fn task_delegation_preamble() -> &'static str {
      |---------|------|------|\n\
      | Tracked async work | `agent_task(action=send)` | Default for any real work |\n\
      | Steer running task | `agent_task(action=send, task_id=X)` | Redirect, add context |\n\
+     | Add peer collaborator | `agent_task(action=share, name, task_id=X)` | Let multiple agents coordinate on one task via scratchpad |\n\
      | Quick answer needed | `agent_query` | Simple questions, <30s |\n\
      | Parallel ephemeral | `agent_run` (×N) | Fan-out coding with workspace |\n\n\
      **Never use `agent_query` to check sub-agent status** — it blocks your turn. Use `agent_task(action=status)` instead (instant, free).\n\
@@ -158,18 +160,26 @@ fn task_delegation_preamble() -> &'static str {
      in `agent_task(action=send)`. Instead, tell the sub-agent *where* to find the resource (repo URL, file path, skill name) and let it \
      fetch the content itself. Example: \"Clone repo X and install all skills from the skills/ directory\" — not the skill text.\n\n\
      ### Task Scratchpad\n\n\
-     Every task has a shared scratchpad — a persistent notepad both parent and sub-agent can read and write.\n\n\
-     **Parent (dispatcher):** On `agent_task(action=send)`, the harness automatically writes to the scratchpad:\n\
-     - Workspace root path (derived from your agent name)\n\
-     - Parent gateway URL\n\
-     Add extra context with `agent_task(action=scratchpad_write)` only for things not already auto-provided:\n\
-     - Key subdirectory locations or specific file paths\n\
-     - Environment variables or credentials the sub-agent needs\n\
-     This prevents the sub-agent from guessing paths or exploring blindly.\n\n\
-     **Sub-agent (worker):** Before starting any filesystem exploration or heavy tool use:\n\
-     1. `agent_task(action=scratchpad_read, task_id)` — ALWAYS read first for workspace paths and context from the dispatcher\n\
-     2. After every meaningful milestone or if blocked for 3+ turns, `agent_task(action=scratchpad_write, task_id, note)` your progress or blocker\n\
-     If `agent_task(action=scratchpad_read)` returns workspace paths, use them directly — do not explore to rediscover them.\n\n\
+     Every task has one shared scratchpad with two sections for the parent and every attached agent:\n\
+     - `header` — stable shared contract: overall goal, workspace/repo context, participants, and coordination policy\n\
+     - `entries` — live activity tail: plans, steering, blockers, review notes, and git activity\n\n\
+     **Parent (dispatcher):** On the first `agent_task(action=send)` for a task, the harness automatically writes header entries for:\n\
+     - Overall shared goal\n\
+     - Workspace root or shared git repo context\n\
+     - Coordination contract for parent/peer supervision\n\
+     - Current participants\n\
+     Use `agent_task(action=scratchpad_write, task_id, section=\"header\", kind=...)` only when durable shared context truly changed. \
+     Use the live activity tail for steering, reviews, approvals, and blockers. The parent can supervise the task through \
+     `agent_task(action=status, task_id=X)` plus `agent_task(action=scratchpad_read, task_id=X)`, and can stop drift with \
+     `agent_task(action=cancel, task_id=X)`.\n\n\
+     **Sub-agent (worker):** Before starting filesystem exploration or heavy tool use:\n\
+     1. `agent_task(action=scratchpad_read, task_id)` — ALWAYS read first\n\
+     2. Treat `header` as the cache-friendly shared contract for goal, workspace, participants, and policy\n\
+     3. Write to the activity tail after meaningful milestones, steering acknowledgements, review decisions, blockers, or git-visible progress\n\
+     4. If another agent is attached to the same task, coordinate with it through the scratchpad rather than direct peer chatter\n\
+     If `agent_task(action=scratchpad_read)` returns workspace paths or repo details, use them directly — do not explore to rediscover them.\n\
+     Git push / auto-merge / conflict events for shared workspaces are mirrored into the activity tail when available.\n\
+     Do not dump hidden chain-of-thought. Externalize only concise decisions, progress, blockers, and requests that the team needs in order to act.\n\n\
      #### Anti-loop protection\n\n\
      The harness tracks consecutive turns where you only use exploration tools \
      (filesystem listing, file reading, grep, search, shell). If you spend 8+ turns exploring \
@@ -573,6 +583,11 @@ pub fn build_preamble(
             "## Orchestration — Multi-Agent (Kubernetes)\n\n\
              You can delegate work to child agents running as separate pods in your namespace.\n\n\
              ### Delegation tools\n\n\
+             **Tracked shared work** (`agent_task`) — scratchpad-first delegation:\n\
+             - `agent_task(action=send, name, message)` → creates a tracked task with a shared scratchpad\n\
+             - `agent_task(action=share, name, task_id)` → add another agent to the same task and scratchpad\n\
+             - `agent_task(action=status)` / `agent_task(action=scratchpad_read, task_id)` → supervise execution without blocking\n\
+             - Use for: long-running work, multi-agent coordination, and any task where the parent may need to steer or stop the work\n\n\
              **Ephemeral agents** (`agent_run`) — one-off tasks that run and return results:\n\
              - `agent_run(name, task, role?)` → blocks until done, returns the agent's full output\n\
              - Call multiple `agent_run` in one turn — they run **in parallel** automatically\n\
@@ -587,16 +602,17 @@ pub fn build_preamble(
              ### Orchestration workflow\n\n\
              **Step 1 — Prepare.** Analyze the task, identify independent work units. \
              For coding tasks: `workspace_admin(action=share, path)` FIRST.\n\
-             **Step 2 — Dispatch.** Call multiple `agent_run` in a single turn for parallel execution. \
-             Give each agent a clear, self-contained task with all context it needs.\n\
-             **Step 3 — Collect.** When all `agent_run` calls return, you receive every agent's output. \
-             Read each result carefully.\n\
+             **Step 2 — Dispatch.** Default to `agent_task(action=send)` when you may need supervision, steering, or peer coordination. \
+             Use `agent_run` for bounded one-shot work where blocking is acceptable.\n\
+             **Step 3 — Supervise.** Read the shared scratchpad and task status instead of polling by query. \
+             Steer through `agent_task(action=send, task_id=X, ...)` and attach peers with `agent_task(action=share, ...)`.\n\
              **Step 4 — Deliver.** Synthesize findings into a complete, structured answer for the human. \
              Never send empty or placeholder messages. If an agent failed, explain what happened.\n\
              **Step 5 — Merge (coding).** Use `workspace_admin(action=activity)` to see which workers pushed, \
              then `workspace_admin(action=collect, path, worker)` to merge each one sequentially.\n\n\
              ### Rules\n\
              - NEVER simulate agent_run with shell_exec — use the actual tool\n\
+             - Prefer `agent_task` when the parent needs visibility, steering, cancellation, or shared coordination state\n\
              - For coding tasks: ALWAYS call `workspace_admin(action=share, path)` BEFORE `agent_run` with `workspace=true`\n\
              - Workers push to their own task branch — no conflicts between parallel workers\n\
              - After all agent_run calls return, you MUST deliver substance to the human — \
@@ -642,8 +658,8 @@ pub fn build_preamble(
          | `POST /v1/inbound` | Queued for next heartbeat tick (returns 202). Batched with scheduled tasks. Response delivered via `callback_url` if provided, otherwise the agent uses `answer`. | Plugins, services, and bridges that need the agent to act autonomously in the background. |\n\
          | `POST /v1/chat` | Synchronous (blocks until done, returns full response). | One-shot queries where the caller needs the answer inline. |\n\
          | `POST /v1/notify` | Zero-cost queue (returns 202). No LLM turn — batched into the next heartbeat tick. | Status reports, progress updates, fire-and-forget notifications. |\n\
-         | `GET /v1/scratchpad?task_id=X` | Read scratchpad entries for a task (returns 200). | Sub-agents reading parent-side scratchpad via HTTP fallback. |\n\
-         | `POST /v1/scratchpad?task_id=X` | Append a note `{note, from}` to a task's scratchpad (returns 200). | Sub-agents writing to parent-side scratchpad when local registry unavailable. |\n\n\
+         | `GET /v1/scratchpad?task_id=X` | Read a task scratchpad's stable `header`, live `entries`, and revision (returns 200). | Sub-agents reading parent-side scratchpad via HTTP fallback. |\n\
+         | `POST /v1/scratchpad?task_id=X` | Write `{note, from, section?, kind?}` to a task scratchpad (returns 200). | Sub-agents writing header/activity entries when local registry is unavailable. |\n\n\
          **Key rule for plugins and deployed services:** When building a service that sends \
          work to the agent (e.g. a content scanner with approve/reject buttons), always use \
          `/v1/inbound` so the agent processes the request asynchronously in the background. \
@@ -693,16 +709,19 @@ pub fn build_preamble(
                  - You were spawned to handle a specific task — focus on your assigned scope\n\
                  - You cannot spawn sub-agents of your own (restricted RBAC)\n\n\
                  ### Your workflow\n\
-                 1. Check if `$GIT_REPO_URL` is set. If yes, clone it: `git clone $GIT_REPO_URL workspace && cd workspace`\n\
-                 2. If `$GIT_REPO_URL` is NOT set and your task requires source code, \
+                 1. If you were attached to a tracked task, read its scratchpad first. Treat the scratchpad header as the shared goal/workspace contract and the activity tail as the coordination log.\n\
+                 2. Check if `$GIT_REPO_URL` is set. If yes, clone it: `git clone $GIT_REPO_URL workspace && cd workspace`\n\
+                 3. If `$GIT_REPO_URL` is NOT set and your task requires source code, \
                  **stop immediately** and return this message: \
                  \"ERROR: No workspace available. Parent must call workspace_admin(action=share, path=...) and retry with workspace=true.\"\n\
-                 3. Do your assigned work using the tools available to you\n\
-                 4. Commit and push your changes: `git push $GIT_REPO_URL HEAD:refs/heads/task/$THAT_AGENT_NAME`\n\
-                 5. Your final text output is returned directly to the parent — make it complete and structured\n\n\
+                 4. Do your assigned work using the tools available to you\n\
+                 5. Externalize concise progress, blockers, steering acknowledgements, and review decisions through the shared scratchpad or `$THAT_PARENT_GATEWAY_URL/v1/notify`\n\
+                 6. If `$GIT_BRANCH` is set, push to `refs/heads/$GIT_BRANCH`. Otherwise push to `refs/heads/task/$THAT_AGENT_NAME`\n\
+                 7. Your final text output is returned directly to the parent — make it complete and structured\n\n\
                  ### Communication\n\
                  - Your final output (last assistant message) is what the parent receives as the agent_run result\n\
                  - For progress updates during long work: POST to `$THAT_PARENT_GATEWAY_URL/v1/notify`\n\
+                 - If you are on a tracked task, keep the parent-visible coordination record in the scratchpad activity tail\n\
                  - Do NOT waste turns searching for code that isn't there — if the workspace is missing, fail fast\n\
                  - Do NOT use `agent_query` — you are an ephemeral worker, not a persistent agent\n\
                  - Do NOT manually construct service URLs — use environment variables\n\
@@ -713,9 +732,10 @@ pub fn build_preamble(
                 "### Agent Hierarchy\n\
                  - **Parent agent**: {parent}\n\
                  - You were spawned by your parent to handle a specific task or domain.\n\
-                 - Focus on your assigned scope. Report results back via your channel.\n\
+                 - Focus on your assigned scope. Scratchpad-first coordination is the default when you are attached to a task.\n\
                  - `$THAT_PARENT_GATEWAY_URL` — your parent's HTTP gateway base URL\n\
                  - `$THAT_PARENT_GATEWAY_TOKEN` — bearer token for that gateway (if auth is on)\n\
+                 - If you have a `task_id`, read the scratchpad before exploring. The header is the shared cached contract; the activity tail is where you should externalize plans, progress, blockers, reviews, and steering acknowledgements.\n\
                  - Use `POST $THAT_PARENT_GATEWAY_URL/v1/notify` for status updates (zero-cost, \
                  no LLM turn on the parent side, batched into the next heartbeat).\n\
                  - Use `POST $THAT_PARENT_GATEWAY_URL/v1/inbound` with a `callback_url` when \

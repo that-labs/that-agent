@@ -23,6 +23,7 @@ use tokio::process::Command;
 
 use crate::agent_loop::types::ToolDef;
 use crate::agent_loop::ToolContext;
+use crate::config::AgentDef;
 
 const TRUSTED_LOCAL_SANDBOX_ENV: &str = "THAT_TRUSTED_LOCAL_SANDBOX";
 const SANDBOX_MODE_ENV: &str = "THAT_SANDBOX_MODE";
@@ -163,6 +164,132 @@ fn container_path(path: &str) -> String {
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn current_agent_has_parent() -> bool {
+    std::env::var("THAT_AGENT_PARENT")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn child_orchestration_guard(name: &str) -> Option<ToolError> {
+    if current_agent_has_parent() && matches!(name, "spawn_agent" | "agent_run") {
+        return Some(ToolError(format!(
+            "tool '{name}' is unavailable to child agents; coordinate through agent_task scratchpads instead"
+        )));
+    }
+    None
+}
+
+fn resolved_workspace_hint(agent_name: &str) -> String {
+    let inherit_workspace = parse_env_bool("THAT_AGENT_INHERIT_WORKSPACE").unwrap_or(false);
+    if inherit_workspace {
+        if let Ok(parent) = std::env::var("THAT_AGENT_PARENT") {
+            if !parent.trim().is_empty() {
+                return AgentDef::agent_workspace_dir(parent.trim())
+                    .display()
+                    .to_string();
+            }
+        }
+    }
+    AgentDef::agent_workspace_dir(agent_name)
+        .display()
+        .to_string()
+}
+
+fn build_task_context_note(agent_name: &str, parent_gateway_url: &str) -> String {
+    if let Ok(repo_url) = std::env::var("GIT_REPO_URL") {
+        let branch = std::env::var("GIT_BRANCH").unwrap_or_else(|_| "main".to_string());
+        return format!(
+            "Shared scratchpad context:\nGit workspace repo: {repo_url}\nSuggested branch: {branch}\nPreferred working directory inside worker: /workspace\nParent gateway: {parent_gateway_url}"
+        );
+    }
+
+    format!(
+        "Shared scratchpad context:\nWorkspace root: {} (resolved from current agent workspace model)\nParent gateway: {parent_gateway_url}",
+        resolved_workspace_hint(agent_name)
+    )
+}
+
+fn build_task_goal_note(message: &str) -> String {
+    format!("Overall shared goal:\n{}", message.trim())
+}
+
+fn build_task_coordination_note(owner: &str, primary_worker: &str) -> String {
+    format!(
+        "Shared coordination contract:\nOwner: {owner}\nPrimary worker: {primary_worker}\nUse header entries for stable goal, workspace, participants, and policy that should stay cache-friendly.\nUse activity entries for plans, steering, blockers, reviews, and git progress.\nExternalize decisions here so every participant, including the parent, can supervise the task. Hidden reasoning is not shared."
+    )
+}
+
+fn build_task_participants_note(
+    owner: &str,
+    primary_worker: &str,
+    participants: &[String],
+) -> String {
+    format!(
+        "Task participants:\nOwner: {owner}\nPrimary worker: {primary_worker}\nParticipants: {}",
+        participants.join(", ")
+    )
+}
+
+fn sanitize_task_branch_segment(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    sanitized.trim_matches('-').to_string()
+}
+
+fn build_task_git_branch_note(primary_worker: &str, task_id: &str) -> String {
+    format!(
+        "Preferred git branch for this task:\n{}",
+        [
+            "task",
+            &sanitize_task_branch_segment(primary_worker),
+            &sanitize_task_branch_segment(task_id),
+        ]
+        .join("/")
+    )
+}
+
+fn sync_task_scratchpad_header(
+    task_reg: &crate::agents::AgentTaskRegistry,
+    task: &crate::agents::AgentTask,
+    from: &str,
+    workspace_note: &str,
+    goal: Option<&str>,
+) {
+    if let Some(goal) = goal.filter(|goal| !goal.trim().is_empty()) {
+        let _ = task_reg.scratchpad_set_header(&task.id, from, "goal", &build_task_goal_note(goal));
+    }
+    let _ = task_reg.scratchpad_set_header(&task.id, from, "workspace", workspace_note);
+    let _ = task_reg.scratchpad_set_header(
+        &task.id,
+        from,
+        "coordination",
+        &build_task_coordination_note(&task.owner, &task.agent),
+    );
+    let _ = task_reg.scratchpad_set_header(
+        &task.id,
+        from,
+        "participants",
+        &build_task_participants_note(&task.owner, &task.agent, &task.participants),
+    );
+    if std::env::var("GIT_REPO_URL").is_ok() {
+        let _ = task_reg.scratchpad_set_header(
+            &task.id,
+            from,
+            "git_branch",
+            &build_task_git_branch_note(&task.agent, &task.id),
+        );
+    }
 }
 
 async fn docker_exec_sh(container: &str, cmd: &str) -> Result<serde_json::Value, ToolError> {
@@ -488,7 +615,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         "Requires sandbox mode. Start the agent without --no-sandbox to enable this tool."
     };
 
-    vec![
+    let mut tools = vec![
         ToolDef {
             name: "fs_ls".into(),
             description: "List directory contents with file sizes and types.".into(),
@@ -1181,16 +1308,20 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             name: "agent_task".into(),
             description: "Manage asynchronous sub-agent tasks and shared scratchpads. \
                 Use action=send to start or steer a task, action=status to inspect it, \
-                action=scratchpad_read or scratchpad_write for shared notes, action=cancel or resume to control execution, \
+                action=share to add another agent to the same scratchpad-backed task, \
+                action=scratchpad_read or scratchpad_write for the shared task header and live activity tail, \
+                action=cancel or resume to control execution, \
                 or action=query_async for deprecated fire-and-forget delivery.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["send", "status", "scratchpad_read", "scratchpad_write", "cancel", "resume", "query_async"], "description": "Agent task action to perform" },
-                    "name": { "type": "string", "description": "Target agent name for send/query_async" },
+                    "action": { "type": "string", "enum": ["send", "share", "status", "scratchpad_read", "scratchpad_write", "cancel", "resume", "query_async"], "description": "Agent task action to perform" },
+                    "name": { "type": "string", "description": "Target agent name for send/share/query_async" },
                     "message": { "type": "string", "description": "Task description, follow-up message, or async query message" },
                     "task_id": { "type": "string", "description": "Existing task ID for send/status/scratchpad/cancel/resume" },
-                    "note": { "type": "string", "description": "Scratchpad note for scratchpad_write" }
+                    "note": { "type": "string", "description": "Scratchpad note for scratchpad_write" },
+                    "section": { "type": "string", "enum": ["header", "activity"], "description": "Scratchpad section for scratchpad_write (default: activity)" },
+                    "kind": { "type": "string", "description": "Optional scratchpad entry kind such as goal, workspace, steering, blocker, review, commit, or merge_conflict" }
                 },
                 "required": ["action"]
             }),
@@ -1221,15 +1352,22 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "action": { "type": "string", "enum": ["share", "collect", "activity", "diff", "conflicts"], "description": "Workspace admin action to perform" },
                     "path": { "type": "string", "description": "Local git repo path for action=share or local working tree for action=collect" },
                     "name": { "type": "string", "description": "Optional shared repo name for action=share" },
-                    "worker": { "type": "string", "description": "Worker name for action=collect" },
+                    "worker": { "type": "string", "description": "Worker name for action=collect, or as a fallback selector for action=diff/conflicts" },
                     "strategy": { "type": "string", "description": "\"merge\" (default) or \"review\" for action=collect" },
                     "repo": { "type": "string", "description": "Shared repo name for action=activity/diff/conflicts (defaults to \"workspace\")" },
-                    "branch": { "type": "string", "description": "Branch for action=diff or action=conflicts, for example \"task/worker-1\"" }
+                    "branch": { "type": "string", "description": "Explicit branch for action=collect/diff/conflicts, for example \"task/worker-1/task-123\"" },
+                    "task_id": { "type": "string", "description": "Tracked task ID for action=collect/diff/conflicts. Resolves the matching workspace branch deterministically when available." }
                 },
                 "required": ["action"]
             }),
         },
-    ]
+    ];
+
+    if current_agent_has_parent() {
+        tools.retain(|tool| !matches!(tool.name.as_str(), "spawn_agent" | "agent_run"));
+    }
+
+    tools
 }
 
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
@@ -1375,6 +1513,14 @@ fn remap_grouped_tool_call(
                         "task_id": args.task_id,
                     }),
                 ),
+                "share" => (
+                    "agent_task_share",
+                    serde_json::json!({
+                        "name": args.name,
+                        "message": args.message,
+                        "task_id": args.task_id,
+                    }),
+                ),
                 "status" => (
                     "agent_task_status",
                     serde_json::json!({ "task_id": args.task_id }),
@@ -1441,6 +1587,7 @@ fn remap_grouped_tool_call(
                 strategy: Option<String>,
                 repo: Option<String>,
                 branch: Option<String>,
+                task_id: Option<String>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
@@ -1454,6 +1601,8 @@ fn remap_grouped_tool_call(
                     serde_json::json!({
                         "path": args.path,
                         "worker": args.worker,
+                        "branch": args.branch,
+                        "task_id": args.task_id,
                         "strategy": args.strategy,
                     }),
                 ),
@@ -1463,11 +1612,21 @@ fn remap_grouped_tool_call(
                 ),
                 "diff" => (
                     "workspace_diff",
-                    serde_json::json!({ "branch": args.branch, "repo": args.repo }),
+                    serde_json::json!({
+                        "worker": args.worker,
+                        "branch": args.branch,
+                        "task_id": args.task_id,
+                        "repo": args.repo
+                    }),
                 ),
                 "conflicts" => (
                     "workspace_conflicts",
-                    serde_json::json!({ "branch": args.branch, "repo": args.repo }),
+                    serde_json::json!({
+                        "worker": args.worker,
+                        "branch": args.branch,
+                        "task_id": args.task_id,
+                        "repo": args.repo
+                    }),
                 ),
                 other => {
                     return Err(ToolError(format!(
@@ -1498,6 +1657,9 @@ async fn dispatch_inner(
         Some((mapped_name, mapped_args)) => (mapped_name.as_str(), mapped_args.as_str()),
         None => (name, args_json),
     };
+    if let Some(err) = child_orchestration_guard(name) {
+        return Err(err);
+    }
     match name {
         "fs_ls" => {
             let args: FsLsArgs = serde_json::from_str(args_json)
@@ -2604,48 +2766,148 @@ async fn dispatch_inner(
         "agent_task_send" => {
             #[derive(Deserialize)]
             struct Args {
-                name: String,
+                name: Option<String>,
                 message: String,
                 task_id: Option<String>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            let (cluster_dir, gw) =
-                crate::agents::resolve_agent_gateway(Path::new(&config.memory.db_path), &args.name)
-                    .map_err(|e| ToolError(e.to_string()))?;
+            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
             let task_reg =
                 crate::agents::AgentTaskRegistry::new(cluster_dir.join("agent_tasks.json"));
             let parent_gw = crate::orchestration::support::resolve_gateway_url();
             let sender = ctx.sender_name();
+            let workspace_note = build_task_context_note(sender, &parent_gw);
 
-            let task_id = if let Some(tid) = &args.task_id {
-                task_reg
-                    .append_message(tid, "parent", &args.message)
-                    .map_err(|e| ToolError(e.to_string()))?;
-                tid.clone()
-            } else {
-                task_reg
-                    .create(&args.name, &args.message)
+            let (task_id, target_agent, created) = if let Some(tid) = &args.task_id {
+                let task = task_reg
+                    .get(tid)
                     .map_err(|e| ToolError(e.to_string()))?
-                    .id
+                    .ok_or_else(|| ToolError(format!("task '{}' not found", tid)))?;
+                task_reg
+                    .append_message(tid, sender, &args.message)
+                    .map_err(|e| ToolError(e.to_string()))?;
+                let _ = task_reg.scratchpad_append_kind(
+                    tid,
+                    sender,
+                    &format!("Steering update from {sender}: {}", args.message),
+                    Some("steering"),
+                );
+                (tid.clone(), task.agent, false)
+            } else {
+                let target_agent = args
+                    .name
+                    .clone()
+                    .ok_or_else(|| ToolError("name is required when creating a task".into()))?;
+                let task_id = task_reg
+                    .create(&target_agent, &args.message, sender)
+                    .map_err(|e| ToolError(e.to_string()))?
+                    .id;
+                (task_id, target_agent, true)
             };
+            let (_, gw) = crate::agents::resolve_agent_gateway(
+                Path::new(&config.memory.db_path),
+                &target_agent,
+            )
+            .map_err(|e| ToolError(e.to_string()))?;
 
             let callback = format!("{parent_gw}/v1/task_update?task_id={task_id}");
             crate::agents::post_to_agent_inbound(&gw, &args.message, sender, Some(&callback))
                 .await
                 .map_err(|e| ToolError(e.to_string()))?;
 
-            // Auto-enrich scratchpad with workspace context so sub-agent doesn't explore blindly.
-            let workspace_hint = format!(
-                "/home/agent/.that-agent/workspaces/{sender}",
-                sender = sender
-            );
-            let note = format!(
-                "Workspace root: {workspace_hint} (verify with ls)\nParent gateway: {parent_gw}"
-            );
-            let _ = task_reg.scratchpad_append(&task_id, sender, &note);
+            let _ = task_reg.add_participant(&task_id, sender);
+            let task = task_reg
+                .get(&task_id)
+                .map_err(|e| ToolError(e.to_string()))?
+                .ok_or_else(|| ToolError(format!("task '{}' not found", task_id)))?;
+            if created || task.owner == sender {
+                sync_task_scratchpad_header(
+                    &task_reg,
+                    &task,
+                    sender,
+                    &workspace_note,
+                    created.then_some(args.message.as_str()),
+                );
+            }
 
             Ok(serde_json::json!({ "task_id": task_id, "state": "submitted" }))
+        }
+        "agent_task_share" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                task_id: String,
+                message: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let task_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            let task = task_reg
+                .get(&args.task_id)
+                .map_err(|e| ToolError(e.to_string()))?
+                .ok_or_else(|| ToolError(format!("task '{}' not found", args.task_id)))?;
+            task_reg
+                .add_participant(&args.task_id, &args.name)
+                .map_err(|e| ToolError(e.to_string()))?;
+
+            let sender = ctx.sender_name();
+            let parent_gw = crate::orchestration::support::resolve_gateway_url();
+            let (_, gw) =
+                crate::agents::resolve_agent_gateway(Path::new(&config.memory.db_path), &args.name)
+                    .map_err(|e| ToolError(e.to_string()))?;
+            let join_msg = match args.message.as_deref().filter(|msg| !msg.trim().is_empty()) {
+                Some(msg) => format!(
+                    "Join shared task {} as a participant. Coordinate through the task scratchpad rather than direct peer messages.\n\nPrimary worker: {}\nOwner: {}\nCoordinator note: {}\n\nStart with agent_task(action=scratchpad_read, task_id=\"{}\").",
+                    args.task_id, task.agent, task.owner, msg, args.task_id
+                ),
+                None => format!(
+                    "Join shared task {} as a participant. Coordinate through the task scratchpad rather than direct peer messages.\n\nPrimary worker: {}\nOwner: {}\n\nStart with agent_task(action=scratchpad_read, task_id=\"{}\").",
+                    args.task_id, task.agent, task.owner, args.task_id
+                ),
+            };
+            let callback = format!("{parent_gw}/v1/task_update?task_id={}", args.task_id);
+            crate::agents::post_to_agent_inbound(&gw, &join_msg, sender, Some(&callback))
+                .await
+                .map_err(|e| ToolError(e.to_string()))?;
+            let share_note = match args.message.as_deref().filter(|msg| !msg.trim().is_empty()) {
+                Some(msg) => format!(
+                    "{sender} added {} as a task participant. Coordinator note: {msg}",
+                    args.name
+                ),
+                None => format!("{sender} added {} as a task participant.", args.name),
+            };
+            let _ =
+                task_reg.scratchpad_append_kind(&args.task_id, sender, &share_note, Some("share"));
+
+            let mut participants = task.participants;
+            if !participants
+                .iter()
+                .any(|participant| participant == &args.name)
+            {
+                participants.push(args.name.clone());
+            }
+            let refreshed_task = crate::agents::AgentTask {
+                participants: participants.clone(),
+                ..task
+            };
+            if refreshed_task.owner == sender {
+                sync_task_scratchpad_header(
+                    &task_reg,
+                    &refreshed_task,
+                    sender,
+                    &build_task_context_note(sender, &parent_gw),
+                    None,
+                );
+            }
+            Ok(serde_json::json!({
+                "task_id": args.task_id,
+                "shared_with": args.name,
+                "participants": participants,
+            }))
         }
         "agent_task_status" => {
             #[derive(Deserialize)]
@@ -2665,10 +2927,19 @@ async fn dispatch_inner(
                 Ok(serde_json::json!({
                     "id": task.id,
                     "agent": task.agent,
+                    "owner": task.owner,
+                    "participants": task.participants,
                     "state": task.state.to_string(),
                     "created_at": task.created_at,
                     "updated_at": task.updated_at,
+                    "scratchpad_revision": task.scratchpad_revision,
                     "result": task.result,
+                    "scratchpad_header": task.scratchpad_header.iter().map(|e| serde_json::json!({
+                        "kind": e.kind, "from": e.from, "note": e.note, "timestamp": e.timestamp
+                    })).collect::<Vec<_>>(),
+                    "scratchpad_recent": task.scratchpad.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().map(|e| serde_json::json!({
+                        "kind": e.kind, "from": e.from, "note": e.note, "timestamp": e.timestamp
+                    })).collect::<Vec<_>>(),
                     "messages": task.messages.iter().map(|m| serde_json::json!({
                         "from": m.from, "text": m.text, "timestamp": m.timestamp
                     })).collect::<Vec<_>>(),
@@ -2687,7 +2958,10 @@ async fn dispatch_inner(
                         serde_json::json!({
                             "id": t.id,
                             "agent": t.agent,
+                            "owner": t.owner,
+                            "participants": t.participants,
                             "state": t.state.to_string(),
+                            "scratchpad_revision": t.scratchpad_revision,
                             "updated_at": t.updated_at,
                             "last_message": last,
                         })
@@ -2710,14 +2984,37 @@ async fn dispatch_inner(
                     .and_then(|reg| reg.get(&args.task_id).ok().flatten());
 
             if let Some(task) = local {
+                let header: Vec<_> = task
+                    .scratchpad_header
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "kind": e.kind,
+                            "from": e.from,
+                            "note": e.note,
+                            "at": e.timestamp
+                        })
+                    })
+                    .collect();
                 let entries: Vec<_> = task
                     .scratchpad
                     .iter()
                     .map(|e| {
-                        serde_json::json!({ "from": e.from, "note": e.note, "at": e.timestamp })
+                        serde_json::json!({
+                            "kind": e.kind,
+                            "from": e.from,
+                            "note": e.note,
+                            "at": e.timestamp
+                        })
                     })
                     .collect();
-                Ok(serde_json::json!({ "task_id": args.task_id, "entries": entries }))
+                Ok(serde_json::json!({
+                    "task_id": args.task_id,
+                    "revision": task.scratchpad_revision,
+                    "header": header,
+                    "entries": entries,
+                    "cache_hint": "Treat header as the stable shared contract and entries as the live coordination/activity tail."
+                }))
             } else if let Ok(parent_gw) = std::env::var("THAT_PARENT_GATEWAY_URL") {
                 // HTTP fallback to parent gateway.
                 let url = format!("{parent_gw}/v1/scratchpad?task_id={}", args.task_id);
@@ -2734,6 +3031,7 @@ async fn dispatch_inner(
                     }
                     _ => Ok(serde_json::json!({
                         "task_id": args.task_id,
+                        "header": [],
                         "entries": [],
                         "note": "scratchpad unavailable — check task message for context"
                     })),
@@ -2747,37 +3045,73 @@ async fn dispatch_inner(
             struct Args {
                 task_id: String,
                 note: String,
+                section: Option<String>,
+                kind: Option<String>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             let sender = ctx.sender_name();
+            let section = args.section.as_deref().unwrap_or("activity");
+            if section == "header"
+                && args
+                    .kind
+                    .as_deref()
+                    .map(|kind| kind.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                return Err(ToolError(
+                    "kind is required when writing to the scratchpad header".into(),
+                ));
+            }
 
             // Try local registry first.
             let local_reg =
                 crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path));
             let local_ok = local_reg
                 .as_ref()
-                .map(|r| {
-                    r.scratchpad_append(&args.task_id, sender, &args.note)
-                        .is_ok()
+                .map(|r| match section {
+                    "header" => r
+                        .scratchpad_set_header(
+                            &args.task_id,
+                            sender,
+                            args.kind.as_deref().unwrap_or_default(),
+                            &args.note,
+                        )
+                        .is_ok(),
+                    _ => r
+                        .scratchpad_append_kind(
+                            &args.task_id,
+                            sender,
+                            &args.note,
+                            args.kind.as_deref(),
+                        )
+                        .is_ok(),
                 })
                 .unwrap_or(false);
 
             if local_ok {
-                Ok(serde_json::json!({ "ok": true }))
+                Ok(serde_json::json!({ "ok": true, "section": section }))
             } else if let Ok(parent_gw) = std::env::var("THAT_PARENT_GATEWAY_URL") {
                 // HTTP fallback to parent gateway.
                 let url = format!("{parent_gw}/v1/scratchpad?task_id={}", args.task_id);
                 let client = reqwest::Client::new();
-                let mut req = client
-                    .post(&url)
-                    .timeout(Duration::from_secs(5))
-                    .json(&serde_json::json!({ "note": args.note, "from": sender }));
+                let mut req =
+                    client
+                        .post(&url)
+                        .timeout(Duration::from_secs(5))
+                        .json(&serde_json::json!({
+                            "note": args.note,
+                            "from": sender,
+                            "section": section,
+                            "kind": args.kind,
+                        }));
                 if let Ok(token) = std::env::var("THAT_PARENT_GATEWAY_TOKEN") {
                     req = req.bearer_auth(token);
                 }
                 match req.send().await {
-                    Ok(resp) if resp.status().is_success() => Ok(serde_json::json!({ "ok": true })),
+                    Ok(resp) if resp.status().is_success() => {
+                        Ok(serde_json::json!({ "ok": true, "section": section }))
+                    }
                     _ => Ok(serde_json::json!({
                         "ok": false,
                         "note": "scratchpad unavailable — check task message for context"
@@ -2800,14 +3134,18 @@ async fn dispatch_inner(
             let task_reg =
                 crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
                     .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
-            // Single load: get task data and set canceled in one pass.
             let task = task_reg
-                .get_and_update(&args.task_id, |t| {
-                    t.state = crate::agents::AgentTaskState::Canceled;
-                    t.updated_at = chrono::Utc::now().to_rfc3339();
-                })
+                .get(&args.task_id)
                 .map_err(|e| ToolError(e.to_string()))?
                 .ok_or_else(|| ToolError(format!("task '{}' not found", args.task_id)))?;
+            task_reg
+                .update_state(
+                    &args.task_id,
+                    crate::agents::AgentTaskState::Canceled,
+                    None,
+                    None,
+                )
+                .map_err(|e| ToolError(e.to_string()))?;
             // Best-effort cancellation message to sub-agent.
             if let Ok((_, gw)) =
                 crate::agents::resolve_agent_gateway(Path::new(&config.memory.db_path), &task.agent)
@@ -2832,14 +3170,18 @@ async fn dispatch_inner(
             let task_reg =
                 crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
                     .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
-            // Single load: get original message and set submitted in one pass.
             let task = task_reg
-                .get_and_update(&args.task_id, |t| {
-                    t.state = crate::agents::AgentTaskState::Submitted;
-                    t.updated_at = chrono::Utc::now().to_rfc3339();
-                })
+                .get(&args.task_id)
                 .map_err(|e| ToolError(e.to_string()))?
                 .ok_or_else(|| ToolError(format!("task '{}' not found", args.task_id)))?;
+            task_reg
+                .update_state(
+                    &args.task_id,
+                    crate::agents::AgentTaskState::Submitted,
+                    None,
+                    None,
+                )
+                .map_err(|e| ToolError(e.to_string()))?;
             let original_msg = task
                 .messages
                 .first()
@@ -2937,14 +3279,18 @@ async fn dispatch_inner(
             #[derive(Deserialize)]
             struct Args {
                 path: String,
-                worker: String,
+                worker: Option<String>,
+                branch: Option<String>,
+                task_id: Option<String>,
                 strategy: Option<String>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             crate::agents::workspace_collect(
                 &args.path,
-                &args.worker,
+                args.worker.as_deref(),
+                args.branch.as_deref(),
+                args.task_id.as_deref(),
                 args.strategy.as_deref().unwrap_or("merge"),
             )
             .await
@@ -2963,26 +3309,40 @@ async fn dispatch_inner(
         "workspace_diff" => {
             #[derive(Deserialize)]
             struct Args {
-                branch: String,
+                worker: Option<String>,
+                branch: Option<String>,
+                task_id: Option<String>,
                 repo: Option<String>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            crate::agents::workspace_branch_diff(&args.branch, args.repo.as_deref())
-                .await
-                .map_err(|e| ToolError(e.to_string()))
+            crate::agents::workspace_branch_diff(
+                args.worker.as_deref(),
+                args.branch.as_deref(),
+                args.task_id.as_deref(),
+                args.repo.as_deref(),
+            )
+            .await
+            .map_err(|e| ToolError(e.to_string()))
         }
         "workspace_conflicts" => {
             #[derive(Deserialize)]
             struct Args {
-                branch: String,
+                worker: Option<String>,
+                branch: Option<String>,
+                task_id: Option<String>,
                 repo: Option<String>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            crate::agents::workspace_conflicts(&args.branch, args.repo.as_deref())
-                .await
-                .map_err(|e| ToolError(e.to_string()))
+            crate::agents::workspace_conflicts(
+                args.worker.as_deref(),
+                args.branch.as_deref(),
+                args.task_id.as_deref(),
+                args.repo.as_deref(),
+            )
+            .await
+            .map_err(|e| ToolError(e.to_string()))
         }
         other => Err(ToolError(format!("unknown tool: {other}"))),
     }

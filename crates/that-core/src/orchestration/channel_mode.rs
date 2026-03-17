@@ -63,6 +63,133 @@ pub(super) struct ActiveSenderRun {
 pub(super) type ActiveSenderRuns =
     Arc<tokio::sync::Mutex<std::collections::HashMap<String, ActiveSenderRun>>>;
 
+fn mirror_notify_event_to_scratchpad(meta: &serde_json::Value) {
+    let cluster_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".that-agent")
+        .join("cluster");
+    let task_reg = crate::agents::AgentTaskRegistry::new(cluster_dir.join("agent_tasks.json"));
+    mirror_notify_event_to_registry(&task_reg, meta);
+}
+
+fn mirror_notify_event_to_registry(
+    task_reg: &crate::agents::AgentTaskRegistry,
+    meta: &serde_json::Value,
+) {
+    let Some(event) = notify_scratchpad_event(meta) else {
+        return;
+    };
+    if let Some(task_id) = event.task_id.as_deref() {
+        let _ =
+            task_reg.scratchpad_append_kind(task_id, event.actor, &event.note, Some(event.kind));
+        return;
+    }
+    let Ok(tasks) = task_reg.list_active() else {
+        return;
+    };
+    let matches: Vec<_> = tasks
+        .into_iter()
+        .filter(|task| event.agent_names.iter().any(|name| task.agent == *name))
+        .collect();
+    if matches.len() != 1 {
+        return;
+    }
+    let _ =
+        task_reg.scratchpad_append_kind(&matches[0].id, event.actor, &event.note, Some(event.kind));
+}
+
+struct NotifyScratchpadEvent<'a> {
+    kind: &'static str,
+    actor: &'a str,
+    note: String,
+    agent_names: Vec<String>,
+    task_id: Option<String>,
+}
+
+fn branch_task_id(branch: &str) -> Option<&str> {
+    let mut parts = branch.split('/');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("task"), Some(_worker), Some(task_id), None) if !task_id.trim().is_empty() => {
+            Some(task_id)
+        }
+        _ => None,
+    }
+}
+
+fn notify_scratchpad_event(meta: &serde_json::Value) -> Option<NotifyScratchpadEvent<'_>> {
+    let event = meta.get("event").and_then(|v| v.as_str())?;
+    let kind = match event {
+        "push" => "commit",
+        "auto_merge" => "auto_merge",
+        "merge_conflict" => "merge_conflict",
+        _ => return None,
+    };
+    let actor = meta
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("git-server");
+    let repo = meta
+        .get("repo")
+        .and_then(|v| v.as_str())
+        .unwrap_or("workspace");
+    let branch = meta.get("branch").and_then(|v| v.as_str()).unwrap_or("");
+    let commit = meta.get("commit").and_then(|v| v.as_str()).unwrap_or("");
+    let note = match event {
+        "push" => {
+            format!("Git activity visible to parent: repo={repo}, branch={branch}, commit={commit}")
+        }
+        "auto_merge" => {
+            format!(
+                "Git auto-merge visible to parent: repo={repo}, branch={branch}, commit={commit}"
+            )
+        }
+        "merge_conflict" => {
+            let files = meta
+                .get("conflicting_files")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            format!(
+                "Git merge conflict visible to parent: repo={repo}, branch={branch}, files={files}"
+            )
+        }
+        _ => unreachable!(),
+    };
+    let mut agent_names = Vec::new();
+    if let Some(name) = actor.strip_prefix("git-server/") {
+        agent_names.push(name.to_string());
+    }
+    if let Some(name) = branch
+        .strip_prefix("task/")
+        .and_then(|rest| rest.split('/').next())
+    {
+        agent_names.push(name.to_string());
+    }
+    agent_names.sort();
+    agent_names.dedup();
+    if agent_names.is_empty() {
+        return None;
+    }
+    let task_id = meta
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .filter(|task_id| !task_id.trim().is_empty())
+        .map(|task_id| task_id.to_string())
+        .or_else(|| branch_task_id(branch).map(|task_id| task_id.to_string()));
+    Some(NotifyScratchpadEvent {
+        kind,
+        actor,
+        note,
+        agent_names,
+        task_id,
+    })
+}
+
 /// Remove a sender lock entry when no other tasks still reference it.
 ///
 /// This keeps the lock map bounded to active senders instead of growing forever.
@@ -1281,7 +1408,10 @@ pub async fn run_listen(
                             let full_msg = meta
                                 .get("full_message")
                                 .and_then(|v| v.as_str());
-                            let _ = task_reg.update_state(task_id, state, full_msg);
+                            let actor = meta.get("agent").and_then(|v| v.as_str());
+                            let _ = task_reg.update_state(task_id, state, actor, full_msg);
+                        } else {
+                            mirror_notify_event_to_scratchpad(meta);
                         }
                     }
                     // Queue for parent LLM context at next heartbeat turn.
@@ -2243,7 +2373,11 @@ async fn run_agent_for_sender(
 
 #[cfg(test)]
 mod tests {
-    use super::{channel_config_slug, effective_channel_config_visible_path};
+    use super::{
+        channel_config_slug, effective_channel_config_visible_path,
+        mirror_notify_event_to_registry, notify_scratchpad_event,
+    };
+    use crate::agents::AgentTaskRegistry;
 
     #[test]
     fn channel_config_slug_normalizes_sender_keys() {
@@ -2257,5 +2391,110 @@ mod tests {
             path,
             "/home/agent/.that-agent/state/channel-configs/demo/telegram_123.toml"
         );
+    }
+
+    #[test]
+    fn notify_scratchpad_event_extracts_worker_names() {
+        let meta = serde_json::json!({
+            "event": "push",
+            "agent": "git-server/reviewer",
+            "repo": "workspace",
+            "branch": "task/developer",
+            "commit": "abcdef12",
+        });
+        let event = notify_scratchpad_event(&meta).unwrap();
+        assert_eq!(event.kind, "commit");
+        assert_eq!(event.actor, "git-server/reviewer");
+        assert!(event.note.contains("abcdef12"));
+        assert_eq!(
+            event.agent_names,
+            vec!["developer".to_string(), "reviewer".to_string()]
+        );
+        assert!(event.task_id.is_none());
+    }
+
+    #[test]
+    fn mirror_notify_event_to_registry_updates_matching_task_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "that-agent-channel-mode-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = AgentTaskRegistry::new(dir.join("agent_tasks.json"));
+        let task_a = reg.create("developer", "implement", "parent").unwrap();
+        let task_b = reg.create("reviewer", "review", "parent").unwrap();
+
+        mirror_notify_event_to_registry(
+            &reg,
+            &serde_json::json!({
+                "event": "push",
+                "agent": "git-server/developer",
+                "repo": "workspace",
+                "branch": "task/developer",
+                "commit": "abc12345",
+            }),
+        );
+
+        let task_a = reg.get(&task_a.id).unwrap().unwrap();
+        let task_b = reg.get(&task_b.id).unwrap().unwrap();
+        assert_eq!(task_a.scratchpad.len(), 1);
+        assert_eq!(task_a.scratchpad[0].kind, "commit");
+        assert!(task_a.scratchpad[0].note.contains("abc12345"));
+        assert!(task_b.scratchpad.is_empty());
+    }
+
+    #[test]
+    fn mirror_notify_event_to_registry_skips_ambiguous_same_agent_match() {
+        let dir = std::env::temp_dir().join(format!(
+            "that-agent-channel-mode-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = AgentTaskRegistry::new(dir.join("agent_tasks.json"));
+        let task_a = reg.create("developer", "task a", "parent").unwrap();
+        let task_b = reg.create("developer", "task b", "parent").unwrap();
+
+        mirror_notify_event_to_registry(
+            &reg,
+            &serde_json::json!({
+                "event": "push",
+                "agent": "git-server/developer",
+                "repo": "workspace",
+                "branch": "task/developer",
+                "commit": "abc12345",
+            }),
+        );
+
+        assert!(reg.get(&task_a.id).unwrap().unwrap().scratchpad.is_empty());
+        assert!(reg.get(&task_b.id).unwrap().unwrap().scratchpad.is_empty());
+    }
+
+    #[test]
+    fn mirror_notify_event_to_registry_prefers_explicit_task_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "that-agent-channel-mode-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = AgentTaskRegistry::new(dir.join("agent_tasks.json"));
+        let task_a = reg.create("developer", "task a", "parent").unwrap();
+        let task_b = reg.create("developer", "task b", "parent").unwrap();
+
+        mirror_notify_event_to_registry(
+            &reg,
+            &serde_json::json!({
+                "event": "push",
+                "agent": "git-server/developer",
+                "repo": "workspace",
+                "branch": format!("task/developer/{}", task_b.id),
+                "task_id": task_b.id,
+                "commit": "abc12345",
+            }),
+        );
+
+        assert!(reg.get(&task_a.id).unwrap().unwrap().scratchpad.is_empty());
+        let task_b = reg.get(&task_b.id).unwrap().unwrap();
+        assert_eq!(task_b.scratchpad.len(), 1);
+        assert_eq!(task_b.scratchpad[0].kind, "commit");
     }
 }
