@@ -1,0 +1,72 @@
+pub const ANTHROPIC_OAUTH_ENV_VARS: &[&str] = &[
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_AUTH_TOKEN",
+    "CLAUDE_CODE_AUTH",
+];
+
+pub fn is_anthropic_oauth_token(value: &str) -> bool {
+    value.trim().starts_with("sk-ant-oat")
+}
+
+pub fn anthropic_oauth_token_from_env() -> Option<String> {
+    first_nonempty_env(ANTHROPIC_OAUTH_ENV_VARS)
+}
+
+pub fn anthropic_api_key_from_env() -> Option<String> {
+    anthropic_oauth_token_from_env().or_else(|| first_nonempty_env(&["ANTHROPIC_API_KEY"]))
+}
+
+pub fn anthropic_provider_available() -> bool {
+    anthropic_api_key_from_env().is_some()
+}
+
+fn first_nonempty_env(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| nonempty_env(key))
+}
+
+fn nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_anthropic_oauth_token, ANTHROPIC_OAUTH_ENV_VARS};
+
+    fn resolve_with(values: &[(&str, &str)]) -> Option<String> {
+        ANTHROPIC_OAUTH_ENV_VARS.iter().find_map(|key| {
+            values
+                .iter()
+                .find_map(|(candidate, value)| (*candidate == *key).then_some(value.trim()))
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+    }
+
+    #[test]
+    fn oauth_aliases_resolve_in_priority_order() {
+        let resolved = resolve_with(&[
+            ("CLAUDE_CODE_AUTH", "legacy"),
+            ("CLAUDE_CODE_AUTH_TOKEN", "auth-token"),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token"),
+        ]);
+        assert_eq!(resolved.as_deref(), Some("oauth-token"));
+    }
+
+    #[test]
+    fn oauth_aliases_skip_blank_values() {
+        let resolved = resolve_with(&[
+            ("CLAUDE_CODE_OAUTH_TOKEN", "   "),
+            ("CLAUDE_CODE_AUTH_TOKEN", "auth-token"),
+        ]);
+        assert_eq!(resolved.as_deref(), Some("auth-token"));
+    }
+
+    #[test]
+    fn oauth_token_prefix_matches_claude_code_tokens() {
+        assert!(is_anthropic_oauth_token("sk-ant-oat01-test"));
+        assert!(!is_anthropic_oauth_token("sk-ant-api03-test"));
+    }
+}
