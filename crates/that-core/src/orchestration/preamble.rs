@@ -626,8 +626,10 @@ pub fn build_preamble(
         );
         preamble.push_str(task_delegation_preamble());
         preamble.push_str(
-            "### Limitations\n\
-             - Children cannot spawn their own sub-agents (restricted RBAC)\n\
+            "### Hierarchy depth\n\
+             - Persistent children can delegate bounded tasks to ephemeral workers via `agent_run`\n\
+             - Ephemeral workers cannot spawn further sub-agents\n\
+             - Maximum hierarchy: root → department head → worker (depth limit: 2)\n\
              - Ephemeral agents have resource limits and a turn budget\n\
              - Children share your API keys but have separate memory stores\n\n",
         );
@@ -703,11 +705,25 @@ pub fn build_preamble(
     // ── 11.6. Agent Hierarchy — parent/child context ─────────────────────────
     if let Some(parent) = &agent.parent {
         if is_k8s {
+            let agent_depth: u8 = std::env::var("THAT_AGENT_DEPTH")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(1);
+            let delegation_note = if agent_depth <= 1 {
+                "- You can delegate bounded tasks to ephemeral workers using `agent_run`\n\
+                 - Call multiple `agent_run` in one turn for parallel fan-out\n\
+                 - Store reusable worker instructions as skills — load with `read_skill` and include in the task\n\
+                 - You cannot spawn persistent sub-agents — only the root agent can\n\
+                 - You can query any peer agent in the cluster via `agent_query` — not just your parent\n\
+                 - Use `agent_task(action=share)` to invite agents from other teams into a shared task\n\n"
+            } else {
+                "- You can use `agent_query` to request help from any agent in the cluster when your task needs cross-team input\n\n"
+            };
             preamble.push_str(&format!(
                 "### Agent Hierarchy\n\
                  - **Parent agent**: {parent}\n\
                  - You were spawned to handle a specific task — focus on your assigned scope\n\
-                 - You cannot spawn sub-agents of your own (restricted RBAC)\n\n\
+                 {delegation_note}\
                  ### Your workflow\n\
                  1. If you were attached to a tracked task, read its scratchpad first. Treat the scratchpad header as the shared goal/workspace contract and the activity tail as the coordination log.\n\
                  2. Check if `$GIT_REPO_URL` is set. If yes, clone it: `git clone $GIT_REPO_URL workspace && cd workspace`\n\
@@ -723,11 +739,30 @@ pub fn build_preamble(
                  - For progress updates during long work: POST to `$THAT_PARENT_GATEWAY_URL/v1/notify`\n\
                  - If you are on a tracked task, keep the parent-visible coordination record in the scratchpad activity tail\n\
                  - Do NOT waste turns searching for code that isn't there — if the workspace is missing, fail fast\n\
-                 - Do NOT use `agent_query` — you are an ephemeral worker, not a persistent agent\n\
+                 - You can use `agent_query` to request help from any agent in the cluster when your task needs cross-team input\n\
                  - Do NOT manually construct service URLs — use environment variables\n\
                  - Do NOT try to access the parent's filesystem — use the git workspace for code sharing\n"
             ));
         } else {
+            let agent_depth: u8 = std::env::var("THAT_AGENT_DEPTH")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(1);
+            let delegation_note = if agent_depth <= 1 {
+                "\n### Team delegation\n\
+                 - Delegate bounded tasks to ephemeral workers using `agent_run`\n\
+                 - Workers execute the task and return output directly to you\n\
+                 - Call multiple `agent_run` in one turn for parallel fan-out\n\
+                 - Store reusable worker instructions as skills — load with `read_skill` and include in the task\n\
+                 - Refine templates over time based on worker output quality\n\
+                 - You cannot spawn persistent sub-agents — only the root agent can\n\
+                 - You can query any peer agent in the cluster via `agent_query` — not just your parent\n\
+                 - Use `agent_task(action=share)` to invite agents from other teams into a shared task\n"
+            } else {
+                "\n### Cross-team collaboration\n\
+                 - You can query any agent in the cluster via `agent_query` when your task needs cross-team input\n\
+                 - Prefer coordinating through your parent when possible\n"
+            };
             preamble.push_str(&format!(
                 "### Agent Hierarchy\n\
                  - **Parent agent**: {parent}\n\
@@ -739,7 +774,8 @@ pub fn build_preamble(
                  - Use `POST $THAT_PARENT_GATEWAY_URL/v1/notify` for status updates (zero-cost, \
                  no LLM turn on the parent side, batched into the next heartbeat).\n\
                  - Use `POST $THAT_PARENT_GATEWAY_URL/v1/inbound` with a `callback_url` when \
-                 you need the parent to reason and reply asynchronously.\n"
+                 you need the parent to reason and reply asynchronously.\n\
+                 {delegation_note}"
             ));
         }
         if let Some(role) = &agent.role {

@@ -166,20 +166,26 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn current_agent_has_parent() -> bool {
-    std::env::var("THAT_AGENT_PARENT")
+fn current_agent_depth() -> u8 {
+    std::env::var("THAT_AGENT_DEPTH")
         .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 fn child_orchestration_guard(name: &str) -> Option<ToolError> {
-    if current_agent_has_parent() && matches!(name, "spawn_agent" | "agent_run") {
-        return Some(ToolError(format!(
-            "tool '{name}' is unavailable to child agents; coordinate through agent_task scratchpads instead"
-        )));
+    let depth = current_agent_depth();
+    match name {
+        "spawn_agent" if depth > 0 => Some(ToolError(
+            "Only root agents can spawn persistent sub-agents. Use agent_run for ephemeral tasks."
+                .into(),
+        )),
+        "agent_run" if depth > 1 => Some(ToolError(
+            "Ephemeral agents cannot spawn further sub-agents. Return results to your parent."
+                .into(),
+        )),
+        _ => None,
     }
-    None
 }
 
 fn resolved_workspace_hint(agent_name: &str) -> String {
@@ -1330,11 +1336,12 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             name: "agent_admin".into(),
             description: "Inspect or manage child agents. \
                 Use action=list to inspect all agents, action=status or logs for one agent, \
+                action=cluster_status for resource and capacity overview, \
                 or action=stop or unregister to clean up child agents.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["list", "status", "logs", "stop", "unregister"], "description": "Agent admin action to perform" },
+                    "action": { "type": "string", "enum": ["list", "status", "logs", "stop", "unregister", "cluster_status"], "description": "Agent admin action to perform" },
                     "name": { "type": "string", "description": "Agent name for status/logs/stop/unregister" },
                     "tail": { "type": "integer", "description": "Number of log lines from the end for action=logs (default: 50)" }
                 },
@@ -1363,8 +1370,12 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
     ];
 
-    if current_agent_has_parent() {
-        tools.retain(|tool| !matches!(tool.name.as_str(), "spawn_agent" | "agent_run"));
+    let depth = current_agent_depth();
+    if depth > 0 {
+        tools.retain(|tool| tool.name.as_str() != "spawn_agent");
+    }
+    if depth > 1 {
+        tools.retain(|tool| tool.name.as_str() != "agent_run");
     }
 
     tools
@@ -1573,6 +1584,7 @@ fn remap_grouped_tool_call(
                 ),
                 "stop" => ("agent_stop", serde_json::json!({ "name": args.name })),
                 "unregister" => ("agent_unregister", serde_json::json!({ "name": args.name })),
+                "cluster_status" => ("cluster_status", serde_json::json!({})),
                 other => return Err(ToolError(format!("unknown agent_admin action: {other}"))),
             };
             Ok(Some((legacy_name.into(), legacy_args.to_string())))
@@ -2642,8 +2654,16 @@ async fn dispatch_inner(
                 let binary = std::env::current_exe()
                     .map_err(|e| ToolError(format!("cannot find binary: {e}")))?;
                 let timeout = args.timeout_secs.unwrap_or(1800);
+                let effective_name = if current_agent_depth() > 0 && !args.name.contains('/') {
+                    format!("{parent}/{}", args.name)
+                } else {
+                    args.name.clone()
+                };
                 let mut cmd = tokio::process::Command::new(&binary);
-                cmd.arg("--agent").arg(&args.name).arg("run").arg("query");
+                cmd.arg("--agent")
+                    .arg(&effective_name)
+                    .arg("run")
+                    .arg("query");
                 if let Some(ref role) = args.role {
                     cmd.arg("--role").arg(role);
                 }
@@ -2656,6 +2676,8 @@ async fn dispatch_inner(
                 if let Ok(tok) = std::env::var("THAT_GATEWAY_TOKEN") {
                     cmd.env("THAT_PARENT_GATEWAY_TOKEN", tok);
                 }
+                cmd.env("THAT_AGENT_PARENT", &parent);
+                cmd.env("THAT_AGENT_DEPTH", (current_agent_depth() + 1).to_string());
                 let start = std::time::Instant::now();
                 let output = tokio::time::timeout(Duration::from_secs(timeout), cmd.output())
                     .await
@@ -2668,12 +2690,45 @@ async fn dispatch_inner(
                     "failed"
                 };
                 Ok(serde_json::json!({
-                    "name": args.name,
+                    "name": effective_name,
                     "status": status,
                     "output": stdout,
                     "elapsed_secs": start.elapsed().as_secs(),
                 }))
             }
+        }
+        "cluster_status" => {
+            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                .ok_or_else(|| ToolError("Cannot derive cluster dir".into()))?;
+            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+            let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
+            let my_name =
+                resolve_agent_name(config, skill_roots, None).unwrap_or_else(|| "root".to_string());
+            let (mut my_children, mut alive_total) = (0u32, 0u32);
+            for e in &entries {
+                let alive = crate::agents::AgentRegistry::is_alive(e.pid);
+                if alive {
+                    alive_total += 1;
+                }
+                if alive && e.parent.as_deref() == Some(my_name.as_str()) {
+                    my_children += 1;
+                }
+            }
+            let task_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .ok_or_else(|| ToolError("Cannot derive task registry".into()))?;
+            let active_tasks = task_reg.list_active().map(|t| t.len() as u32).unwrap_or(0);
+            let cpus = std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(0);
+            Ok(serde_json::json!({
+                "agent": my_name,
+                "my_children_alive": my_children,
+                "cluster_agents_alive": alive_total,
+                "cluster_agents_total": entries.len(),
+                "active_tasks": active_tasks,
+                "cpu_cores": cpus,
+            }))
         }
         "agent_list" => {
             if crate::agents::is_k8s_mode() {
