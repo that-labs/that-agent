@@ -14,6 +14,9 @@ use crate::config::AdapterConfig;
 /// Maximum number of completed tools to show in the status message.
 const TOOL_STATUS_MAX_HISTORY: usize = 8;
 
+/// Minimum seconds between edits of the live cluster-status message.
+const NOTIFY_EDIT_THROTTLE_SECS: u64 = 5;
+
 /// Minimum milliseconds between `sendMessageDraft` calls per stream (throttle).
 const DRAFT_THROTTLE_MS: u128 = 300;
 
@@ -54,6 +57,48 @@ impl ToolStatusTracker {
     }
 }
 
+/// Live cluster-status message: one editable Telegram message per chat that
+/// shows the latest status line for every agent that has sent a notification.
+/// Edited in-place (throttled) instead of sending a new message each time.
+struct NotifyStatusTracker {
+    message_id: i64,
+    /// Latest status text per agent/sender name, insertion-ordered via Vec.
+    agents: Vec<(String, String)>,
+    last_edit: Option<std::time::Instant>,
+}
+
+impl NotifyStatusTracker {
+    fn new() -> Self {
+        Self {
+            message_id: 0,
+            agents: Vec::new(),
+            last_edit: None,
+        }
+    }
+
+    fn upsert(&mut self, key: String, value: String) {
+        if let Some(entry) = self.agents.iter_mut().find(|(k, _)| k == &key) {
+            entry.1 = value;
+        } else {
+            self.agents.push((key, value));
+        }
+    }
+
+    fn ready_to_edit(&self) -> bool {
+        self.last_edit
+            .map(|t| t.elapsed().as_secs() >= NOTIFY_EDIT_THROTTLE_SECS)
+            .unwrap_or(true)
+    }
+
+    fn render(&self) -> String {
+        let mut out = String::from("🤖 Cluster status:");
+        for (name, status) in &self.agents {
+            out.push_str(&format!("\n• {name}: {status}"));
+        }
+        out
+    }
+}
+
 /// Internal mutable state shared between the inbound listener and `ask_human`.
 struct TelegramState {
     /// Per-run/per-target stream buffers; keyed by `stream_key(...)`.
@@ -74,6 +119,9 @@ struct TelegramState {
     /// Per-chat tool status tracker. One editable message per chat shows
     /// the current and recent tool calls in a compact stacked format.
     tool_status: HashMap<String, ToolStatusTracker>,
+    /// Per-chat live cluster-status tracker. All agent notifications are
+    /// consolidated into one editable message instead of flooding the chat.
+    notify_status: HashMap<String, NotifyStatusTracker>,
 }
 
 /// Telegram Bot API channel adapter.
@@ -126,6 +174,7 @@ impl TelegramAdapter {
                 allowed_chats,
                 allowed_senders,
                 tool_status: HashMap::new(),
+                notify_status: HashMap::new(),
             }),
         }
     }
@@ -772,7 +821,33 @@ impl Channel for TelegramAdapter {
                 } else {
                     buffered.filter(|b| !b.is_empty()).unwrap_or_default()
                 };
-                if !message.is_empty() {
+                if message.is_empty() {
+                    // Nothing to send.
+                } else if target.map(|t| t.status_update).unwrap_or(false) {
+                    // Heartbeat response — merge into the live cluster status message
+                    // as the top "parent" summary line instead of a new message.
+                    let (rendered, existing_id) = {
+                        let mut state = self.state.lock().await;
+                        let tracker = state
+                            .notify_status
+                            .entry(chat_id.clone())
+                            .or_insert_with(NotifyStatusTracker::new);
+                        tracker.upsert("parent".to_string(), message.clone());
+                        tracker.last_edit = Some(std::time::Instant::now());
+                        (tracker.render(), tracker.message_id)
+                    };
+                    if existing_id == 0 {
+                        if let Ok(Some(mid)) = self.send_plain_get_id(&chat_id, &rendered).await {
+                            let mut state = self.state.lock().await;
+                            if let Some(t) = state.notify_status.get_mut(&chat_id) {
+                                t.message_id = mid;
+                            }
+                        }
+                    } else if let Err(e) = self.edit_message_text(&chat_id, existing_id, &rendered).await {
+                        debug!(channel = %self.id, "Heartbeat status edit failed: {e:#}");
+                        self.state.lock().await.notify_status.remove(&chat_id);
+                    }
+                } else {
                     self.send_text(&chat_id, &message).await?;
                 }
                 MessageHandle::default()
@@ -812,7 +887,47 @@ impl Channel for TelegramAdapter {
                 MessageHandle::default()
             }
             ChannelEvent::Notify(msg) => {
-                self.send_plain(&chat_id, msg).await?;
+                // Extract "[agent-name] rest" prefix if present.
+                let (agent_key, status_text) = if msg.starts_with('[') {
+                    if let Some(close) = msg.find(']') {
+                        let key = msg[1..close].to_string();
+                        let text = msg[close + 1..].trim().to_string();
+                        (key, text)
+                    } else {
+                        ("system".to_string(), msg.clone())
+                    }
+                } else {
+                    ("system".to_string(), msg.clone())
+                };
+
+                let (rendered, existing_id, ready) = {
+                    let mut state = self.state.lock().await;
+                    let tracker = state
+                        .notify_status
+                        .entry(chat_id.clone())
+                        .or_insert_with(NotifyStatusTracker::new);
+                    tracker.upsert(agent_key, status_text);
+                    let ready = tracker.ready_to_edit();
+                    if ready {
+                        tracker.last_edit = Some(std::time::Instant::now());
+                    }
+                    (tracker.render(), tracker.message_id, ready)
+                };
+
+                if !ready {
+                    // Throttled — state updated, no API call.
+                } else if existing_id == 0 {
+                    if let Ok(Some(mid)) = self.send_plain_get_id(&chat_id, &rendered).await {
+                        let mut state = self.state.lock().await;
+                        if let Some(t) = state.notify_status.get_mut(&chat_id) {
+                            t.message_id = mid;
+                        }
+                    }
+                } else if let Err(e) = self.edit_message_text(&chat_id, existing_id, &rendered).await {
+                    debug!(channel = %self.id, "Notify status edit failed: {e:#}");
+                    // Message was deleted or too old — reset so next notify starts fresh.
+                    self.state.lock().await.notify_status.remove(&chat_id);
+                }
                 MessageHandle::default()
             }
             ChannelEvent::Attachment {

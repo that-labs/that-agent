@@ -217,6 +217,10 @@ pub struct OutboundTarget {
     /// Correlation identifier for request/response pairing (e.g. HTTP request ID).
     /// Distinct from `thread_id` which represents actual platform threads.
     pub request_id: Option<String>,
+    /// When true the response is a background status update (e.g. heartbeat).
+    /// Adapters should merge it into a live status display rather than sending
+    /// a new standalone message.
+    pub status_update: bool,
 }
 
 /// Abstraction over a communication channel (TUI, Telegram, Discord, WhatsApp, …).

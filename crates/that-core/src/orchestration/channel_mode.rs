@@ -1310,6 +1310,40 @@ pub async fn run_listen(
                             ));
                         }
                     }
+                    // Inject active task summary so the agent has operative context.
+                    let cluster_dir_tasks = dirs::home_dir()
+                        .unwrap_or_default()
+                        .join(".that-agent")
+                        .join("cluster");
+                    let task_reg = crate::agents::AgentTaskRegistry::new(
+                        cluster_dir_tasks.join("agent_tasks.json"),
+                    );
+                    if let Ok(active) = task_reg.list_active() {
+                        if !active.is_empty() {
+                            task.push_str(&format!(
+                                "\n\n## Active tasks ({}):\n",
+                                active.len()
+                            ));
+                            for t in active.iter().take(10) {
+                                let short_id: String = t.id.chars().take(8).collect();
+                                task.push_str(&format!(
+                                    "• {} [{}] ({})",
+                                    t.agent, short_id, t.state
+                                ));
+                                if let Some(last_msg) = t.messages.last() {
+                                    let preview: String =
+                                        last_msg.text.chars().take(80).collect();
+                                    task.push_str(&format!(" — {preview}"));
+                                }
+                                task.push('\n');
+                                for h in &t.scratchpad_header {
+                                    let note: String = h.note.chars().take(120).collect();
+                                    task.push_str(&format!("  [{}] {note}\n", h.kind));
+                                }
+                            }
+                        }
+                    }
+
                     if due_refs.is_empty() && !unscoped_plugin_tasks.is_empty() {
                         task.push_str(plugin_only_notify_guidance);
                     }
@@ -1534,6 +1568,7 @@ pub async fn run_listen(
                         session_id: None,
                         reply_to_message_id: msg.message_id.clone(),
                         request_id: msg.session_hint.clone(),
+                        status_update: false,
                     };
                     let stopped = stop_run_scope_and_cleanup(
                         &active_sender_runs,
@@ -1600,6 +1635,7 @@ pub async fn run_listen(
                         session_id: None,
                         reply_to_message_id: msg.message_id.clone(),
                         request_id: msg.session_hint.clone(),
+                        status_update: false,
                     };
 
                     // Snapshot the current hot state for this message.
@@ -2104,6 +2140,7 @@ async fn run_agent_for_sender(
         session_id: None,
         reply_to_message_id: message_id.clone(),
         request_id: session_hint.clone(),
+        status_update: is_internal_source,
     };
 
     // Immediately acknowledge the message so the user knows the agent is working.
