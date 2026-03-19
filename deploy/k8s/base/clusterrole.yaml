@@ -3,19 +3,7 @@ kind: ClusterRole
 metadata:
   name: that-agent-cluster
 rules:
-  # Create and manage namespaces for sub-agents
-  - apiGroups: [""]
-    resources:
-      - namespaces
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Bootstrap RBAC in sub-agent namespaces: create Role + RoleBinding
-  # so the parent ServiceAccount gains namespace-scoped access
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources:
-      - roles
-      - rolebindings
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Read sub-agent pods/logs across namespaces for orchestration
+  # Read-only cross-namespace monitoring
   - apiGroups: [""]
     resources:
       - pods
@@ -23,9 +11,7 @@ rules:
       - services
       - events
     verbs: ["get", "list", "watch"]
-  # Watch sub-agent deployments across namespaces
   - apiGroups: ["apps"]
     resources:
       - deployments
-      - statefulsets
     verbs: ["get", "list", "watch"]

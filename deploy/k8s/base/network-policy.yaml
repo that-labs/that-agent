@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: that-agent-inter-agent
+spec:
+  podSelector:
+    matchLabels:
+      that-agent/managed: "true"
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              that-agent/managed: "true"
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              that-agent/managed: "true"
+    # Allow DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow external egress (API calls, package downloads, etc.)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32

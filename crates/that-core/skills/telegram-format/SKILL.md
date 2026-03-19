@@ -46,8 +46,12 @@ Failure to escape these will cause a Telegram API parse error and the message wi
 - When using `channel_notify`, format the notification in plain text unless you are certain
   the content will render cleanly.
 
-## Notifications via channel_notify
+## Notifications via channel_notify — PLAIN TEXT ONLY
 
-When sending proactive updates, keep them short and plain-text friendly. Emoji are fine and
-render well in Telegram. Avoid complex formatting in notifications — save rich formatting
-for the main conversational reply.
+**IMPORTANT: `channel_notify` sends as plain text — do NOT escape any characters.**
+No backslashes before `.` `(` `)` `-` or any other character. Write naturally.
+The escaping rules above apply ONLY to the main conversational reply (which uses MarkdownV2),
+never to `channel_notify`.
+
+When sending proactive updates, keep them short. Emoji are fine.
+Save rich formatting for the main conversational reply.

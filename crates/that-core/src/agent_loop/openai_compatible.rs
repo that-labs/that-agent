@@ -24,7 +24,7 @@ pub(super) async fn stream_turn(
         provider.base_url.trim_end_matches('/')
     );
     let body = build_request(system, messages, tools, model, max_tokens);
-    let response = reqwest::Client::new()
+    let response = super::llm_http_client()
         .post(&url)
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")

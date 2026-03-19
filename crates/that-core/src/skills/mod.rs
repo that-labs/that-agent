@@ -468,7 +468,8 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
     // Catalog skills with progressive-disclosure instructions.
     if !catalog_skills.is_empty() {
         out.push_str(
-            "**Before starting a task, scan this list and `read_skill(name)` any skill \
+            "Use `list_skills()` to discover all available skills at any time. \
+             **Before starting a task, scan this list and `read_skill(name)` any skill \
              whose description matches what you are about to do.** \
              If an installed skill appears relevant to the problem domain, framework, or implementation \
              style the user is asking for, read it before choosing libraries, architecture, or workflows. \

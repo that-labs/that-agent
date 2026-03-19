@@ -15,6 +15,15 @@ use tokio::sync::mpsc;
 use super::anthropic::TurnEvent;
 use super::types::{Message, ToolCall, ToolDef, Usage};
 
+const OPENROUTER_DISABLED_TOOLS: &[&str] = &[
+    "list_skills",
+    "provider_admin",
+    "agent_run",
+    "agent_task",
+    "agent_admin",
+    "workspace_admin",
+];
+
 /// Execute one streaming turn against the OpenRouter Chat Completions API.
 ///
 /// Sends `TurnEvent`s to `tx` until the stream is exhausted.
@@ -32,17 +41,51 @@ pub(super) async fn stream_turn(
 ) -> Result<Usage> {
     use futures::StreamExt;
 
-    let body = build_request(system, messages, tools, model, max_tokens, prompt_caching);
+    let routed_tools = filter_openrouter_tools(tools);
+    if routed_tools.len() != tools.len() {
+        tracing::warn!(
+            provider = "openrouter",
+            model = model,
+            original_tools = tools.len(),
+            routed_tools = routed_tools.len(),
+            "OpenRouter request filtered tool surface back to v0.2.2-compatible set"
+        );
+    }
 
-    let client = reqwest::Client::new();
-    let response = client
-        .post("https://openrouter.ai/api/v1/chat/completions")
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .header("X-Title", "that-agent")
-        .body(body)
-        .send()
-        .await?;
+    let client = super::llm_http_client();
+    let mut used_prompt_caching = prompt_caching;
+    let mut body = build_request(
+        system,
+        messages,
+        &routed_tools,
+        model,
+        max_tokens,
+        used_prompt_caching,
+    );
+    let mut response = send_request(client, api_key, &body).await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_body = response.text().await.unwrap_or_default();
+        if used_prompt_caching && should_retry_without_cache(status, &error_body) {
+            tracing::warn!(
+                provider = "openrouter",
+                model = model,
+                "OpenRouter could not route prompt-cached request; retrying without cache_control markers"
+            );
+            used_prompt_caching = false;
+            body = build_request(system, messages, &routed_tools, model, max_tokens, false);
+            response = send_request(client, api_key, &body).await?;
+        } else {
+            return Err(anyhow::anyhow!(format_http_error(
+                status,
+                &error_body,
+                model,
+                !routed_tools.is_empty(),
+                used_prompt_caching,
+            )));
+        }
+    }
 
     let status = response.status();
     if !status.is_success() {
@@ -51,7 +94,8 @@ pub(super) async fn stream_turn(
             status,
             &body,
             model,
-            !tools.is_empty()
+            !routed_tools.is_empty(),
+            used_prompt_caching,
         )));
     }
 
@@ -232,6 +276,34 @@ pub(super) async fn stream_turn(
     Ok(usage)
 }
 
+fn filter_openrouter_tools(tools: &[ToolDef]) -> Vec<ToolDef> {
+    tools
+        .iter()
+        .filter(|tool| !OPENROUTER_DISABLED_TOOLS.contains(&tool.name.as_str()))
+        .cloned()
+        .collect()
+}
+
+async fn send_request(
+    client: &reqwest::Client,
+    api_key: &str,
+    body: &str,
+) -> Result<reqwest::Response> {
+    Ok(client
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .header("X-Title", "that-agent")
+        .body(body.to_string())
+        .send()
+        .await?)
+}
+
+fn should_retry_without_cache(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND
+        && body.contains("No endpoints found that can handle the requested parameters")
+}
+
 async fn flush_pending_turn(
     tx: &mpsc::Sender<TurnEvent>,
     full_text: &str,
@@ -274,18 +346,14 @@ fn build_request(
         "stream": true,
         "stream_options": { "include_usage": true },
         "messages": chat_messages,
-        // Force OpenRouter to only route to providers that support all
-        // parameters we send (especially `tools`). Without this, cheaper
-        // providers that don't support tool calling may be selected.
-        "provider": {
-            "require_parameters": true,
-        },
     });
 
     if !tools.is_empty() {
+        // Only enforce require_parameters when we actually send tools,
+        // so OpenRouter only routes to providers that support tool calling.
+        body["provider"] = serde_json::json!({ "require_parameters": true });
         let mut tools_json: Vec<serde_json::Value> =
             tools.iter().map(tool_to_chat_completions).collect();
-        body["parallel_tool_calls"] = serde_json::json!(false);
         // Add cache_control to the last tool to cache the whole tool block.
         if prompt_caching {
             if let Some(last) = tools_json.last_mut() {
@@ -460,6 +528,7 @@ fn format_http_error(
     body: &str,
     model: &str,
     has_tools: bool,
+    used_prompt_caching: bool,
 ) -> String {
     let mut message = format!("OpenRouter API error {status}: {body}");
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
@@ -498,14 +567,34 @@ fn format_http_error(
         );
     }
 
+    if should_retry_without_cache(status, body) {
+        let mut hint = format!(
+            "OpenRouter API error {status}: no routed provider can satisfy model '{model}' with the current request parameters."
+        );
+        if has_tools {
+            hint.push_str(
+                " This run sends tool schemas, so the routed provider must support tool calling.",
+            );
+        }
+        if used_prompt_caching {
+            hint.push_str(" Prompt-caching markers were enabled for this request.");
+        }
+        hint.push_str(
+            " Try a different model, or retry without prompt caching / with fewer routed features.",
+        );
+        return hint;
+    }
+
     message
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_http_error, messages_to_chat_completions};
-    use crate::agent_loop::Message;
-    use crate::agent_loop::ToolCall;
+    use super::{
+        filter_openrouter_tools, format_http_error, messages_to_chat_completions,
+        should_retry_without_cache,
+    };
+    use crate::agent_loop::{Message, ToolCall, ToolDef};
 
     #[test]
     fn provider_error_adds_model_switch_hint() {
@@ -514,10 +603,33 @@ mod tests {
             r#"{"error":{"message":"Provider returned error","metadata":{"raw":"ERROR","provider_name":"Stealth"}}}"#,
             "openai/gpt-5.2-codex",
             true,
+            true,
         );
 
         assert!(err.contains("provider 'Stealth' failed"));
         assert!(err.contains("use /models to switch"));
+    }
+
+    #[test]
+    fn no_endpoints_error_adds_routing_hint() {
+        let err = format_http_error(
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":{"message":"No endpoints found that can handle the requested parameters.","code":404}}"#,
+            "mistralai/mistral-small-2603",
+            true,
+            false,
+        );
+
+        assert!(err.contains("no routed provider can satisfy"));
+        assert!(err.contains("tool calling"));
+    }
+
+    #[test]
+    fn no_endpoints_error_is_cache_retryable() {
+        assert!(should_retry_without_cache(
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":{"message":"No endpoints found that can handle the requested parameters.","code":404}}"#,
+        ));
     }
 
     #[test]
@@ -535,5 +647,25 @@ mod tests {
         assert_eq!(wire[1]["role"], "assistant");
         assert_eq!(wire[1]["content"], "");
         assert!(wire[1]["tool_calls"].is_array());
+    }
+
+    #[test]
+    fn openrouter_filters_post_v022_tools() {
+        let tools = vec![
+            ToolDef {
+                name: "shell_exec".into(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDef {
+                name: "agent_run".into(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            },
+        ];
+
+        let filtered = filter_openrouter_tools(&tools);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "shell_exec");
     }
 }

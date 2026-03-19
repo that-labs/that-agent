@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/that-tools", "crates/that-channels", "crates/that-core", "crates/that-cli", "crates/that-eval", "crates/that-plugins", "crates/that-sandbox"]
+members = ["crates/that-tools", "crates/that-channels", "crates/that-core", "crates/that-cli", "crates/that-eval", "crates/that-plugins", "crates/that-sandbox", "crates/that-git-server"]
 
 [workspace.package]
 version = "0.2.0"

@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: that-agent-git-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: that-agent
+      app.kubernetes.io/component: git-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: that-agent
+        app.kubernetes.io/component: git-server
+    spec:
+      containers:
+        - name: git-server
+          image: ghcr.io/that-labs/that-agent:latest
+          imagePullPolicy: Always
+          command: ["that-git-server"]
+          env:
+            - name: THAT_GIT_REPO_ROOT
+              value: "/repos"
+            - name: THAT_GIT_BIND_ADDR
+              value: "0.0.0.0:9418"
+            - name: THAT_GIT_EXPIRY_HOURS
+              value: "24"
+            - name: THAT_GIT_WEBHOOK_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: that-agent-config
+                  key: THAT_GIT_WEBHOOK_URL
+                  optional: true
+            - name: THAT_GIT_AUTO_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: that-agent-config
+                  key: THAT_GIT_AUTO_MERGE
+                  optional: true
+          ports:
+            - containerPort: 9418
+              name: git-http
+          volumeMounts:
+            - name: git-repos
+              mountPath: /repos
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /api/repos
+              port: 9418
+            initialDelaySeconds: 3
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/repos
+              port: 9418
+            initialDelaySeconds: 1
+            periodSeconds: 5
+      volumes:
+        - name: git-repos
+          emptyDir:
+            sizeLimit: 4Gi

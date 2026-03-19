@@ -91,6 +91,7 @@ pub fn handle_session_command(ws: &WorkspaceConfig, command: SessionCommands) ->
                         interrupted_run_id,
                         last_task,
                         last_tool,
+                        ..
                     } => {
                         let run = interrupted_run_id.as_deref().unwrap_or("unknown");
                         println!("\n[{ts}] ── RESTART (interrupted run: {run}) ──");

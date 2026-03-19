@@ -31,12 +31,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && export CARGO_PROFILE_RELEASE_DEBUG="${THAT_CARGO_RELEASE_DEBUG}" \
     && export RUSTFLAGS="-C linker=clang -C link-arg=-fuse-ld=${THAT_RUST_LINKER}" \
     && if [ "${THAT_CARGO_BUILD_JOBS}" -gt 0 ] 2>/dev/null; then \
-      cargo build --release --bin that --jobs "${THAT_CARGO_BUILD_JOBS}"; \
+      cargo build --release --bin that --bin that-git-server --jobs "${THAT_CARGO_BUILD_JOBS}"; \
     else \
-      cargo build --release --bin that; \
+      cargo build --release --bin that --bin that-git-server; \
     fi \
     && cp /build/.cargo-target/release/that /build/that \
-    && strip /build/that
+    && cp /build/.cargo-target/release/that-git-server /build/that-git-server \
+    && strip /build/that /build/that-git-server
 
 FROM moby/buildkit:v0.25.1-rootless AS buildkit-bin
 
@@ -51,7 +52,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y --no-install-recommends \
       coreutils bash git curl wget procps \
       jq ripgrep fd-find tree \
-      vim-tiny \
+      vim \
       kubernetes-client \
       ca-certificates \
       tini \
@@ -62,8 +63,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # fd-find installs as 'fdfind' on Debian — symlink for convenience
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
-# that binary — from builder stage (local) or pre-built via --build-context (CI)
+# that binaries — from builder stage (local) or pre-built via --build-context (CI)
 COPY --from=builder /build/that /usr/local/bin/that
+COPY --from=builder /build/that-git-server /usr/local/bin/that-git-server
 COPY --from=buildkit-bin /usr/bin/buildctl /usr/local/bin/buildctl
 RUN ln -sf /usr/local/bin/buildctl /usr/bin/buildctl
 
@@ -86,6 +88,11 @@ ENV GOPATH=/home/agent/go \
     PATH="/home/agent/go/bin:/home/agent/.cargo/bin:${PATH}" \
     SHELL=/bin/bash \
     PIP_BREAK_SYSTEM_PACKAGES=1
+
+# Rust toolchain — installed as agent user so cargo is in ~/.cargo/bin
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal \
+    && /home/agent/.cargo/bin/rustup component add clippy rustfmt
 
 WORKDIR /workspace
 

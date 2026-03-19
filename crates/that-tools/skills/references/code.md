@@ -1,6 +1,6 @@
 # Code Tools
 
-Full flag reference for `anvil code` — grep, read, tree, symbols, edit, ast-grep, index, summary.
+Full flag reference for `that code` — grep, read, tree, symbols, edit, ast-grep, index, summary.
 
 ## Quick start
 

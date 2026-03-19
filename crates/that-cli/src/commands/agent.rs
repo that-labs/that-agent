@@ -107,7 +107,13 @@ pub async fn handle_agent_orchestration_command(cli: &cli::Cli) -> anyhow::Resul
                         api_key.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty())
                     {
                         let env_key = match defaults.provider.as_str() {
-                            "anthropic" => "ANTHROPIC_API_KEY",
+                            "anthropic" => {
+                                if that_core::auth::is_anthropic_oauth_token(value) {
+                                    "CLAUDE_CODE_OAUTH_TOKEN"
+                                } else {
+                                    "ANTHROPIC_API_KEY"
+                                }
+                            }
                             "openai" => "OPENAI_API_KEY",
                             "openrouter" => "OPENROUTER_API_KEY",
                             other => anyhow::bail!(
@@ -237,6 +243,7 @@ pub async fn handle_agent_orchestration_command(cli: &cli::Cli) -> anyhow::Resul
         cli::Commands::Run { command } => match command {
             cli::RunCommands::Query {
                 task,
+                task_file,
                 session,
                 remote,
                 token,
@@ -245,6 +252,16 @@ pub async fn handle_agent_orchestration_command(cli: &cli::Cli) -> anyhow::Resul
                 role,
                 inherit_workspace,
             } => {
+                // Resolve task: --task-file takes priority over positional arg
+                let resolved_task = if let Some(path) = task_file {
+                    std::fs::read_to_string(path)
+                        .map_err(|e| anyhow::anyhow!("failed to read task file: {e}"))?
+                } else if let Some(t) = task {
+                    t.clone()
+                } else {
+                    anyhow::bail!("either a task argument or --task-file is required");
+                };
+
                 // Apply hierarchy flags from CLI args
                 if let Some(p) = parent {
                     agent.parent = Some(p.clone());
@@ -259,7 +276,7 @@ pub async fn handle_agent_orchestration_command(cli: &cli::Cli) -> anyhow::Resul
                 if let Some(url) = remote {
                     that_core::orchestration::run_remote_query(
                         url,
-                        task.clone(),
+                        resolved_task.clone(),
                         session.as_deref(),
                         token.as_deref(),
                         timeout.unwrap_or(300),
@@ -269,7 +286,7 @@ pub async fn handle_agent_orchestration_command(cli: &cli::Cli) -> anyhow::Resul
                     that_core::orchestration::run_task(
                         &ws,
                         &agent,
-                        task,
+                        &resolved_task,
                         session.as_deref(),
                         use_sandbox,
                         cli.debug,

@@ -195,7 +195,7 @@ async fn stream_turn_http(
 ) -> Result<Usage> {
     let body = build_http_request(system, messages, tools, model, max_tokens);
 
-    let client = reqwest::Client::new();
+    let client = super::llm_http_client();
     let response = client
         .post("https://api.openai.com/v1/responses")
         .header("Authorization", format!("Bearer {api_key}"))

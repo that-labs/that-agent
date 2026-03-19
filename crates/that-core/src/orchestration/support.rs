@@ -36,13 +36,17 @@ pub fn resolve_gateway_url() -> String {
 }
 
 /// Load all workspace files for the current mode (sandbox or local).
+///
+/// Also updates the global Status.md cache so the system reminder stays in sync.
 pub fn load_workspace_files(agent: &AgentDef, sandbox: bool) -> workspace::WorkspaceFiles {
-    if sandbox {
+    let ws = if sandbox {
         let container = SandboxClient::container_name(agent);
         workspace::load_all_sandbox(&container, &agent.name)
     } else {
         workspace::load_all_local(&agent.name)
-    }
+    };
+    super::config::set_agent_status(ws.status.clone());
+    ws
 }
 
 /// Extract the agent's compaction instructions from `Agents.md`.

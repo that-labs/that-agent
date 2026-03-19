@@ -9,31 +9,34 @@ when to use it, how to set it up, and what to watch out for.
 
 **Structure**:
 1. Parent analyzes the task and identifies independent work units
-2. Spawn N child agents, each assigned one work unit with a clear role
-3. Children work in parallel on isolated branches or workspaces
-4. Parent collects results from all children
-5. Parent synthesizes the combined output
+2. Create one tracked task per work unit with `agent_task(action=send, ...)`
+3. If units must coordinate, attach peers with `agent_task(action=share, ...)` so they see the same scratchpad
+4. Workers run concurrently on isolated branches or workspaces
+5. Parent supervises through scratchpad reads, task status, and workspace activity
+6. Parent synthesizes the combined output
 
 **Best practices**:
-- Keep subtasks genuinely independent — shared state creates coordination overhead
-- Set consistent turn budgets across children to avoid stragglers
-- Use worktrees for code tasks, isolated workspaces for non-code tasks
-- Have a timeout strategy for children that take too long
+- Keep subtasks genuinely independent unless they explicitly need a shared scratchpad
+- Put stable goal/workspace/participant policy in the scratchpad header, and live coordination in the activity tail
+- For coding tasks, use `workspace_share` + `workspace=true` so each worker gets its own branch
+- Monitor with `workspace_activity()` to see who's pushed and how far along
+- Merge results sequentially with `workspace_collect` — simplest changes first
 
 ## Pipeline (Sequential Delegation)
 
 **When**: Work flows through stages where each stage depends on the previous one.
 
 **Structure**:
-1. Parent spawns Agent A with the first stage task
-2. When A completes, parent reviews output and spawns Agent B with stage two
-3. Continue until all stages are complete
-4. Parent synthesizes the final result
+1. Parent creates a tracked task for stage one
+2. Parent reviews the scratchpad and output from stage one
+3. Parent either steers the same task into the next stage or starts a new tracked task for stage two
+4. Continue until all stages are complete
+5. Parent synthesizes the final result
 
 **Best practices**:
 - Each stage should produce clear, well-defined artifacts
-- The parent reviews between stages to catch issues early
-- Use inherited workspaces so each stage can build on the previous one
+- Review between stages with the scratchpad plus `workspace_diff` to catch issues early
+- Re-share the workspace between stages so each agent builds on the last
 - Keep pipeline stages focused — if a stage is too large, decompose it
 
 ## Explorer / Developer Split
@@ -41,16 +44,15 @@ when to use it, how to set it up, and what to watch out for.
 **When**: A task requires both research and implementation.
 
 **Structure**:
-1. Parent spawns an explorer agent to research the problem space
-2. Explorer investigates, reads code, searches the web, and reports findings
-3. Parent reviews the research and formulates an implementation plan
-4. Parent spawns a developer agent with the plan and research context
-5. Developer implements the solution
-6. Parent reviews and merges the result
+1. `agent_task(action=send, name=explorer, ...)` — explores the problem space
+2. Parent reviews the explorer's scratchpad header/activity and formulates a plan
+3. `workspace_share(path)` then `agent_task(action=send, name=developer, ...)` or `agent_run(..., workspace=true)` depending on whether mid-flight supervision is needed
+4. Developer implements the solution on its task branch
+5. Parent reviews with the scratchpad, `workspace_diff`, and `workspace_collect`
 
 **Best practices**:
 - Give the explorer a clear research question, not a vague directive
-- Summarize the explorer's findings before passing to the developer
+- Promote the stable findings into the developer task header before implementation starts
 - The developer should receive a concrete plan, not raw research output
 - Consider adding a reviewer step after the developer completes
 
@@ -59,31 +61,34 @@ when to use it, how to set it up, and what to watch out for.
 **When**: Code changes need independent verification before merging.
 
 **Structure**:
-1. Developer agent commits changes to a worktree branch
-2. Parent spawns a reviewer agent and points it at the worktree diff
-3. Reviewer examines the changes, runs tests, and reports findings
-4. If changes pass review, parent merges the branch
-5. If changes need revision, parent sends feedback to the developer
+1. Developer agent pushes changes to its task branch
+2. Parent uses `workspace_diff(branch)` to get the diff
+3. Parent creates or steers a reviewer task and writes review criteria into the scratchpad header/activity
+4. If changes pass review, parent merges with `workspace_collect`
+5. If changes need revision, parent sends feedback to the developer via `agent_task(action=send, task_id, ...)`
 
 **Best practices**:
-- Reviewers should have access to the full codebase context
+- Pass the actual diff content to the reviewer, not just "review the code"
 - Define clear review criteria (tests pass, no security issues, style compliance)
-- Reviewer and developer should use inherited workspace for shared context
 - Keep review cycles bounded — set a max number of revision rounds
+- Use `workspace_conflicts(branch)` if the reviewer's feedback leads to rebases
 
 ## Specialist Team
 
 **When**: A complex project requires diverse expertise.
 
 **Structure**:
-1. Parent assembles a team based on the project requirements
-2. Each specialist handles their domain (frontend, backend, testing, docs)
-3. Specialists work on separate worktree branches
-4. Parent coordinates integration points and resolves conflicts
-5. Parent merges branches in dependency order
+1. Parent shares workspace: `workspace_share(path)`
+2. Spawn specialists in parallel, each with a focused role and a tracked task when supervision is needed
+3. If specialists must coordinate, attach them to the same task or cross-reference task IDs in scratchpad notes
+4. Monitor with `agent_task(action=status)`, scratchpad reads, and `workspace_activity()` to track all branches
+5. Review each specialist's work with `workspace_diff(branch)`
+6. Merge branches in dependency order with `workspace_collect`
+7. Resolve conflicts using the `git-workspace` skill protocol
 
 **Best practices**:
 - Define clear interface contracts between specialists
+- Keep parent-visible coordination in scratchpad activity notes, not private reasoning
 - Merge frequently to catch integration issues early
-- The parent should maintain a project-level view and coordinate timing
+- Re-share after each merge so remaining workers can pull the latest
 - Store team composition in memory for reuse on similar projects

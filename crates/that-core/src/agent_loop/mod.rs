@@ -30,7 +30,9 @@ pub use hook::{HookAction, LoopHook, NoopHook};
 pub use types::{Message, ToolCall, ToolDef, Usage};
 
 use anyhow::Result;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use that_tools::ThatToolsConfig;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, info_span, warn, Instrument};
@@ -39,8 +41,26 @@ use crate::tools::typed::dispatch as dispatch_tool;
 
 /// Max seconds to wait for the next SSE/WS chunk before treating the stream as stalled.
 /// Applies to all providers (Anthropic, OpenRouter, OpenAI HTTP).
-/// Models with extended thinking may pause before the first token, so this is generous.
+/// 90s is generous but needed — extended thinking on large contexts can pause before
+/// the first delta. Anthropic sends keepalive comments during thinking, but transient
+/// API issues may produce genuine 90s silences that trigger retries.
 pub(super) const STREAM_IDLE_TIMEOUT_SECS: u64 = 90;
+
+/// Shared HTTP client with connect timeout only. No total-request timeout — SSE
+/// streams can run for minutes. Idle connections expire after 30s to avoid reusing
+/// stale connections after a mid-stream failure.
+pub(super) fn llm_http_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .pool_max_idle_per_host(4)
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
 
 /// Max chars kept for tool args / result previews recorded on spans.
 const TRACE_PREVIEW_CHARS: usize = 400;
@@ -70,15 +90,29 @@ pub struct InterruptedRun {
 const MAX_TOOL_RESULT_CHARS: usize = 32_000;
 /// Minimum consecutive base64-alphabet chars to flag a blob.
 const BASE64_BLOB_MIN_LEN: usize = 1_000;
-/// Input-token threshold at which the orchestrator warns the agent to compact.
-/// At this point the context is large enough that a long response risks truncation.
-const CONTEXT_WARN_TOKENS: u32 = 150_000;
-/// Input-token threshold for mandatory compaction — context is critically full.
-const AUTO_COMPACT_TOKENS: u32 = 180_000;
+/// Fraction of context window at which we warn the agent to compact.
+const CONTEXT_WARN_FRACTION: f64 = 0.70;
+/// Fraction of context window at which compaction is mandatory.
+const CONTEXT_CRITICAL_FRACTION: f64 = 0.85;
+
+/// Tools classified as exploration — consecutive turns using only these trigger anti-loop.
+const EXPLORATION_TOOLS: &[&str] = &[
+    "shell_exec",
+    "fs_ls",
+    "fs_cat",
+    "code_grep",
+    "code_search",
+    "code_read",
+];
+/// Soft warning threshold — inject a nudge after this many exploration-only turns.
+const EXPLORATION_SOFT_LIMIT: u32 = 8;
+/// Hard limit — force the agent to stop exploring and report.
+const EXPLORATION_HARD_LIMIT: u32 = 12;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 /// Context needed to execute tool calls — policies and sandbox routing.
+#[derive(Clone)]
 pub struct ToolContext {
     pub config: ThatToolsConfig,
     pub container: Option<String>,
@@ -89,6 +123,23 @@ pub struct ToolContext {
     pub route_registry: Option<std::sync::Arc<that_channels::DynamicRouteRegistry>>,
     /// Agent state directory for audit logging. When `None`, audit is silently skipped.
     pub state_dir: Option<std::path::PathBuf>,
+    /// Agent name for structured run logging.
+    pub agent_name: String,
+    /// When `true`, memory tools (`mem_add`, `mem_recall`, etc.) are excluded from
+    /// the tool surface and blocked at dispatch. Used by the eval runner to prevent
+    /// eval runs from polluting the agent's persistent memory.
+    pub disable_memory: bool,
+}
+
+impl ToolContext {
+    /// Return the agent name for use as sender_id in inter-agent communication.
+    pub fn sender_name(&self) -> &str {
+        if self.agent_name.is_empty() {
+            "parent"
+        } else {
+            &self.agent_name
+        }
+    }
 }
 
 /// All parameters for a single `run()` invocation.
@@ -164,6 +215,19 @@ async fn run_from_checkpoint(
     mut messages: Vec<Message>,
     hook: &dyn LoopHook,
 ) -> std::result::Result<(String, Usage), InterruptedRun> {
+    // Log the user request to the structured run log.
+    if let Some(ref sd) = config.tool_ctx.state_dir {
+        let task = messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        crate::audit::log_run_event(sd, &config.tool_ctx.agent_name, "Input", "agent_loop", task);
+    }
+
     let mut total_usage = Usage::default();
     let mut pending_edit_verification: HashMap<String, String> = HashMap::new();
     let openai_session: Option<Arc<Mutex<openai::OpenAiWsState>>> =
@@ -177,7 +241,30 @@ async fn run_from_checkpoint(
     let budget_half = config.max_turns / 2;
     let budget_eighty = config.max_turns * 4 / 5;
 
-    for turn in 0..config.max_turns {
+    // Context window thresholds — derived from model's actual window size.
+    let ctx_window = crate::model_catalog::context_window(&config.model);
+    let context_warn_tokens = (ctx_window as f64 * CONTEXT_WARN_FRACTION) as u32;
+    let context_critical_tokens = (ctx_window as f64 * CONTEXT_CRITICAL_FRACTION) as u32;
+
+    // When resuming from a network retry checkpoint, count assistant messages
+    // AFTER the last user message to continue from where we left off.
+    // History messages (before the last user message) don't count as consumed turns.
+    let turns_consumed = {
+        let last_user = messages
+            .iter()
+            .rposition(|m| matches!(m, Message::User { .. }))
+            .unwrap_or(0);
+        messages[last_user..]
+            .iter()
+            .filter(|m| matches!(m, Message::Assistant { .. }))
+            .count() as u32
+    };
+
+    // Anti-loop: track consecutive exploration-only turns.
+    let mut exploration_streak: u32 = 0;
+    let mut seen_calls: HashSet<u64> = HashSet::new();
+
+    for turn in turns_consumed..config.max_turns {
         // Drain steering hints queued by the human between turns.
         if let Some(ref queue) = config.steering {
             let hints: Vec<String> = {
@@ -334,6 +421,15 @@ async fn run_from_checkpoint(
                 )));
                 continue;
             }
+            if let Some(ref sd) = config.tool_ctx.state_dir {
+                crate::audit::log_run_event(
+                    sd,
+                    &config.tool_ctx.agent_name,
+                    "Output",
+                    "agent_loop",
+                    &text,
+                );
+            }
             return Ok((text, total_usage));
         }
 
@@ -342,8 +438,70 @@ async fn run_from_checkpoint(
             tool_calls: tool_calls.clone(),
         });
 
-        // Execute each tool call — each gets its own child span.
-        for tc in &tool_calls {
+        // Execute tool calls — parallel-safe tools run concurrently, others sequentially.
+        // Results are collected into a vec indexed by original position to preserve order.
+        type ToolResult = (String, Vec<(Vec<u8>, String)>);
+        let mut tool_results: Vec<Option<ToolResult>> = vec![None; tool_calls.len()];
+        let mut terminal_output: Option<String> = None;
+
+        // Partition: identify which tools can run in parallel.
+        let parallel_indices: Vec<usize> = tool_calls
+            .iter()
+            .enumerate()
+            .filter(|(_, tc)| is_parallel_safe(&tc.name))
+            .map(|(i, _)| i)
+            .collect();
+        let sequential_indices: Vec<usize> = tool_calls
+            .iter()
+            .enumerate()
+            .filter(|(_, tc)| !is_parallel_safe(&tc.name))
+            .map(|(i, _)| i)
+            .collect();
+
+        // Run parallel-safe tools concurrently.
+        if parallel_indices.len() > 1 {
+            // Pre-log all parallel tool calls (audit + tracing) before dispatching.
+            for &i in &parallel_indices {
+                let tc = &tool_calls[i];
+                let logged_args = compact_oneliner(&tc.args_json, TOOL_LOG_PREVIEW_CHARS);
+                info!(tool = %tc.name, call_id = %tc.call_id, " → {}: {logged_args}", tc.name);
+                if let Some(ref sd) = config.tool_ctx.state_dir {
+                    crate::audit::log_event(
+                        sd,
+                        "tool_call",
+                        &format!("{}: {}", tc.name, tc.args_json),
+                    );
+                }
+            }
+            let parallel_futures: Vec<_> = parallel_indices
+                .iter()
+                .map(|&i| {
+                    let tc = &tool_calls[i];
+                    let tool_ctx = config.tool_ctx.clone();
+                    let name = tc.name.clone();
+                    let args = tc.args_json.clone();
+                    async move {
+                        let dr = dispatch_tool(&name, &args, &tool_ctx).await;
+                        (i, dr.text, dr.images)
+                    }
+                })
+                .collect();
+            let results = futures::future::join_all(parallel_futures).await;
+            for (i, text, images) in results {
+                tool_results[i] = Some((text, images));
+            }
+        } else {
+            // Only 0 or 1 parallel tool — run in the sequential path below.
+        }
+
+        // Run sequential tools (and any single parallel tool not yet executed).
+        let remaining_parallel: Vec<usize> = parallel_indices
+            .iter()
+            .filter(|&&i| tool_results[i].is_none())
+            .copied()
+            .collect();
+        for &i in sequential_indices.iter().chain(remaining_parallel.iter()) {
+            let tc = &tool_calls[i];
             let args_preview = truncate_chars(&tc.args_json, TRACE_PREVIEW_CHARS);
             let logged_args = compact_oneliner(&tc.args_json, TOOL_LOG_PREVIEW_CHARS);
             info!(
@@ -353,8 +511,14 @@ async fn run_from_checkpoint(
             );
 
             if let Some(ref sd) = config.tool_ctx.state_dir {
-                let args_short: String = tc.args_json.chars().take(120).collect();
-                crate::audit::log_event(sd, "tool_call", &format!("{}: {args_short}", tc.name));
+                crate::audit::log_event(sd, "tool_call", &format!("{}: {}", tc.name, tc.args_json));
+                crate::audit::log_run_event(
+                    sd,
+                    &config.tool_ctx.agent_name,
+                    "ToolCall",
+                    "agent_loop",
+                    &format!("{} {}", tc.name, tc.args_json),
+                );
             }
 
             let tool_span = info_span!(
@@ -378,35 +542,56 @@ async fn run_from_checkpoint(
                 .await;
 
             let mut tool_images: Vec<(Vec<u8>, String)> = Vec::new();
-            let result = match action {
-                HookAction::Skip { result_json } => {
-                    // Brief synchronous entry so the span appears in the trace.
-                    tool_span.in_scope(|| {
-                        tracing::Span::current().record("tool.skipped", true);
-                    });
-                    result_json
-                }
-                HookAction::Continue => {
-                    if tc.name == "code_edit" {
-                        if let Some(edit_path) = tool_arg_path(&tc.args_json) {
-                            if let Some(previous_call_id) =
-                                pending_edit_verification.get(&edit_path).cloned()
-                            {
-                                tool_span.in_scope(|| {
-                                    tracing::Span::current().record(
-                                        "tool.guard_reason",
-                                        "edit_requires_read_verification",
-                                    );
-                                });
-                                edit_verification_guard_result(&edit_path, &previous_call_id)
+            let result = if terminal_output.is_some() {
+                r#"{"skipped":true,"reason":"run already finalized via answer"}"#.to_string()
+            } else {
+                match action {
+                    HookAction::Skip { result_json } => {
+                        tool_span.in_scope(|| {
+                            tracing::Span::current().record("tool.skipped", true);
+                        });
+                        result_json
+                    }
+                    HookAction::Finish {
+                        result_json,
+                        output_text,
+                    } => {
+                        tool_span.in_scope(|| {
+                            tracing::Span::current().record("tool.skipped", true);
+                        });
+                        terminal_output = Some(output_text);
+                        result_json
+                    }
+                    HookAction::Continue => {
+                        if tc.name == "code_edit" {
+                            if let Some(edit_path) = tool_arg_path(&tc.args_json) {
+                                if let Some(previous_call_id) =
+                                    pending_edit_verification.get(&edit_path).cloned()
+                                {
+                                    tool_span.in_scope(|| {
+                                        tracing::Span::current().record(
+                                            "tool.guard_reason",
+                                            "edit_requires_read_verification",
+                                        );
+                                    });
+                                    edit_verification_guard_result(&edit_path, &previous_call_id)
+                                } else {
+                                    let dr =
+                                        dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
+                                            .instrument(tool_span.clone())
+                                            .await;
+                                    tool_images = dr.images;
+                                    if !is_tool_error_result(&dr.text) {
+                                        pending_edit_verification
+                                            .insert(edit_path, tc.call_id.clone());
+                                    }
+                                    dr.text
+                                }
                             } else {
                                 let dr = dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
                                     .instrument(tool_span.clone())
                                     .await;
                                 tool_images = dr.images;
-                                if !is_tool_error_result(&dr.text) {
-                                    pending_edit_verification.insert(edit_path, tc.call_id.clone());
-                                }
                                 dr.text
                             }
                         } else {
@@ -414,50 +599,68 @@ async fn run_from_checkpoint(
                                 .instrument(tool_span.clone())
                                 .await;
                             tool_images = dr.images;
+                            if tc.name == "code_read" && !is_tool_error_result(&dr.text) {
+                                if let Some(read_path) = tool_arg_path(&tc.args_json) {
+                                    pending_edit_verification.remove(&read_path);
+                                }
+                            }
                             dr.text
                         }
-                    } else {
-                        let dr = dispatch_tool(&tc.name, &tc.args_json, &config.tool_ctx)
-                            .instrument(tool_span.clone())
-                            .await;
-                        tool_images = dr.images;
-                        if tc.name == "code_read" && !is_tool_error_result(&dr.text) {
-                            if let Some(read_path) = tool_arg_path(&tc.args_json) {
-                                pending_edit_verification.remove(&read_path);
-                            }
-                        }
-                        dr.text
                     }
                 }
             };
 
             let result_preview = truncate_chars(&result, TRACE_PREVIEW_CHARS);
             tool_span.record("output.value", result_preview.as_str());
+
+            tool_results[i] = Some((result, tool_images));
+        }
+
+        // Post-process all results in original order: audit, logging, hook, message push.
+        for (i, tc) in tool_calls.iter().enumerate() {
+            let (result, tool_images) = tool_results[i]
+                .take()
+                .unwrap_or_else(|| (r#"{"error":"tool not executed"}"#.to_string(), vec![]));
+
             let is_error = is_tool_error_result(&result);
             if is_error {
                 if let Some(ref sd) = config.tool_ctx.state_dir {
-                    crate::audit::log_error(
-                        sd,
-                        &tc.name,
-                        &result.chars().take(500).collect::<String>(),
-                        &tc.args_json,
-                    );
+                    crate::audit::log_error(sd, &tc.name, &result, &tc.args_json);
                 }
             }
             let result_chars = result.chars().count();
-            let status_str = if is_error {
-                let snippet = compact_oneliner(&result, 60);
-                format!("ERR  {snippet}")
+            if let Some(ref sd) = config.tool_ctx.state_dir {
+                let status = if is_error { "error" } else { "ok" };
+                crate::audit::log_run_event(
+                    sd,
+                    &config.tool_ctx.agent_name,
+                    "ToolResult",
+                    "agent_loop",
+                    &format!(
+                        "{} ({}, {} chars) {}",
+                        tc.name, status, result_chars, &result
+                    ),
+                );
+            }
+
+            // Log for parallel tools that didn't log during execution
+            if parallel_indices.len() > 1 && parallel_indices.contains(&i) {
+                // Already logged during parallel execution
             } else {
-                "ok".to_string()
-            };
-            info!(
-                tool = %tc.name,
-                call_id = %tc.call_id,
-                is_error,
-                result_chars,
-                " ← {}: {status_str}  ({result_chars} chars)", tc.name
-            );
+                let status_str = if is_error {
+                    let snippet = compact_oneliner(&result, 60);
+                    format!("ERR  {snippet}")
+                } else {
+                    "ok".to_string()
+                };
+                info!(
+                    tool = %tc.name,
+                    call_id = %tc.call_id,
+                    is_error,
+                    result_chars,
+                    " ← {}: {status_str}  ({result_chars} chars)", tc.name
+                );
+            }
 
             hook.on_tool_result(&tc.name, &tc.call_id, &result).await;
             let content = sanitize_tool_result(&tc.name, &result);
@@ -469,32 +672,88 @@ async fn run_from_checkpoint(
             });
         }
 
+        if let Some(output) = terminal_output {
+            return Ok((output, total_usage));
+        }
+
         // If context is getting large, warn the agent before its next turn so it
         // calls mem_compact proactively — preventing response truncation mid-tool-call.
-        if usage.input_tokens > AUTO_COMPACT_TOKENS {
+        let pct = if ctx_window > 0 {
+            (usage.input_tokens as f64 / ctx_window as f64 * 100.0) as u32
+        } else {
+            0
+        };
+        if usage.input_tokens > context_critical_tokens {
             warn!(
                 input_tokens = usage.input_tokens,
-                threshold = AUTO_COMPACT_TOKENS,
-                "Context critically full — injecting mandatory mem_compact"
+                context_window = ctx_window,
+                usage_pct = pct,
+                "Context {pct}% full — injecting mandatory mem_compact"
             );
-            messages.push(Message::user(
-                "<system-reminder>\ncontext_pressure: critical\n\
-                 Your context window is critically full. You MUST call mem_compact NOW as \
+            messages.push(Message::user(format!(
+                "<system-reminder>\ncontext_pressure: critical ({pct}% of {ctx_window} tokens)\n\
+                 Your context window is {pct}% full. You MUST call mem_compact NOW as \
                  your very first action this turn — no other tool calls before it. Failure \
-                 to compact will cause response truncation and lost work.\n</system-reminder>",
-            ));
-        } else if usage.input_tokens > CONTEXT_WARN_TOKENS {
+                 to compact will cause response truncation and lost work.\n</system-reminder>"
+            )));
+        } else if usage.input_tokens > context_warn_tokens {
             warn!(
                 input_tokens = usage.input_tokens,
-                threshold = CONTEXT_WARN_TOKENS,
-                "Context approaching limit — injecting mem_compact reminder"
+                context_window = ctx_window,
+                usage_pct = pct,
+                "Context {pct}% full — injecting mem_compact reminder"
+            );
+            messages.push(Message::user(format!(
+                "<system-reminder>\ncontext_pressure: high ({pct}% of {ctx_window} tokens)\n\
+                 Your context window is {pct}% full. Call mem_compact NOW as your first \
+                 action this turn to preserve the session before the window fills and \
+                 responses get truncated.\n</system-reminder>"
+            )));
+        }
+
+        // ── Anti-loop: exploration streak detection ────────────────────────
+        if !tool_calls.is_empty()
+            && tool_calls
+                .iter()
+                .all(|tc| EXPLORATION_TOOLS.contains(&tc.name.as_str()))
+        {
+            exploration_streak += 1;
+            // Repeated-call booster: hash (name, args) and add +1 for duplicates.
+            for tc in &tool_calls {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                tc.name.hash(&mut hasher);
+                tc.args_json.hash(&mut hasher);
+                let h = hasher.finish();
+                if !seen_calls.insert(h) {
+                    exploration_streak += 1;
+                }
+            }
+        } else {
+            exploration_streak = 0;
+            seen_calls.clear();
+        }
+
+        if exploration_streak >= EXPLORATION_HARD_LIMIT {
+            warn!(
+                streak = exploration_streak,
+                "Anti-loop hard limit reached — forcing input_required"
             );
             messages.push(Message::user(
-                "<system-reminder>\ncontext_pressure: high\n\
-                 Your context window is nearly full. Call mem_compact NOW as your first \
-                 action this turn to preserve the session before the window fills and \
-                 responses get truncated.\n</system-reminder>",
+                "STOP exploring. You have exceeded the exploration limit. \
+                 Report input_required with a specific question about what context is missing."
+                    .to_string(),
             ));
+        } else if exploration_streak >= EXPLORATION_SOFT_LIMIT {
+            warn!(
+                streak = exploration_streak,
+                "Anti-loop soft warning — injecting nudge"
+            );
+            messages.push(Message::user(format!(
+                "You have been exploring for {exploration_streak} turns without progress. \
+                 Check if the information you need was provided in the task message or \
+                 scratchpad. If you cannot find what you need, report input_required \
+                 with a specific question about what is missing."
+            )));
         }
 
         debug!(turn = current, "Loop turn complete, continuing");
@@ -1049,6 +1308,23 @@ fn tool_arg_path(args_json: &str) -> Option<String> {
     } else {
         Some(raw.to_string())
     }
+}
+
+/// Tools that can safely run concurrently — they don't mutate local filesystem state
+/// or depend on ordering with other tool calls in the same turn.
+fn is_parallel_safe(name: &str) -> bool {
+    matches!(
+        name,
+        "agent_run"
+            | "agent_query"
+            | "http_request"
+            | "workspace_activity"
+            | "workspace_diff"
+            | "workspace_conflicts"
+            | "agent_list"
+            | "list_skills"
+            | "read_skill"
+    )
 }
 
 fn is_tool_error_result(result_json: &str) -> bool {

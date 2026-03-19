@@ -37,6 +37,9 @@ pub enum ReplyMarkup {
         one_time: bool,
     },
     RemoveKeyboard,
+    ForceReply {
+        input_field_placeholder: Option<String>,
+    },
 }
 
 /// A button in an inline keyboard row.

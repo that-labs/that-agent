@@ -48,23 +48,26 @@ jobs:
             /usr/local/cargo/registry
             /usr/local/cargo/git
             target
-          key: cargo-bookworm-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-bookworm-v2-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-bookworm-${{ matrix.target }}-
 
-      - name: Build binary
+      - name: Build binaries
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
-          cargo build --release --bin that --target ${{ matrix.target }}
+          cargo build --release --bin that --bin that-git-server --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/that that
-          file that
+          cp target/${{ matrix.target }}/release/that-git-server that-git-server
+          file that that-git-server
 
-      - name: Upload binary
+      - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: that-${{ matrix.arch }}
-          path: that
+          path: |
+            that
+            that-git-server
           if-no-files-found: error
           retention-days: 1
 
@@ -91,7 +94,7 @@ jobs:
           path: /tmp/builder-ctx/build
 
       - name: Prepare builder context
-        run: chmod +x /tmp/builder-ctx/build/that
+        run: chmod +x /tmp/builder-ctx/build/that /tmp/builder-ctx/build/that-git-server
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

@@ -32,7 +32,7 @@ impl Default for TavilyProvider {
 impl TavilyProvider {
     pub fn new() -> Self {
         let api_key = std::env::var("TAVILY_API_KEY")
-            .or_else(|_| std::env::var("ANVIL_SEARCH_TAVILY_KEY"))
+            .or_else(|_| std::env::var("THAT_SEARCH_TAVILY_KEY"))
             .ok();
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))

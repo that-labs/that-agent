@@ -23,6 +23,7 @@ use tokio::process::Command;
 
 use crate::agent_loop::types::ToolDef;
 use crate::agent_loop::ToolContext;
+use crate::config::AgentDef;
 
 const TRUSTED_LOCAL_SANDBOX_ENV: &str = "THAT_TRUSTED_LOCAL_SANDBOX";
 const SANDBOX_MODE_ENV: &str = "THAT_SANDBOX_MODE";
@@ -163,6 +164,135 @@ fn container_path(path: &str) -> String {
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn current_agent_depth() -> u8 {
+    crate::orchestration::config::parse_env_u8("THAT_AGENT_DEPTH", 0)
+}
+
+fn child_orchestration_guard(name: &str) -> Option<ToolError> {
+    let depth = current_agent_depth();
+    match name {
+        "spawn_agent" if depth > 0 => Some(ToolError(
+            "Only root agents can spawn persistent sub-agents. Use agent_run for ephemeral tasks."
+                .into(),
+        )),
+        "agent_run" if depth > 1 => Some(ToolError(
+            "Ephemeral agents cannot spawn further sub-agents. Return results to your parent."
+                .into(),
+        )),
+        _ => None,
+    }
+}
+
+fn resolved_workspace_hint(agent_name: &str) -> String {
+    let inherit_workspace = parse_env_bool("THAT_AGENT_INHERIT_WORKSPACE").unwrap_or(false);
+    if inherit_workspace {
+        if let Ok(parent) = std::env::var("THAT_AGENT_PARENT") {
+            if !parent.trim().is_empty() {
+                return AgentDef::agent_workspace_dir(parent.trim())
+                    .display()
+                    .to_string();
+            }
+        }
+    }
+    AgentDef::agent_workspace_dir(agent_name)
+        .display()
+        .to_string()
+}
+
+fn build_task_context_note(agent_name: &str, parent_gateway_url: &str) -> String {
+    if let Ok(repo_url) = std::env::var("GIT_REPO_URL") {
+        let branch = std::env::var("GIT_BRANCH").unwrap_or_else(|_| "main".to_string());
+        return format!(
+            "Shared scratchpad context:\nGit workspace repo: {repo_url}\nSuggested branch: {branch}\nPreferred working directory inside worker: /workspace\nParent gateway: {parent_gateway_url}"
+        );
+    }
+
+    format!(
+        "Shared scratchpad context:\nWorkspace root: {} (resolved from current agent workspace model)\nParent gateway: {parent_gateway_url}",
+        resolved_workspace_hint(agent_name)
+    )
+}
+
+fn build_task_goal_note(message: &str) -> String {
+    format!("Overall shared goal:\n{}", message.trim())
+}
+
+fn build_task_coordination_note(owner: &str, primary_worker: &str) -> String {
+    format!(
+        "Shared coordination contract:\nOwner: {owner}\nPrimary worker: {primary_worker}\nUse header entries for stable goal, workspace, participants, and policy that should stay cache-friendly.\nUse activity entries for plans, steering, blockers, reviews, and git progress.\nExternalize decisions here so every participant, including the parent, can supervise the task. Hidden reasoning is not shared."
+    )
+}
+
+fn build_task_participants_note(
+    owner: &str,
+    primary_worker: &str,
+    participants: &[String],
+) -> String {
+    format!(
+        "Task participants:\nOwner: {owner}\nPrimary worker: {primary_worker}\nParticipants: {}",
+        participants.join(", ")
+    )
+}
+
+fn sanitize_task_branch_segment(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    sanitized.trim_matches('-').to_string()
+}
+
+fn build_task_git_branch_note(primary_worker: &str, task_id: &str) -> String {
+    format!(
+        "Preferred git branch for this task:\n{}",
+        [
+            "task",
+            &sanitize_task_branch_segment(primary_worker),
+            &sanitize_task_branch_segment(task_id),
+        ]
+        .join("/")
+    )
+}
+
+fn sync_task_scratchpad_header(
+    task_reg: &crate::agents::AgentTaskRegistry,
+    task: &crate::agents::AgentTask,
+    from: &str,
+    workspace_note: &str,
+    goal: Option<&str>,
+) {
+    if let Some(goal) = goal.filter(|goal| !goal.trim().is_empty()) {
+        let _ = task_reg.scratchpad_set_header(&task.id, from, "goal", &build_task_goal_note(goal));
+    }
+    let _ = task_reg.scratchpad_set_header(&task.id, from, "workspace", workspace_note);
+    let _ = task_reg.scratchpad_set_header(
+        &task.id,
+        from,
+        "coordination",
+        &build_task_coordination_note(&task.owner, &task.agent),
+    );
+    let _ = task_reg.scratchpad_set_header(
+        &task.id,
+        from,
+        "participants",
+        &build_task_participants_note(&task.owner, &task.agent, &task.participants),
+    );
+    if std::env::var("GIT_REPO_URL").is_ok() {
+        let _ = task_reg.scratchpad_set_header(
+            &task.id,
+            from,
+            "git_branch",
+            &build_task_git_branch_note(&task.agent, &task.id),
+        );
+    }
 }
 
 async fn docker_exec_sh(container: &str, cmd: &str) -> Result<serde_json::Value, ToolError> {
@@ -488,7 +618,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         "Requires sandbox mode. Start the agent without --no-sandbox to enable this tool."
     };
 
-    vec![
+    let mut tools = vec![
         ToolDef {
             name: "fs_ls".into(),
             description: "List directory contents with file sizes and types.".into(),
@@ -777,6 +907,10 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             name: "shell_exec".into(),
             description: format!(
                 "Execute a shell command and return stdout, stderr, and exit code. \
+                IMPORTANT: Do NOT use shell_exec for operations that have dedicated tools — \
+                use code_read/fs_cat instead of cat, code_grep instead of grep, fs_ls instead of ls, \
+                code_edit instead of sed/awk, fs_write instead of echo/tee, list_skills instead of ls on skills dir. \
+                Reserve shell_exec for git, build commands, package managers, and runtime operations with no dedicated tool. \
                 Default timeout: 5s — most commands finish instantly. \
                 Set a higher timeout_secs explicitly for builds, installs, or known slow ops. \
                 For long-running processes, redirect output to a file and manage it separately. \
@@ -795,16 +929,26 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "list_skills".into(),
+            description: "List all available skills with their names, descriptions, and reference files. \
+                Use this to discover what skills are available before loading one with read_skill. \
+                Do NOT use shell_exec to list the skills directory.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
             name: "read_skill".into(),
             description: "Read a skill's documentation from the host skills directory. \
-                Call this when a skill listed in the preamble is relevant to the current task — \
+                Call this when a skill listed in the preamble or from list_skills is relevant to the current task — \
                 it returns the full instructions and lists any reference files available for deeper detail. \
                 This is the correct way to load skill content; do NOT use the bash tool to read skill files.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Skill name exactly as listed in the preamble skill catalog" },
-                    "file": { "type": "string", "description": "File to read within the skill directory. Defaults to SKILL.md." }
+                    "name": { "type": "string", "description": "Skill name exactly as listed in the preamble skill catalog or from list_skills" },
+                    "file": { "type": "string", "description": "File path relative to the skill directory. Defaults to SKILL.md. Use this to load reference files (e.g. \"references/worktree-local.md\") — the available_files field in the response lists all loadable files." }
                 },
                 "required": ["name"]
             }),
@@ -1018,38 +1162,21 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             }),
         },
         ToolDef {
-            name: "provider_list".into(),
-            description: "List dynamically registered inference providers available for /models.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        },
-        ToolDef {
-            name: "provider_register".into(),
-            description: "Register a new OpenAI-compatible inference provider at runtime. \
-                Use the provider id later in /models and set the API key in the referenced env var.".into(),
+            name: "provider_admin".into(),
+            description: "Manage dynamically registered inference providers. \
+                Use action=list to inspect providers, action=register to add a new OpenAI-compatible provider, \
+                or action=unregister to remove one.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "Unique provider id, for example groq" },
-                    "base_url": { "type": "string", "description": "OpenAI-compatible API base URL, for example https://api.groq.com/openai/v1" },
-                    "api_key_env": { "type": "string", "description": "Environment variable name that holds the provider API key" },
-                    "models": { "type": "array", "items": { "type": "string" }, "description": "Suggested models to show in /models" },
-                    "transport": { "type": "string", "enum": ["openai_chat"], "description": "Provider transport type. Only openai_chat is supported right now." }
+                    "action": { "type": "string", "enum": ["list", "register", "unregister"], "description": "Provider admin action to perform" },
+                    "id": { "type": "string", "description": "Provider id for register/unregister, for example groq" },
+                    "base_url": { "type": "string", "description": "OpenAI-compatible API base URL for register, for example https://api.groq.com/openai/v1" },
+                    "api_key_env": { "type": "string", "description": "Environment variable name that holds the provider API key for register" },
+                    "models": { "type": "array", "items": { "type": "string" }, "description": "Suggested models to show in /models for register" },
+                    "transport": { "type": "string", "enum": ["openai_chat"], "description": "Provider transport type for register. Only openai_chat is supported right now." }
                 },
-                "required": ["id", "base_url", "api_key_env"]
-            }),
-        },
-        ToolDef {
-            name: "provider_unregister".into(),
-            description: "Remove a dynamically registered inference provider.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Provider id to unregister" }
-                },
-                "required": ["id"]
+                "required": ["action"]
             }),
         },
         // ── Dynamic gateway route tools ──────────────────────────────────────
@@ -1132,43 +1259,135 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         // ── Multi-agent lifecycle tools ───────────────────────────────────────
         ToolDef {
             name: "spawn_agent".into(),
-            description: "Spawn a named sub-agent process in the background. The child agent runs \
-                independently and registers itself in the cluster. Returns the PID and gateway URL.".into(),
+            description: "Spawn a persistent sub-agent. In K8s mode creates a Deployment + Service; \
+                locally forks a background process. Returns the gateway URL for querying.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Unique name for the sub-agent" },
                     "role": { "type": "string", "description": "Optional role description" },
-                    "gateway_port": { "type": "integer", "description": "Port for the child agent's HTTP gateway" },
-                    "model": { "type": "string", "description": "Optional model override for the child agent" }
+                    "gateway_port": { "type": "integer", "description": "Port for the child agent's HTTP gateway (local mode only)" },
+                    "model": { "type": "string", "description": "Optional model override. Use full IDs: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5, gpt-5.2-codex. Shorthands like sonnet-4-6 or opus are auto-normalized." },
+                    "env": { "type": "object", "description": "Optional env var overrides for the child (e.g. {\"TELEGRAM_BOT_TOKEN\": \"bot123:...\"} to give it its own channel)" }
                 },
                 "required": ["name"]
             }),
         },
         ToolDef {
-            name: "agent_list".into(),
-            description: "List all registered agents in the cluster with their role, gateway URL, \
-                and liveness status.".into(),
+            name: "agent_run".into(),
+            description: "Run an ephemeral task agent. Blocks until the task completes and returns \
+                the result. Call multiple agent_run in parallel for fan-out work. In K8s mode runs \
+                as a Job; locally runs as a foreground process. \
+                Pass bootstrap to warm-start the agent with a task-specific identity and domain \
+                context (links, citations, background research) so it can work without broad search access.".into(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "name": { "type": "string", "description": "Unique worker name" },
+                    "role": { "type": "string", "description": "Optional role description for the worker" },
+                    "task": { "type": "string", "description": "The task for the worker to execute" },
+                    "model": { "type": "string", "description": "Optional model override. Use full IDs: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5, gpt-5.2-codex. Shorthands like sonnet-4-6 or opus are auto-normalized." },
+                    "workspace": { "type": "boolean", "description": "If true, share the current git workspace with the worker (default: false)" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 1800 = 30 min). Complex coding tasks may need longer." },
+                    "bootstrap": {
+                        "type": "object",
+                        "description": "Gold bootstrap: warm-starts the agent with task-specific identity and domain context. Written to the agent's workspace before the loop starts so the agent sees it in its preamble from turn 1.",
+                        "properties": {
+                            "identity": { "type": "string", "description": "Identity.md content — agent name, vibe, emoji" },
+                            "soul": { "type": "string", "description": "Soul.md content — character, values, philosophy" },
+                            "agents": { "type": "string", "description": "Agents.md content — operating instructions, tool discipline" },
+                            "context": { "type": "string", "description": "Domain context for the task: links to scrape, citations, background research gathered by the parent" }
+                        }
+                    }
+                },
+                "required": ["name", "task"]
             }),
         },
         ToolDef {
             name: "agent_query".into(),
-            description: "Send a message to a named peer agent and return its response. \
-                The target agent must have a gateway URL registered in the cluster.".into(),
+            description: "Send a synchronous message to a persistent agent and block until response. \
+                Best for quick one-shot questions (<30s). For longer work, prefer agent_task with action=send. \
+                Set stream=true to relay the sub-agent's tool calls to the channel in real-time.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Name of the target agent" },
                     "message": { "type": "string", "description": "Message to send" },
-                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 60)" }
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 60)" },
+                    "stream": { "type": "boolean", "description": "When true, relay the sub-agent's tool calls to the channel in real-time via SSE streaming (default: false)" }
                 },
                 "required": ["name", "message"]
             }),
         },
-    ]
+        ToolDef {
+            name: "agent_task".into(),
+            description: "Manage asynchronous sub-agent tasks and shared scratchpads. \
+                Use action=send to start or steer a task, action=status to inspect it, \
+                action=share to add another agent to the same scratchpad-backed task, \
+                action=scratchpad_read or scratchpad_write for the shared task header and live activity tail, \
+                action=cancel or resume to control execution, \
+                or action=query_async for deprecated fire-and-forget delivery.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["send", "share", "status", "scratchpad_read", "scratchpad_write", "cancel", "resume", "query_async"], "description": "Agent task action to perform" },
+                    "name": { "type": "string", "description": "Target agent name for send/share/query_async" },
+                    "message": { "type": "string", "description": "Task description, follow-up message, or async query message" },
+                    "task_id": { "type": "string", "description": "Existing task ID for send/status/scratchpad/cancel/resume" },
+                    "note": { "type": "string", "description": "Scratchpad note for scratchpad_write" },
+                    "section": { "type": "string", "enum": ["header", "activity"], "description": "Scratchpad section for scratchpad_write (default: activity)" },
+                    "kind": { "type": "string", "description": "Optional scratchpad entry kind such as goal, workspace, steering, blocker, review, commit, or merge_conflict" }
+                },
+                "required": ["action"]
+            }),
+        },
+        ToolDef {
+            name: "agent_admin".into(),
+            description: "Inspect or manage child agents. \
+                Use action=list to inspect all agents, action=status or logs for one agent, \
+                action=cluster_status for resource and capacity overview, \
+                or action=stop or unregister to clean up child agents.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "status", "logs", "stop", "unregister", "cluster_status"], "description": "Agent admin action to perform" },
+                    "name": { "type": "string", "description": "Agent name for status/logs/stop/unregister" },
+                    "tail": { "type": "integer", "description": "Number of log lines from the end for action=logs (default: 50)" }
+                },
+                "required": ["action"]
+            }),
+        },
+        ToolDef {
+            name: "workspace_admin".into(),
+            description: "Manage shared workspaces used by sub-agents. \
+                Use action=share to publish a repo, action=collect to merge or review worker output, \
+                or action=activity, diff, or conflicts for read-only inspection.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["share", "collect", "activity", "diff", "conflicts"], "description": "Workspace admin action to perform" },
+                    "path": { "type": "string", "description": "Local git repo path for action=share or local working tree for action=collect" },
+                    "name": { "type": "string", "description": "Optional shared repo name for action=share" },
+                    "worker": { "type": "string", "description": "Worker name for action=collect, or as a fallback selector for action=diff/conflicts" },
+                    "strategy": { "type": "string", "description": "\"merge\" (default) or \"review\" for action=collect" },
+                    "repo": { "type": "string", "description": "Shared repo name for action=activity/diff/conflicts (defaults to \"workspace\")" },
+                    "branch": { "type": "string", "description": "Explicit branch for action=collect/diff/conflicts, for example \"task/worker-1/task-123\"" },
+                    "task_id": { "type": "string", "description": "Tracked task ID for action=collect/diff/conflicts. Resolves the matching workspace branch deterministically when available." }
+                },
+                "required": ["action"]
+            }),
+        },
+    ];
+
+    let depth = current_agent_depth();
+    if depth > 0 {
+        tools.retain(|tool| {
+            let n = tool.name.as_str();
+            n != "spawn_agent" && !(depth > 1 && n == "agent_run")
+        });
+    }
+
+    tools
 }
 
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
@@ -1259,6 +1478,189 @@ async fn dispatch_image_read(args_json: &str, ctx: &ToolContext) -> DispatchResu
     }
 }
 
+fn remap_grouped_tool_call(
+    name: &str,
+    args_json: &str,
+) -> Result<Option<(String, String)>, ToolError> {
+    match name {
+        "provider_admin" => {
+            #[derive(Deserialize)]
+            struct Args {
+                action: String,
+                id: Option<String>,
+                base_url: Option<String>,
+                api_key_env: Option<String>,
+                #[serde(default)]
+                models: Vec<String>,
+                transport: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let (legacy_name, legacy_args) = match args.action.as_str() {
+                "list" => ("provider_list", serde_json::json!({})),
+                "register" => (
+                    "provider_register",
+                    serde_json::json!({
+                        "id": args.id,
+                        "base_url": args.base_url,
+                        "api_key_env": args.api_key_env,
+                        "models": args.models,
+                        "transport": args.transport.unwrap_or_else(|| "openai_chat".into()),
+                    }),
+                ),
+                "unregister" => ("provider_unregister", serde_json::json!({ "id": args.id })),
+                other => return Err(ToolError(format!("unknown provider_admin action: {other}"))),
+            };
+            Ok(Some((legacy_name.into(), legacy_args.to_string())))
+        }
+        "agent_task" => {
+            #[derive(Deserialize)]
+            struct Args {
+                action: String,
+                name: Option<String>,
+                message: Option<String>,
+                task_id: Option<String>,
+                note: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let (legacy_name, legacy_args) = match args.action.as_str() {
+                "send" => (
+                    "agent_task_send",
+                    serde_json::json!({
+                        "name": args.name,
+                        "message": args.message,
+                        "task_id": args.task_id,
+                    }),
+                ),
+                "share" => (
+                    "agent_task_share",
+                    serde_json::json!({
+                        "name": args.name,
+                        "message": args.message,
+                        "task_id": args.task_id,
+                    }),
+                ),
+                "status" => (
+                    "agent_task_status",
+                    serde_json::json!({ "task_id": args.task_id }),
+                ),
+                "scratchpad_read" => (
+                    "scratchpad_read",
+                    serde_json::json!({ "task_id": args.task_id }),
+                ),
+                "scratchpad_write" => (
+                    "scratchpad_write",
+                    serde_json::json!({
+                        "task_id": args.task_id,
+                        "note": args.note,
+                    }),
+                ),
+                "cancel" => (
+                    "agent_task_cancel",
+                    serde_json::json!({ "task_id": args.task_id }),
+                ),
+                "resume" => (
+                    "agent_task_resume",
+                    serde_json::json!({ "task_id": args.task_id }),
+                ),
+                "query_async" => (
+                    "agent_query_async",
+                    serde_json::json!({
+                        "name": args.name,
+                        "message": args.message,
+                    }),
+                ),
+                other => return Err(ToolError(format!("unknown agent_task action: {other}"))),
+            };
+            Ok(Some((legacy_name.into(), legacy_args.to_string())))
+        }
+        "agent_admin" => {
+            #[derive(Deserialize)]
+            struct Args {
+                action: String,
+                name: Option<String>,
+                tail: Option<u32>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let (legacy_name, legacy_args) = match args.action.as_str() {
+                "list" => ("agent_list", serde_json::json!({})),
+                "status" => ("agent_status", serde_json::json!({ "name": args.name })),
+                "logs" => (
+                    "agent_logs",
+                    serde_json::json!({ "name": args.name, "tail": args.tail }),
+                ),
+                "stop" => ("agent_stop", serde_json::json!({ "name": args.name })),
+                "unregister" => ("agent_unregister", serde_json::json!({ "name": args.name })),
+                "cluster_status" => ("cluster_status", serde_json::json!({})),
+                other => return Err(ToolError(format!("unknown agent_admin action: {other}"))),
+            };
+            Ok(Some((legacy_name.into(), legacy_args.to_string())))
+        }
+        "workspace_admin" => {
+            #[derive(Deserialize)]
+            struct Args {
+                action: String,
+                path: Option<String>,
+                name: Option<String>,
+                worker: Option<String>,
+                strategy: Option<String>,
+                repo: Option<String>,
+                branch: Option<String>,
+                task_id: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let (legacy_name, legacy_args) = match args.action.as_str() {
+                "share" => (
+                    "workspace_share",
+                    serde_json::json!({ "path": args.path, "name": args.name }),
+                ),
+                "collect" => (
+                    "workspace_collect",
+                    serde_json::json!({
+                        "path": args.path,
+                        "worker": args.worker,
+                        "branch": args.branch,
+                        "task_id": args.task_id,
+                        "strategy": args.strategy,
+                    }),
+                ),
+                "activity" => (
+                    "workspace_activity",
+                    serde_json::json!({ "repo": args.repo }),
+                ),
+                "diff" => (
+                    "workspace_diff",
+                    serde_json::json!({
+                        "worker": args.worker,
+                        "branch": args.branch,
+                        "task_id": args.task_id,
+                        "repo": args.repo
+                    }),
+                ),
+                "conflicts" => (
+                    "workspace_conflicts",
+                    serde_json::json!({
+                        "worker": args.worker,
+                        "branch": args.branch,
+                        "task_id": args.task_id,
+                        "repo": args.repo
+                    }),
+                ),
+                other => {
+                    return Err(ToolError(format!(
+                        "unknown workspace_admin action: {other}"
+                    )))
+                }
+            };
+            Ok(Some((legacy_name.into(), legacy_args.to_string())))
+        }
+        _ => Ok(None),
+    }
+}
+
 async fn dispatch_inner(
     name: &str,
     args_json: &str,
@@ -1271,6 +1673,20 @@ async fn dispatch_inner(
     let channel_registry = ctx.channel_registry.as_deref();
     let router = ctx.router.clone();
     let route_registry = ctx.route_registry.clone();
+    let remapped = remap_grouped_tool_call(name, args_json)?;
+    let (name, args_json) = match remapped.as_ref() {
+        Some((mapped_name, mapped_args)) => (mapped_name.as_str(), mapped_args.as_str()),
+        None => (name, args_json),
+    };
+    if let Some(err) = child_orchestration_guard(name) {
+        return Err(err);
+    }
+    // Block memory tools during eval runs to prevent polluting persistent memory.
+    if ctx.disable_memory && name.starts_with("mem_") {
+        return Err(ToolError(
+            "memory tools are disabled during eval runs".to_string(),
+        ));
+    }
     match name {
         "fs_ls" => {
             let args: FsLsArgs = serde_json::from_str(args_json)
@@ -1653,6 +2069,7 @@ async fn dispatch_inner(
         "shell_exec" => dispatch_shell_exec(args_json, config, container)
             .await
             .map(|o| serde_json::to_value(o).unwrap_or_default()),
+        "list_skills" => super::skill::dispatch_list_skills(skill_roots).await,
         "read_skill" => super::skill::dispatch_read_skill(args_json, skill_roots).await,
         "read_plugin" => {
             let args: ReadPluginArgs = serde_json::from_str(args_json)
@@ -2137,6 +2554,10 @@ async fn dispatch_inner(
                 ),
             }
             .map_err(ToolError)?;
+            // Refresh the in-memory Status.md cache when the agent updates it.
+            if args.file == "Status.md" {
+                crate::orchestration::config::set_agent_status(Some(args.content.clone()));
+            }
             Ok(serde_json::json!({ "status": "ok", "file": args.file }))
         }
         // ── HTTP request tool ─────────────────────────────────────────────────
@@ -2177,50 +2598,190 @@ async fn dispatch_inner(
                 role: Option<String>,
                 gateway_port: Option<u16>,
                 model: Option<String>,
+                env: Option<std::collections::HashMap<String, String>>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
-                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
-            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
             let parent = resolve_agent_name(config, skill_roots, None);
-            let entry = crate::agents::spawn_agent(
-                &args.name,
-                args.role.as_deref(),
-                parent.as_deref(),
-                args.gateway_port,
-                args.model.as_deref(),
-                &reg,
-            )
-            .await
-            .map_err(|e| ToolError(e.to_string()))?;
+            if crate::agents::is_k8s_mode() {
+                crate::agents::spawn_persistent_agent_k8s(
+                    &args.name,
+                    args.role.as_deref(),
+                    parent.as_deref().unwrap_or("root"),
+                    args.model.as_deref(),
+                    args.env.as_ref(),
+                )
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+            } else {
+                let cluster_dir =
+                    crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                        .ok_or_else(|| {
+                            ToolError("Cannot derive cluster dir from memory path".into())
+                        })?;
+                let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+                let entry = crate::agents::spawn_agent(
+                    &args.name,
+                    args.role.as_deref(),
+                    parent.as_deref(),
+                    args.gateway_port,
+                    args.model.as_deref(),
+                    &reg,
+                )
+                .await
+                .map_err(|e| ToolError(e.to_string()))?;
+                Ok(serde_json::json!({
+                    "name": entry.name,
+                    "pid": entry.pid,
+                    "gateway_url": entry.gateway_url,
+                    "started_at": entry.started_at,
+                }))
+            }
+        }
+        "agent_run" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                role: Option<String>,
+                task: String,
+                model: Option<String>,
+                workspace: Option<bool>,
+                timeout_secs: Option<u64>,
+                bootstrap: Option<crate::workspace::GoldBootstrap>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let parent =
+                resolve_agent_name(config, skill_roots, None).unwrap_or_else(|| "root".to_string());
+            if crate::agents::is_k8s_mode() {
+                crate::agents::run_ephemeral_agent_k8s(
+                    &args.name,
+                    args.role.as_deref(),
+                    &args.task,
+                    &parent,
+                    args.model.as_deref(),
+                    args.workspace.unwrap_or(false),
+                    args.timeout_secs.unwrap_or(1800),
+                    args.bootstrap.as_ref(),
+                )
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+            } else {
+                // Local mode: run as a foreground query process
+                let binary = std::env::current_exe()
+                    .map_err(|e| ToolError(format!("cannot find binary: {e}")))?;
+                let timeout = args.timeout_secs.unwrap_or(1800);
+                let depth = current_agent_depth();
+                let effective_name = if depth > 0 && !args.name.contains('/') {
+                    format!("{parent}/{}", args.name)
+                } else {
+                    args.name.clone()
+                };
+                let mut cmd = tokio::process::Command::new(&binary);
+                cmd.arg("--agent")
+                    .arg(&effective_name)
+                    .arg("run")
+                    .arg("query");
+                if let Some(ref role) = args.role {
+                    cmd.arg("--role").arg(role);
+                }
+                // Task is a positional arg — must come last
+                cmd.arg(&args.task);
+                cmd.env(
+                    "THAT_PARENT_GATEWAY_URL",
+                    crate::orchestration::support::resolve_gateway_url(),
+                );
+                if let Ok(tok) = std::env::var("THAT_GATEWAY_TOKEN") {
+                    cmd.env("THAT_PARENT_GATEWAY_TOKEN", tok);
+                }
+                cmd.env("THAT_AGENT_PARENT", &parent);
+                cmd.env("THAT_AGENT_DEPTH", (depth + 1).to_string());
+                if let Some(bs) = &args.bootstrap {
+                    if let Ok(json) = serde_json::to_string(bs) {
+                        cmd.env("THAT_GOLD_BOOTSTRAP", json);
+                    }
+                }
+                let start = std::time::Instant::now();
+                let output = tokio::time::timeout(Duration::from_secs(timeout), cmd.output())
+                    .await
+                    .map_err(|_| ToolError(format!("agent_run timed out after {timeout}s")))?
+                    .map_err(|e| ToolError(e.to_string()))?;
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let status = if output.status.success() {
+                    "succeeded"
+                } else {
+                    "failed"
+                };
+                Ok(serde_json::json!({
+                    "name": effective_name,
+                    "status": status,
+                    "output": stdout,
+                    "elapsed_secs": start.elapsed().as_secs(),
+                }))
+            }
+        }
+        "cluster_status" => {
+            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                .ok_or_else(|| ToolError("Cannot derive cluster dir".into()))?;
+            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+            let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
+            let my_name =
+                resolve_agent_name(config, skill_roots, None).unwrap_or_else(|| "root".to_string());
+            let (mut my_children, mut alive_total) = (0u32, 0u32);
+            for e in &entries {
+                let alive = crate::agents::AgentRegistry::is_alive(e.pid);
+                if alive {
+                    alive_total += 1;
+                }
+                if alive && e.parent.as_deref() == Some(my_name.as_str()) {
+                    my_children += 1;
+                }
+            }
+            let task_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .ok_or_else(|| ToolError("Cannot derive task registry".into()))?;
+            let active_tasks = task_reg.list_active().map(|t| t.len() as u32).unwrap_or(0);
+            let cpus = std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(0);
             Ok(serde_json::json!({
-                "name": entry.name,
-                "pid": entry.pid,
-                "gateway_url": entry.gateway_url,
-                "started_at": entry.started_at,
+                "agent": my_name,
+                "my_children_alive": my_children,
+                "cluster_agents_alive": alive_total,
+                "cluster_agents_total": entries.len(),
+                "active_tasks": active_tasks,
+                "cpu_cores": cpus,
             }))
         }
         "agent_list" => {
-            let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
-                .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
-            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
-            let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
-            let agents: Vec<serde_json::Value> = entries
-                .iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "name": e.name,
-                        "role": e.role,
-                        "parent": e.parent,
-                        "pid": e.pid,
-                        "gateway_url": e.gateway_url,
-                        "started_at": e.started_at,
-                        "alive": crate::agents::AgentRegistry::is_alive(e.pid),
+            if crate::agents::is_k8s_mode() {
+                crate::agents::list_agents_k8s()
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))
+            } else {
+                let cluster_dir =
+                    crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                        .ok_or_else(|| {
+                            ToolError("Cannot derive cluster dir from memory path".into())
+                        })?;
+                let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+                let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
+                let agents: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "name": e.name,
+                            "role": e.role,
+                            "parent": e.parent,
+                            "pid": e.pid,
+                            "gateway_url": e.gateway_url,
+                            "started_at": e.started_at,
+                            "alive": crate::agents::AgentRegistry::is_alive(e.pid),
+                        })
                     })
-                })
-                .collect();
-            Ok(serde_json::json!({ "agents": agents }))
+                    .collect();
+                Ok(serde_json::json!({ "agents": agents }))
+            }
         }
         "agent_query" => {
             #[derive(Deserialize)]
@@ -2231,23 +2792,635 @@ async fn dispatch_inner(
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            if crate::agents::is_k8s_mode() {
+                crate::agents::query_agent_k8s(
+                    &args.name,
+                    &args.message,
+                    args.timeout_secs.unwrap_or(60),
+                )
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+            } else {
+                let cluster_dir =
+                    crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                        .ok_or_else(|| {
+                            ToolError("Cannot derive cluster dir from memory path".into())
+                        })?;
+                let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+                let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
+                let entry = entries
+                    .iter()
+                    .find(|e| e.name == args.name)
+                    .ok_or_else(|| {
+                        ToolError(format!("agent '{}' not found in registry", args.name))
+                    })?;
+                let gw = entry.gateway_url.as_deref().ok_or_else(|| {
+                    ToolError(format!("agent '{}' has no gateway URL", args.name))
+                })?;
+                let resp =
+                    crate::agents::query_agent(gw, &args.message, args.timeout_secs.unwrap_or(60))
+                        .await
+                        .map_err(|e| ToolError(e.to_string()))?;
+                Ok(serde_json::json!({ "agent": args.name, "response": resp }))
+            }
+        }
+        "agent_query_async" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                message: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let (_, gw) =
+                crate::agents::resolve_agent_gateway(Path::new(&config.memory.db_path), &args.name)
+                    .map_err(|e| ToolError(e.to_string()))?;
+            let parent_gw = crate::orchestration::support::resolve_gateway_url();
+            crate::agents::query_agent_async(&gw, ctx.sender_name(), &parent_gw, &args.message)
+                .await
+                .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "queued": true, "agent": args.name }))
+        }
+        "agent_task_send" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: Option<String>,
+                message: String,
+                task_id: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
                 .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
-            let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
-            let entries = reg.list().map_err(|e| ToolError(e.to_string()))?;
-            let entry = entries
-                .iter()
-                .find(|e| e.name == args.name)
-                .ok_or_else(|| ToolError(format!("agent '{}' not found in registry", args.name)))?;
-            let gw = entry
-                .gateway_url
-                .as_deref()
-                .ok_or_else(|| ToolError(format!("agent '{}' has no gateway URL", args.name)))?;
-            let resp =
-                crate::agents::query_agent(gw, &args.message, args.timeout_secs.unwrap_or(60))
-                    .await
+            let task_reg =
+                crate::agents::AgentTaskRegistry::new(cluster_dir.join("agent_tasks.json"));
+            let parent_gw = crate::orchestration::support::resolve_gateway_url();
+            let sender = ctx.sender_name();
+            let workspace_note = build_task_context_note(sender, &parent_gw);
+
+            let (task_id, target_agent, created) = if let Some(tid) = &args.task_id {
+                let task = task_reg
+                    .get(tid)
+                    .map_err(|e| ToolError(e.to_string()))?
+                    .ok_or_else(|| ToolError(format!("task '{}' not found", tid)))?;
+                task_reg
+                    .append_message(tid, sender, &args.message)
                     .map_err(|e| ToolError(e.to_string()))?;
-            Ok(serde_json::json!({ "agent": args.name, "response": resp }))
+                let _ = task_reg.scratchpad_append_kind(
+                    tid,
+                    sender,
+                    &format!("Steering update from {sender}: {}", args.message),
+                    Some("steering"),
+                );
+                (tid.clone(), task.agent, false)
+            } else {
+                let target_agent = args
+                    .name
+                    .clone()
+                    .ok_or_else(|| ToolError("name is required when creating a task".into()))?;
+                let task_id = task_reg
+                    .create(&target_agent, &args.message, sender)
+                    .map_err(|e| ToolError(e.to_string()))?
+                    .id;
+                (task_id, target_agent, true)
+            };
+            let (_, gw) = crate::agents::resolve_agent_gateway(
+                Path::new(&config.memory.db_path),
+                &target_agent,
+            )
+            .map_err(|e| ToolError(e.to_string()))?;
+
+            let callback = format!("{parent_gw}/v1/task_update?task_id={task_id}");
+            crate::agents::post_to_agent_inbound(&gw, &args.message, sender, Some(&callback))
+                .await
+                .map_err(|e| ToolError(e.to_string()))?;
+
+            let _ = task_reg.add_participant(&task_id, sender);
+            let task = task_reg
+                .get(&task_id)
+                .map_err(|e| ToolError(e.to_string()))?
+                .ok_or_else(|| ToolError(format!("task '{}' not found", task_id)))?;
+            if created || task.owner == sender {
+                sync_task_scratchpad_header(
+                    &task_reg,
+                    &task,
+                    sender,
+                    &workspace_note,
+                    created.then_some(args.message.as_str()),
+                );
+            }
+
+            Ok(serde_json::json!({ "task_id": task_id, "state": "submitted" }))
+        }
+        "agent_task_share" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                task_id: String,
+                message: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let task_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            let task = task_reg
+                .get(&args.task_id)
+                .map_err(|e| ToolError(e.to_string()))?
+                .ok_or_else(|| ToolError(format!("task '{}' not found", args.task_id)))?;
+            task_reg
+                .add_participant(&args.task_id, &args.name)
+                .map_err(|e| ToolError(e.to_string()))?;
+
+            let sender = ctx.sender_name();
+            let parent_gw = crate::orchestration::support::resolve_gateway_url();
+            let (_, gw) =
+                crate::agents::resolve_agent_gateway(Path::new(&config.memory.db_path), &args.name)
+                    .map_err(|e| ToolError(e.to_string()))?;
+            let join_msg = match args.message.as_deref().filter(|msg| !msg.trim().is_empty()) {
+                Some(msg) => format!(
+                    "Join shared task {} as a participant. Coordinate through the task scratchpad rather than direct peer messages.\n\nPrimary worker: {}\nOwner: {}\nCoordinator note: {}\n\nStart with agent_task(action=scratchpad_read, task_id=\"{}\").",
+                    args.task_id, task.agent, task.owner, msg, args.task_id
+                ),
+                None => format!(
+                    "Join shared task {} as a participant. Coordinate through the task scratchpad rather than direct peer messages.\n\nPrimary worker: {}\nOwner: {}\n\nStart with agent_task(action=scratchpad_read, task_id=\"{}\").",
+                    args.task_id, task.agent, task.owner, args.task_id
+                ),
+            };
+            let callback = format!("{parent_gw}/v1/task_update?task_id={}", args.task_id);
+            crate::agents::post_to_agent_inbound(&gw, &join_msg, sender, Some(&callback))
+                .await
+                .map_err(|e| ToolError(e.to_string()))?;
+            let share_note = match args.message.as_deref().filter(|msg| !msg.trim().is_empty()) {
+                Some(msg) => format!(
+                    "{sender} added {} as a task participant. Coordinator note: {msg}",
+                    args.name
+                ),
+                None => format!("{sender} added {} as a task participant.", args.name),
+            };
+            let _ =
+                task_reg.scratchpad_append_kind(&args.task_id, sender, &share_note, Some("share"));
+
+            let mut participants = task.participants;
+            if !participants
+                .iter()
+                .any(|participant| participant == &args.name)
+            {
+                participants.push(args.name.clone());
+            }
+            let refreshed_task = crate::agents::AgentTask {
+                participants: participants.clone(),
+                ..task
+            };
+            if refreshed_task.owner == sender {
+                sync_task_scratchpad_header(
+                    &task_reg,
+                    &refreshed_task,
+                    sender,
+                    &build_task_context_note(sender, &parent_gw),
+                    None,
+                );
+            }
+            Ok(serde_json::json!({
+                "task_id": args.task_id,
+                "shared_with": args.name,
+                "participants": participants,
+            }))
+        }
+        "agent_task_status" => {
+            #[derive(Deserialize)]
+            struct Args {
+                task_id: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let task_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            if let Some(tid) = &args.task_id {
+                let task = task_reg
+                    .get(tid)
+                    .map_err(|e| ToolError(e.to_string()))?
+                    .ok_or_else(|| ToolError(format!("task '{}' not found", tid)))?;
+                Ok(serde_json::json!({
+                    "id": task.id,
+                    "agent": task.agent,
+                    "owner": task.owner,
+                    "participants": task.participants,
+                    "state": task.state.to_string(),
+                    "created_at": task.created_at,
+                    "updated_at": task.updated_at,
+                    "scratchpad_revision": task.scratchpad_revision,
+                    "result": task.result,
+                    "scratchpad_header": task.scratchpad_header.iter().map(|e| serde_json::json!({
+                        "kind": e.kind, "from": e.from, "note": e.note, "timestamp": e.timestamp
+                    })).collect::<Vec<_>>(),
+                    "scratchpad_recent": task.scratchpad.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().map(|e| serde_json::json!({
+                        "kind": e.kind, "from": e.from, "note": e.note, "timestamp": e.timestamp
+                    })).collect::<Vec<_>>(),
+                    "messages": task.messages.iter().map(|m| serde_json::json!({
+                        "from": m.from, "text": m.text, "timestamp": m.timestamp
+                    })).collect::<Vec<_>>(),
+                }))
+            } else {
+                let tasks = task_reg
+                    .list_active()
+                    .map_err(|e| ToolError(e.to_string()))?;
+                let summary: Vec<_> = tasks
+                    .iter()
+                    .map(|t| {
+                        let last = t
+                            .messages
+                            .last()
+                            .map(|m| m.text.chars().take(100).collect::<String>());
+                        serde_json::json!({
+                            "id": t.id,
+                            "agent": t.agent,
+                            "owner": t.owner,
+                            "participants": t.participants,
+                            "state": t.state.to_string(),
+                            "scratchpad_revision": t.scratchpad_revision,
+                            "updated_at": t.updated_at,
+                            "last_message": last,
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::json!({ "tasks": summary }))
+            }
+        }
+        "scratchpad_read" => {
+            #[derive(Deserialize)]
+            struct Args {
+                task_id: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+
+            // Try local registry first.
+            let local =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .and_then(|reg| reg.get(&args.task_id).ok().flatten());
+
+            if let Some(task) = local {
+                let header: Vec<_> = task
+                    .scratchpad_header
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "kind": e.kind,
+                            "from": e.from,
+                            "note": e.note,
+                            "at": e.timestamp
+                        })
+                    })
+                    .collect();
+                let entries: Vec<_> = task
+                    .scratchpad
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "kind": e.kind,
+                            "from": e.from,
+                            "note": e.note,
+                            "at": e.timestamp
+                        })
+                    })
+                    .collect();
+                Ok(serde_json::json!({
+                    "task_id": args.task_id,
+                    "revision": task.scratchpad_revision,
+                    "header": header,
+                    "entries": entries,
+                    "cache_hint": "Treat header as the stable shared contract and entries as the live coordination/activity tail."
+                }))
+            } else if let Ok(parent_gw) = std::env::var("THAT_PARENT_GATEWAY_URL") {
+                // HTTP fallback to parent gateway.
+                let url = format!("{parent_gw}/v1/scratchpad?task_id={}", args.task_id);
+                let client = reqwest::Client::new();
+                let mut req = client.get(&url).timeout(Duration::from_secs(5));
+                if let Ok(token) = std::env::var("THAT_PARENT_GATEWAY_TOKEN") {
+                    req = req.bearer_auth(token);
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        let body: serde_json::Value =
+                            resp.json().await.unwrap_or(serde_json::json!({}));
+                        Ok(body)
+                    }
+                    _ => Ok(serde_json::json!({
+                        "task_id": args.task_id,
+                        "header": [],
+                        "entries": [],
+                        "note": "scratchpad unavailable — check task message for context"
+                    })),
+                }
+            } else {
+                Err(ToolError(format!("task '{}' not found", args.task_id)))
+            }
+        }
+        "scratchpad_write" => {
+            #[derive(Deserialize)]
+            struct Args {
+                task_id: String,
+                note: String,
+                section: Option<String>,
+                kind: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let sender = ctx.sender_name();
+            let section = args.section.as_deref().unwrap_or("activity");
+            if section == "header"
+                && args
+                    .kind
+                    .as_deref()
+                    .map(|kind| kind.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                return Err(ToolError(
+                    "kind is required when writing to the scratchpad header".into(),
+                ));
+            }
+
+            // Try local registry first.
+            let local_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path));
+            let local_ok = local_reg
+                .as_ref()
+                .map(|r| match section {
+                    "header" => r
+                        .scratchpad_set_header(
+                            &args.task_id,
+                            sender,
+                            args.kind.as_deref().unwrap_or_default(),
+                            &args.note,
+                        )
+                        .is_ok(),
+                    _ => r
+                        .scratchpad_append_kind(
+                            &args.task_id,
+                            sender,
+                            &args.note,
+                            args.kind.as_deref(),
+                        )
+                        .is_ok(),
+                })
+                .unwrap_or(false);
+
+            if local_ok {
+                Ok(serde_json::json!({ "ok": true, "section": section }))
+            } else if let Ok(parent_gw) = std::env::var("THAT_PARENT_GATEWAY_URL") {
+                // HTTP fallback to parent gateway.
+                let url = format!("{parent_gw}/v1/scratchpad?task_id={}", args.task_id);
+                let client = reqwest::Client::new();
+                let mut req =
+                    client
+                        .post(&url)
+                        .timeout(Duration::from_secs(5))
+                        .json(&serde_json::json!({
+                            "note": args.note,
+                            "from": sender,
+                            "section": section,
+                            "kind": args.kind,
+                        }));
+                if let Ok(token) = std::env::var("THAT_PARENT_GATEWAY_TOKEN") {
+                    req = req.bearer_auth(token);
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        Ok(serde_json::json!({ "ok": true, "section": section }))
+                    }
+                    _ => Ok(serde_json::json!({
+                        "ok": false,
+                        "note": "scratchpad unavailable — check task message for context"
+                    })),
+                }
+            } else {
+                Err(ToolError(format!(
+                    "task '{}' not found and no parent gateway configured",
+                    args.task_id
+                )))
+            }
+        }
+        "agent_task_cancel" => {
+            #[derive(Deserialize)]
+            struct Args {
+                task_id: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let task_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            let task = task_reg
+                .get(&args.task_id)
+                .map_err(|e| ToolError(e.to_string()))?
+                .ok_or_else(|| ToolError(format!("task '{}' not found", args.task_id)))?;
+            task_reg
+                .update_state(
+                    &args.task_id,
+                    crate::agents::AgentTaskState::Canceled,
+                    None,
+                    None,
+                )
+                .map_err(|e| ToolError(e.to_string()))?;
+            // Best-effort cancellation message to sub-agent.
+            if let Ok((_, gw)) =
+                crate::agents::resolve_agent_gateway(Path::new(&config.memory.db_path), &task.agent)
+            {
+                let _ = crate::agents::post_to_agent_inbound(
+                    &gw,
+                    "TASK CANCELED: Wind down your current work and stop.",
+                    ctx.sender_name(),
+                    None,
+                )
+                .await;
+            }
+            Ok(serde_json::json!({ "task_id": args.task_id, "state": "canceled" }))
+        }
+        "agent_task_resume" => {
+            #[derive(Deserialize)]
+            struct Args {
+                task_id: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            let task_reg =
+                crate::agents::AgentTaskRegistry::from_db_path(Path::new(&config.memory.db_path))
+                    .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
+            let task = task_reg
+                .get(&args.task_id)
+                .map_err(|e| ToolError(e.to_string()))?
+                .ok_or_else(|| ToolError(format!("task '{}' not found", args.task_id)))?;
+            task_reg
+                .update_state(
+                    &args.task_id,
+                    crate::agents::AgentTaskState::Submitted,
+                    None,
+                    None,
+                )
+                .map_err(|e| ToolError(e.to_string()))?;
+            let original_msg = task
+                .messages
+                .first()
+                .map(|m| m.text.clone())
+                .unwrap_or_default();
+            let (_, gw) = crate::agents::resolve_agent_gateway(
+                Path::new(&config.memory.db_path),
+                &task.agent,
+            )
+            .map_err(|e| ToolError(e.to_string()))?;
+            let parent_gw = crate::orchestration::support::resolve_gateway_url();
+            let callback = format!("{parent_gw}/v1/task_update?task_id={}", args.task_id);
+            let resume_msg =
+                format!("Resume the following task from where you left off:\n\n{original_msg}");
+            crate::agents::post_to_agent_inbound(
+                &gw,
+                &resume_msg,
+                ctx.sender_name(),
+                Some(&callback),
+            )
+            .await
+            .map_err(|e| ToolError(e.to_string()))?;
+            Ok(serde_json::json!({ "task_id": args.task_id, "state": "submitted" }))
+        }
+        "agent_unregister" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            if crate::agents::is_k8s_mode() {
+                crate::agents::unregister_agent_k8s(&args.name)
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))
+            } else {
+                let cluster_dir =
+                    crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                        .ok_or_else(|| {
+                            ToolError("Cannot derive cluster dir from memory path".into())
+                        })?;
+                let reg = crate::agents::AgentRegistry::new(cluster_dir.join("agents.json"));
+                reg.unregister(&args.name)
+                    .map_err(|e| ToolError(e.to_string()))?;
+                Ok(serde_json::json!({ "name": args.name, "status": "unregistered" }))
+            }
+        }
+        "agent_stop" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::agent_stop_k8s(&args.name)
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+        }
+        "agent_status" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::agent_status_k8s(&args.name)
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+        }
+        "agent_logs" => {
+            #[derive(Deserialize)]
+            struct Args {
+                name: String,
+                tail: Option<u32>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::agent_logs_k8s(&args.name, args.tail.unwrap_or(50))
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+        }
+        "workspace_share" => {
+            #[derive(Deserialize)]
+            struct Args {
+                path: String,
+                name: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::workspace_share(&args.path, args.name.as_deref())
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+        }
+        "workspace_collect" => {
+            #[derive(Deserialize)]
+            struct Args {
+                path: String,
+                worker: Option<String>,
+                branch: Option<String>,
+                task_id: Option<String>,
+                strategy: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::workspace_collect(
+                &args.path,
+                args.worker.as_deref(),
+                args.branch.as_deref(),
+                args.task_id.as_deref(),
+                args.strategy.as_deref().unwrap_or("merge"),
+            )
+            .await
+            .map_err(|e| ToolError(e.to_string()))
+        }
+        "workspace_activity" => {
+            #[derive(Deserialize)]
+            struct Args {
+                repo: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json).unwrap_or(Args { repo: None });
+            crate::agents::workspace_activity(args.repo.as_deref())
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+        }
+        "workspace_diff" => {
+            #[derive(Deserialize)]
+            struct Args {
+                worker: Option<String>,
+                branch: Option<String>,
+                task_id: Option<String>,
+                repo: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::workspace_branch_diff(
+                args.worker.as_deref(),
+                args.branch.as_deref(),
+                args.task_id.as_deref(),
+                args.repo.as_deref(),
+            )
+            .await
+            .map_err(|e| ToolError(e.to_string()))
+        }
+        "workspace_conflicts" => {
+            #[derive(Deserialize)]
+            struct Args {
+                worker: Option<String>,
+                branch: Option<String>,
+                task_id: Option<String>,
+                repo: Option<String>,
+            }
+            let args: Args = serde_json::from_str(args_json)
+                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::agents::workspace_conflicts(
+                args.worker.as_deref(),
+                args.branch.as_deref(),
+                args.task_id.as_deref(),
+                args.repo.as_deref(),
+            )
+            .await
+            .map_err(|e| ToolError(e.to_string()))
         }
         other => Err(ToolError(format!("unknown tool: {other}"))),
     }
@@ -2432,6 +3605,8 @@ mod tests {
             router: None,
             route_registry: None,
             state_dir: None,
+            agent_name: String::new(),
+            disable_memory: false,
         }
     }
 

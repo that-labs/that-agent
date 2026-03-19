@@ -1,7 +1,25 @@
+use std::sync::Mutex;
+
 use crate::config::AgentDef;
 
 /// Maximum number of automatic retries on transient network / server errors.
 pub const MAX_NETWORK_RETRIES: u32 = 5;
+
+// ── Agent Status cache (Status.md) ───────────────────────────────────────────
+
+static AGENT_STATUS_CACHE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Set the cached Status.md content (called at session start and on identity_update).
+pub fn set_agent_status(content: Option<String>) {
+    if let Ok(mut cache) = AGENT_STATUS_CACHE.lock() {
+        *cache = content;
+    }
+}
+
+/// Get the cached Status.md content for injection into system reminders.
+pub fn get_agent_status() -> Option<String> {
+    AGENT_STATUS_CACHE.lock().ok().and_then(|c| c.clone())
+}
 
 /// Initial backoff delay in ms; doubles each attempt (0.5 s -> 1 -> 2 -> 4 -> 8 s).
 pub const RETRY_BASE_DELAY_MS: u64 = 500;
@@ -58,6 +76,13 @@ pub fn parse_env_bool(name: &str) -> Option<bool> {
     })
 }
 
+pub fn parse_env_u8(name: &str, default: u8) -> u8 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
 pub fn parse_env_nonempty(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -95,10 +120,8 @@ pub fn should_use_channel_empty_response_fallback(
     // Mid-task notifications are not a substitute for the run's final user-facing
     // answer. Only suppress the fallback when a terminal channel delivery tool
     // already succeeded and produced its own outbound message, or when the agent
-    // deliberately sent its final answer via channel_notify as its last action.
-    !has_successful_terminal_channel_output(tool_events)
-        && !last_tool_was_answer(tool_events)
-        && !last_tool_was_channel_notify(tool_events)
+    // deliberately sent its final answer via the dedicated answer tool.
+    !has_successful_terminal_channel_output(tool_events) && !last_tool_was_answer(tool_events)
 }
 
 pub fn summarize_tool_result_for_empty_response(
@@ -173,13 +196,6 @@ pub fn last_tool_was_answer(tool_events: &[that_channels::ToolLogEvent]) -> bool
     last_tool_result_name(tool_events) == Some(("answer", false))
 }
 
-/// Returns true when the last tool result in the event log is a successful
-/// `channel_notify`. This signals the agent deliberately sent its final
-/// answer via the notification tool, so no fallback response is needed.
-pub fn last_tool_was_channel_notify(tool_events: &[that_channels::ToolLogEvent]) -> bool {
-    last_tool_result_name(tool_events) == Some(("channel_notify", false))
-}
-
 fn last_tool_result_name(tool_events: &[that_channels::ToolLogEvent]) -> Option<(&str, bool)> {
     tool_events.iter().rev().find_map(|ev| {
         if let that_channels::ToolLogEvent::Result { name, is_error, .. } = ev {
@@ -220,8 +236,8 @@ pub fn should_retry_empty_channel_response(
     if !text.trim().is_empty() {
         return false;
     }
-    // If the agent deliberately sent its final answer via answer or channel_notify, skip retry.
-    if last_tool_was_answer(tool_events) || last_tool_was_channel_notify(tool_events) {
+    // If the agent deliberately sent its final answer via answer, skip retry.
+    if last_tool_was_answer(tool_events) {
         return false;
     }
     // Avoid re-running after side-effecting tool calls — but memory tools are
@@ -354,6 +370,25 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
                         lines.push(format!("image_build_backend: {selected}"));
                     }
                     append_rbac_runtime_lines(&mut lines, Some(&k8s.namespace));
+                    lines.push("multi_agent_enabled: true".to_string());
+                    if let Some(img) = std::env::var("THAT_AGENT_IMAGE")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                    {
+                        lines.push(format!("agent_image: {img}"));
+                    }
+                    if let Some(cpu) = std::env::var("THAT_AGENT_CHILD_CPU_LIMIT")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                    {
+                        lines.push(format!("child_cpu_limit: {cpu}"));
+                    }
+                    if let Some(mem) = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                    {
+                        lines.push(format!("child_memory_limit: {mem}"));
+                    }
                 }
                 that_sandbox::backend::SandboxMode::Docker => {
                     lines.push("runtime_backend: local_trusted".to_string());
@@ -406,6 +441,32 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
                 lines.push(format!("image_build_backend: {selected}"));
             }
             append_rbac_runtime_lines(&mut lines, Some(&k8s.namespace));
+            lines.push("multi_agent_enabled: true".to_string());
+            lines.push(
+                "multi_agent_hint: Use agent_run(name, task) to delegate work to \
+                 ephemeral K8s Jobs. Use spawn_agent(name, role) for persistent agents. \
+                 Use workspace_admin(action=share, path) before agent_run with workspace=true for coding tasks. \
+                 Do NOT use shell_exec to manually run agents or push to git servers."
+                    .to_string(),
+            );
+            if let Some(img) = std::env::var("THAT_AGENT_IMAGE")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+            {
+                lines.push(format!("agent_image: {img}"));
+            }
+            if let Some(cpu) = std::env::var("THAT_AGENT_CHILD_CPU_LIMIT")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+            {
+                lines.push(format!("child_cpu_limit: {cpu}"));
+            }
+            if let Some(mem) = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+            {
+                lines.push(format!("child_memory_limit: {mem}"));
+            }
         }
     }
 
@@ -431,6 +492,9 @@ pub fn append_system_reminder(
         "skill_naming_determinism: When creating skills without a user-provided name, use deterministic kebab-case from capability phrase; for JSON formatting skills use `json-formatter`.".to_string(),
     ];
     reminder.extend(runtime_reminder_lines(sandbox, agent_name));
+    if let Some(status) = get_agent_status() {
+        reminder.push(format!("agent_status:\n{status}"));
+    }
     format!(
         "{task}\n\n<system-reminder>\n{}\n</system-reminder>",
         reminder.join("\n")
@@ -562,8 +626,7 @@ mod tests {
     use that_channels::ToolLogEvent;
 
     #[test]
-    fn empty_response_after_final_channel_notify_skips_fallback() {
-        // channel_notify as the last tool call = agent's deliberate final answer.
+    fn empty_response_after_channel_notify_uses_fallback() {
         let tool_events = vec![
             ToolLogEvent::Call {
                 name: "channel_notify".into(),
@@ -576,7 +639,7 @@ mod tests {
             },
         ];
 
-        assert!(!should_use_channel_empty_response_fallback(
+        assert!(should_use_channel_empty_response_fallback(
             "",
             false,
             &tool_events
@@ -713,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_skipped_when_last_tool_was_channel_notify() {
+    fn retry_still_skipped_after_channel_notify_side_effect() {
         let tool_events = vec![
             ToolLogEvent::Call {
                 name: "channel_notify".into(),

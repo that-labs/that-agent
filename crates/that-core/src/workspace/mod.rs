@@ -23,6 +23,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 // ── Internal path helpers ─────────────────────────────────────────────────────
@@ -124,6 +125,77 @@ pub struct WorkspaceFiles {
     /// The agent deletes this file after completing the ritual.
     /// Its absence signals the agent has moved from script to authentic presence.
     pub bootstrap: Option<String>,
+    /// `Status.md` — agent-writable live awareness context.
+    ///
+    /// Injected into the system reminder every turn. The agent maintains this file
+    /// to track active deployments, capabilities, and runtime state. Capped at 8000
+    /// chars (~2k tokens) on read. Updated via `identity_update(file="Status.md", ...)`.
+    pub status: Option<String>,
+    /// `Context.md` — domain context provided by the parent at spawn time.
+    ///
+    /// Written via `GoldBootstrap` before the agent loop starts. Contains links,
+    /// citations, background research, and any other material the parent gathered
+    /// so the sub-agent can work without broad search access.
+    pub context: Option<String>,
+}
+
+// ── GoldBootstrap ─────────────────────────────────────────────────────────────
+
+/// A structured payload the parent passes when spawning a sub-agent to
+/// initialize its identity and supply domain context for the task.
+///
+/// Serialized as JSON in `THAT_GOLD_BOOTSTRAP` and applied at boot time —
+/// before `load_workspace_files` — so the agent starts with a full identity
+/// and relevant research already in its preamble.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GoldBootstrap {
+    /// Content for `Identity.md` — name, vibe, emoji.
+    pub identity: Option<String>,
+    /// Content for `Soul.md` — character, values, philosophy.
+    pub soul: Option<String>,
+    /// Content for `Agents.md` — tool discipline, operating instructions.
+    pub agents: Option<String>,
+    /// Domain context: links, citations, background research from the parent.
+    /// Stored as `Context.md` and injected into the preamble.
+    pub context: Option<String>,
+}
+
+impl GoldBootstrap {
+    /// Read and deserialize from `THAT_GOLD_BOOTSTRAP` env var.
+    pub fn from_env() -> Option<Self> {
+        let raw = std::env::var("THAT_GOLD_BOOTSTRAP").ok()?;
+        match serde_json::from_str(&raw) {
+            Ok(bs) => Some(bs),
+            Err(e) => {
+                warn!(error = %e, "Failed to parse THAT_GOLD_BOOTSTRAP");
+                None
+            }
+        }
+    }
+
+    /// Write all present fields to the agent's local workspace directory.
+    /// Only overwrites files that are `Some`. Called before workspace load.
+    pub fn apply_local(&self, agent_name: &str) {
+        let Some(dir) = agent_dir_local(agent_name) else {
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            warn!(error = %e, "GoldBootstrap: failed to create agent dir");
+            return;
+        }
+        for (filename, content) in [
+            ("Identity.md", &self.identity),
+            ("Soul.md", &self.soul),
+            ("Agents.md", &self.agents),
+            ("Context.md", &self.context),
+        ] {
+            if let Some(text) = content {
+                if let Err(e) = std::fs::write(dir.join(filename), text.as_bytes()) {
+                    warn!(file = filename, error = %e, "GoldBootstrap: failed to write file");
+                }
+            }
+        }
+    }
 }
 
 impl WorkspaceFiles {
@@ -155,15 +227,17 @@ pub fn load_all_local(agent_name: &str) -> WorkspaceFiles {
         if let Some(name) = entry.file_name().to_str() {
             match name {
                 "Soul.md" | "Identity.md" | "Agents.md" | "User.md" | "Tools.md" | "Memory.md"
-                | "Boot.md" | "Bootstrap.md" => match std::fs::read_to_string(entry.path()) {
-                    Ok(c) => {
-                        files.insert(name.to_string(), c);
+                | "Boot.md" | "Bootstrap.md" | "Status.md" | "Context.md" => {
+                    match std::fs::read_to_string(entry.path()) {
+                        Ok(c) => {
+                            files.insert(name.to_string(), c);
+                        }
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                            warn!(path = %entry.path().display(), error = %e, "Failed to read workspace file");
+                        }
+                        _ => {}
                     }
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                        warn!(path = %entry.path().display(), error = %e, "Failed to read workspace file");
-                    }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -177,6 +251,8 @@ pub fn load_all_local(agent_name: &str) -> WorkspaceFiles {
         memory: files.remove("Memory.md"),
         boot: files.remove("Boot.md"),
         bootstrap: files.remove("Bootstrap.md"),
+        status: files.remove("Status.md").map(cap_status),
+        context: files.remove("Context.md"),
     }
 }
 
@@ -191,6 +267,18 @@ pub fn load_all_sandbox(container: &str, agent_name: &str) -> WorkspaceFiles {
         memory: read_sandbox(container, agent_name, "Memory.md"),
         boot: read_sandbox(container, agent_name, "Boot.md"),
         bootstrap: read_sandbox(container, agent_name, "Bootstrap.md"),
+        status: read_sandbox(container, agent_name, "Status.md").map(cap_status),
+        context: read_sandbox(container, agent_name, "Context.md"),
+    }
+}
+
+/// Cap Status.md content at ~2k tokens (8000 chars).
+fn cap_status(s: String) -> String {
+    const MAX_STATUS_CHARS: usize = 8000;
+    if s.len() <= MAX_STATUS_CHARS {
+        s
+    } else {
+        s.chars().take(MAX_STATUS_CHARS).collect::<String>() + "\n[truncated]"
     }
 }
 
@@ -269,6 +357,8 @@ const WRITABLE_WORKSPACE_FILES: &[&str] = &[
     "Heartbeat.md",
     "Boot.md",
     "Tasks.md",
+    "Status.md",
+    "Bootstrap.md",
 ];
 
 /// Resolve a short name like "agents" to its filename "Agents.md".

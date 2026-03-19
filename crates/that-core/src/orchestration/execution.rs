@@ -24,13 +24,13 @@ const FINALIZATION_SNIPPET_CHARS: usize = 160;
 
 /// Resolve the provider API key from environment variables.
 ///
-/// For Anthropic, checks `CLAUDE_CODE_OAUTH_TOKEN` first (OAuth flow),
-/// then falls back to `ANTHROPIC_API_KEY`.
+/// For Anthropic, checks Claude Code OAuth aliases first, then falls back to
+/// `ANTHROPIC_API_KEY` (console pay-per-use).
 pub fn api_key_for_provider(provider: &str) -> Result<String> {
     match provider {
-        "anthropic" => std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
-            .context("Set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY"),
+        "anthropic" => crate::auth::anthropic_api_key_from_env().context(
+            "Set CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_AUTH_TOKEN, CLAUDE_CODE_AUTH, or ANTHROPIC_API_KEY",
+        ),
         "openai" => std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set"),
         "openrouter" => std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set"),
         other => {
@@ -230,6 +230,8 @@ pub async fn execute_agent_run_streaming(
                 route_registry: None,
                 router: None,
                 state_dir: agent_state_dir(agent),
+                agent_name: agent.name.clone(),
+                disable_memory: false,
             },
             images: vec![],
             steering: None,
@@ -243,7 +245,8 @@ pub async fn execute_agent_run_streaming(
 
         match result {
             Ok((text, usage)) => {
-                let usage = checkpoint_usage.add(&usage);
+                // Log cache usage from the last run only (not cumulative) — cumulative
+                // totals produce meaningless hit-rate percentages.
                 log_prompt_cache_usage(
                     &agent.provider,
                     &agent.model,
@@ -251,6 +254,7 @@ pub async fn execute_agent_run_streaming(
                     usage.cache_read_tokens as u64,
                     usage.cache_write_tokens as u64,
                 );
+                let _usage = checkpoint_usage.add(&usage);
                 tracing::Span::current().record("gen_ai.completion", text.as_str());
                 tracing::Span::current().record("output.value", text.as_str());
                 tracing::Span::current().record("otel.status_code", "ok");
@@ -350,7 +354,11 @@ pub async fn execute_agent_run_eval(
             system: preamble.to_string(),
             max_tokens: agent.max_tokens as u32,
             max_turns: agent.max_turns as u32,
-            tools: all_tool_defs(&container),
+            tools: {
+                let mut defs = all_tool_defs(&container);
+                defs.retain(|t| !t.name.starts_with("mem_"));
+                defs
+            },
             history: history.clone().unwrap_or_default(),
             prompt_caching: matches!(agent.provider.as_str(), "anthropic" | "openrouter"),
             openai_websocket: openai_websocket_enabled(),
@@ -364,6 +372,8 @@ pub async fn execute_agent_run_eval(
                 route_registry: None,
                 router: None,
                 state_dir: agent_state_dir(agent),
+                agent_name: agent.name.clone(),
+                disable_memory: true,
             },
             images: vec![],
             steering: None,
@@ -377,7 +387,6 @@ pub async fn execute_agent_run_eval(
 
         match result {
             Ok((text, usage)) => {
-                let usage = checkpoint_usage.add(&usage);
                 let mut events = checkpoint_events;
                 events.extend(hook.take_events());
                 log_prompt_cache_usage(
@@ -387,6 +396,7 @@ pub async fn execute_agent_run_eval(
                     usage.cache_read_tokens as u64,
                     usage.cache_write_tokens as u64,
                 );
+                let _usage = checkpoint_usage.add(&usage);
                 tracing::Span::current().record("gen_ai.completion", text.as_str());
                 tracing::Span::current().record("output.value", text.as_str());
                 tracing::Span::current().record("otel.status_code", "ok");
@@ -594,7 +604,7 @@ pub async fn execute_agent_run_channel(
          - `POST {gateway_url}/v1/notify` — zero-cost queue (returns 202). No LLM turn, batched into next heartbeat.\n\
          - `GET {gateway_url}/v1/schema` — introspection endpoint for bridge plugins at startup.\n\
          Use `channel_register` to hot-register a bridge and `channel_list` to see active bridges.\n\
-         Use `provider_register` to add an OpenAI-compatible inference provider at runtime. \
+         Use `provider_admin(action=register, ...)` to add an OpenAI-compatible inference provider at runtime. \
          Once its API key env var is configured, it will show up in `/models`.\n\
          When building or deploying a bridge plugin, give it this gateway URL and configure it to use `/v1/inbound` (not `/v1/chat`).",
         ids = router.channel_ids().await,
@@ -744,6 +754,8 @@ pub async fn execute_agent_run_channel(
                 route_registry: route_registry.clone(),
                 router: Some(std::sync::Arc::clone(&router)),
                 state_dir: agent_state_dir(agent),
+                agent_name: agent.name.clone(),
+                disable_memory: false,
             },
             images: images.clone(),
             steering: steering.clone(),
@@ -768,7 +780,6 @@ pub async fn execute_agent_run_channel(
 
         match result {
             Ok((text, usage)) => {
-                let usage = checkpoint_usage.add(&usage);
                 if !checkpoint_tool_events.is_empty() {
                     let mut merged = std::mem::take(&mut checkpoint_tool_events);
                     merged.extend(tool_events);
@@ -840,10 +851,7 @@ pub async fn execute_agent_run_channel(
                 tracing::Span::current().record("otel.status_code", "ok");
                 tracing::Span::current().record("otel.status_description", "agent run completed");
                 crate::observability::flush_tracing();
-                if !suppress_output
-                    && !last_tool_was_answer(&tool_events)
-                    && !last_tool_was_channel_notify(&tool_events)
-                {
+                if !suppress_output && !last_tool_was_answer(&tool_events) {
                     let event = that_channels::ChannelEvent::Done {
                         text: text.clone(),
                         input_tokens: usage.input_tokens as u64,
@@ -895,7 +903,8 @@ pub async fn execute_agent_run_channel(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_channel_finalization_prompt, channel_config_env_lines, resolved_agent_config_path,
+        build_channel_finalization_prompt, channel_config_env_lines, is_retryable_error,
+        resolved_agent_config_path,
     };
 
     #[test]
@@ -940,5 +949,53 @@ mod tests {
     fn sandbox_agent_config_path_prefers_config_toml_layout() {
         let path = resolved_agent_config_path("demo", true);
         assert_eq!(path, "/home/agent/.that-agent/agents/demo/config.toml");
+    }
+
+    #[test]
+    fn retryable_error_matches_server_errors() {
+        let err = anyhow::anyhow!("Anthropic API error 500 Internal Server Error");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_matches_timeout() {
+        let err = anyhow::anyhow!("operation timed out after 90s");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_matches_rate_limit() {
+        let err = anyhow::anyhow!("HTTP 429 rate limit exceeded");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_matches_connection_reset() {
+        let err = anyhow::anyhow!("connection reset by peer");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_matches_overloaded() {
+        let err = anyhow::anyhow!("API is overloaded, please retry");
+        assert!(is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_rejects_auth_errors() {
+        let err = anyhow::anyhow!("401 Unauthorized: invalid API key");
+        assert!(!is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_rejects_bad_request() {
+        let err = anyhow::anyhow!("400 Bad Request: invalid message format");
+        assert!(!is_retryable_error(&err));
+    }
+
+    #[test]
+    fn retryable_error_rejects_permission_denied() {
+        let err = anyhow::anyhow!("403 Forbidden: model not available for your plan");
+        assert!(!is_retryable_error(&err));
     }
 }

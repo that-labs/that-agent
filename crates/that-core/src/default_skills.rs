@@ -71,12 +71,12 @@ const DEFAULT_SKILLS: &[DefaultSkill] = &[
         content: include_str!("../skills/that-plugins/SKILL.md"),
     },
     DefaultSkill {
-        name: "agent-worktree",
-        content: include_str!("../skills/agent-worktree/SKILL.md"),
-    },
-    DefaultSkill {
         name: "agent-orchestrator",
         content: include_str!("../skills/agent-orchestrator/SKILL.md"),
+    },
+    DefaultSkill {
+        name: "git-workspace",
+        content: include_str!("../skills/git-workspace/SKILL.md"),
     },
 ];
 

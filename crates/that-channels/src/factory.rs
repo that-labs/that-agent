@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -8,6 +9,19 @@ use crate::adapters::{DynamicRouteRegistry, HttpAdapter, TelegramAdapter};
 use crate::channel::{ChannelRef, InboundMessage};
 use crate::config::{AdapterConfig, AdapterType, ChannelConfig};
 use crate::router::ChannelRouter;
+
+/// Resolve the cluster directory from environment or default location.
+fn default_cluster_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("THAT_CLUSTER_DIR") {
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".that-agent").join("cluster"))
+        .filter(|p| p.is_dir())
+}
 
 type FactoryFn = Arc<dyn Fn(&AdapterConfig, &str) -> Result<ChannelRef> + Send + Sync + 'static>;
 
@@ -137,6 +151,12 @@ impl ChannelFactoryRegistry {
                 let adapter = HttpAdapter::new("gateway", &bind_addr, None, 300);
                 let adapter = if let Some(reg) = route_registry {
                     adapter.with_route_registry(reg)
+                } else {
+                    adapter
+                };
+                // Derive cluster_dir for scratchpad endpoints.
+                let adapter = if let Some(dir) = default_cluster_dir() {
+                    adapter.with_cluster_dir(dir)
                 } else {
                     adapter
                 };

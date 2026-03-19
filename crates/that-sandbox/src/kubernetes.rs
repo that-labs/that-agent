@@ -135,7 +135,7 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn sanitize_k8s_name(input: &str) -> String {
+pub fn sanitize_k8s_name(input: &str) -> String {
     let mut out = String::new();
     for ch in input.chars() {
         if ch.is_ascii_alphanumeric() {
