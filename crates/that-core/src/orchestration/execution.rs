@@ -547,7 +547,11 @@ pub async fn execute_agent_run_channel(
     skill_roots: Vec<std::path::PathBuf>,
     steering: Option<SteeringQueue>,
     effective_config_path: Option<String>,
-) -> Result<(String, Vec<that_channels::ToolLogEvent>, crate::agent_loop::Usage)> {
+) -> Result<(
+    String,
+    Vec<that_channels::ToolLogEvent>,
+    crate::agent_loop::Usage,
+)> {
     if let Some(sid) = session_id_for_trace {
         tracing::Span::current().record("session.id", sid);
     }
