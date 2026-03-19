@@ -334,6 +334,13 @@ pub fn build_preamble(
          no longer relevant. This is your live operational context — not a log.\n\n",
     );
 
+    // ── 2.6 Self-Evaluation — thin pointer (not a nudge) ───────────────────────
+
+    preamble.push_str(
+        "### Self-Evaluation\n\n\
+         An eval harness is available via `read_skill self-eval`. Use only when explicitly asked.\n\n",
+    );
+
     // ── 3. Tools Available — compiled (runtime-volatile fs/exec notes) ────────
 
     preamble.push_str(

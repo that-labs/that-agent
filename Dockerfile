@@ -89,6 +89,11 @@ ENV GOPATH=/home/agent/go \
     SHELL=/bin/bash \
     PIP_BREAK_SYSTEM_PACKAGES=1
 
+# Rust toolchain — installed as agent user so cargo is in ~/.cargo/bin
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal \
+    && /home/agent/.cargo/bin/rustup component add clippy rustfmt
+
 WORKDIR /workspace
 
 # Unrestricted policy via env vars — can't be shadowed by workspace mount
