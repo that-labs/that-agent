@@ -1277,7 +1277,9 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             name: "agent_run".into(),
             description: "Run an ephemeral task agent. Blocks until the task completes and returns \
                 the result. Call multiple agent_run in parallel for fan-out work. In K8s mode runs \
-                as a Job; locally runs as a foreground process.".into(),
+                as a Job; locally runs as a foreground process. \
+                Pass bootstrap to warm-start the agent with a task-specific identity and domain \
+                context (links, citations, background research) so it can work without broad search access.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1286,7 +1288,17 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "task": { "type": "string", "description": "The task for the worker to execute" },
                     "model": { "type": "string", "description": "Optional model override. Use full IDs: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5, gpt-5.2-codex. Shorthands like sonnet-4-6 or opus are auto-normalized." },
                     "workspace": { "type": "boolean", "description": "If true, share the current git workspace with the worker (default: false)" },
-                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 1800 = 30 min). Complex coding tasks may need longer." }
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 1800 = 30 min). Complex coding tasks may need longer." },
+                    "bootstrap": {
+                        "type": "object",
+                        "description": "Gold bootstrap: warm-starts the agent with task-specific identity and domain context. Written to the agent's workspace before the loop starts so the agent sees it in its preamble from turn 1.",
+                        "properties": {
+                            "identity": { "type": "string", "description": "Identity.md content — agent name, vibe, emoji" },
+                            "soul": { "type": "string", "description": "Soul.md content — character, values, philosophy" },
+                            "agents": { "type": "string", "description": "Agents.md content — operating instructions, tool discipline" },
+                            "context": { "type": "string", "description": "Domain context for the task: links to scrape, citations, background research gathered by the parent" }
+                        }
+                    }
                 },
                 "required": ["name", "task"]
             }),
@@ -2629,6 +2641,7 @@ async fn dispatch_inner(
                 model: Option<String>,
                 workspace: Option<bool>,
                 timeout_secs: Option<u64>,
+                bootstrap: Option<crate::workspace::GoldBootstrap>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
@@ -2643,6 +2656,7 @@ async fn dispatch_inner(
                     args.model.as_deref(),
                     args.workspace.unwrap_or(false),
                     args.timeout_secs.unwrap_or(1800),
+                    args.bootstrap.as_ref(),
                 )
                 .await
                 .map_err(|e| ToolError(e.to_string()))
@@ -2676,6 +2690,11 @@ async fn dispatch_inner(
                 }
                 cmd.env("THAT_AGENT_PARENT", &parent);
                 cmd.env("THAT_AGENT_DEPTH", (depth + 1).to_string());
+                if let Some(bs) = &args.bootstrap {
+                    if let Ok(json) = serde_json::to_string(bs) {
+                        cmd.env("THAT_GOLD_BOOTSTRAP", json);
+                    }
+                }
                 let start = std::time::Instant::now();
                 let output = tokio::time::timeout(Duration::from_secs(timeout), cmd.output())
                     .await

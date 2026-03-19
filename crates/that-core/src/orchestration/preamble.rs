@@ -153,7 +153,8 @@ fn task_delegation_preamble() -> &'static str {
      | Steer running task | `agent_task(action=send, task_id=X)` | Redirect, add context |\n\
      | Add peer collaborator | `agent_task(action=share, name, task_id=X)` | Let multiple agents coordinate on one task via scratchpad |\n\
      | Quick answer needed | `agent_query` | Simple questions, <30s |\n\
-     | Parallel ephemeral | `agent_run` (×N) | Fan-out coding with workspace |\n\n\
+     | Parallel ephemeral | `agent_run` (×N) | Fan-out coding with workspace |\n\
+     | Warm-start agent | `agent_run(..., bootstrap={identity, soul, agents, context})` | Pre-load identity + domain research |\n\n\
      **Never use `agent_query` to check sub-agent status** — it blocks your turn. Use `agent_task(action=status)` instead (instant, free).\n\
      After a restart, check `agent_task(action=status)` and `agent_admin(action=list)` before contacting sub-agents — they may also be restarting.\n\n\
      **Share locations, not content.** Task messages have size limits. Never embed large files, skill bodies, or repo contents \
@@ -402,7 +403,22 @@ pub fn build_preamble(
     }
     preamble.push('\n');
 
-    // ── 4.5 Engineering Conventions — safety-critical guardrails only ─────────
+    // ── 4.5 Provided Context — domain knowledge from the parent ──────────────
+    //
+    // Written by the parent before spawning via GoldBootstrap. Contains links,
+    // citations, and background research the sub-agent should treat as ground truth.
+    // Only present when this agent was spawned with a bootstrap payload.
+
+    if let Some(ctx) = &ws.context {
+        preamble.push_str("## Provided Context\n\n");
+        preamble.push_str(ctx);
+        if !ctx.ends_with('\n') {
+            preamble.push('\n');
+        }
+        preamble.push('\n');
+    }
+
+    // ── 5. Engineering Conventions — safety-critical guardrails only ──────────
     //
     // Coding style, workflow habits, and commit rules belong in Agents.md.
     // The preamble only enforces hard safety constraints that must not be overridden.

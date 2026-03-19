@@ -1082,6 +1082,7 @@ pub async fn spawn_persistent_agent_k8s(
 // ── K8s Spawn — Ephemeral Agent (agent_run) ──────────────────────────────────
 
 /// Run an ephemeral task agent as a K8s Job. Blocks until completion.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_ephemeral_agent_k8s(
     name: &str,
     role: Option<&str>,
@@ -1090,6 +1091,7 @@ pub async fn run_ephemeral_agent_k8s(
     model: Option<&str>,
     workspace: bool,
     timeout_secs: u64,
+    bootstrap: Option<&crate::workspace::GoldBootstrap>,
 ) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let safe_name = sanitize_name(name);
@@ -1170,6 +1172,11 @@ pub async fn run_ephemeral_agent_k8s(
     if workspace {
         config_data["GIT_REPO_URL"] = serde_json::json!(format!("{git_svc}/workspace.git"));
         config_data["GIT_BRANCH"] = serde_json::json!(format!("task/{safe_name}"));
+    }
+    if let Some(bs) = bootstrap {
+        if let Ok(json) = serde_json::to_string(bs) {
+            config_data["THAT_GOLD_BOOTSTRAP"] = serde_json::json!(json);
+        }
     }
 
     // Build K8s resources as JSON (no YAML indentation issues)
