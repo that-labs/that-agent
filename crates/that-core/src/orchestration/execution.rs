@@ -231,6 +231,7 @@ pub async fn execute_agent_run_streaming(
                 router: None,
                 state_dir: agent_state_dir(agent),
                 agent_name: agent.name.clone(),
+                disable_memory: false,
             },
             images: vec![],
             steering: None,
@@ -353,7 +354,11 @@ pub async fn execute_agent_run_eval(
             system: preamble.to_string(),
             max_tokens: agent.max_tokens as u32,
             max_turns: agent.max_turns as u32,
-            tools: all_tool_defs(&container),
+            tools: {
+                let mut defs = all_tool_defs(&container);
+                defs.retain(|t| !t.name.starts_with("mem_"));
+                defs
+            },
             history: history.clone().unwrap_or_default(),
             prompt_caching: matches!(agent.provider.as_str(), "anthropic" | "openrouter"),
             openai_websocket: openai_websocket_enabled(),
@@ -368,6 +373,7 @@ pub async fn execute_agent_run_eval(
                 router: None,
                 state_dir: agent_state_dir(agent),
                 agent_name: agent.name.clone(),
+                disable_memory: true,
             },
             images: vec![],
             steering: None,
@@ -749,6 +755,7 @@ pub async fn execute_agent_run_channel(
                 router: Some(std::sync::Arc::clone(&router)),
                 state_dir: agent_state_dir(agent),
                 agent_name: agent.name.clone(),
+                disable_memory: false,
             },
             images: images.clone(),
             steering: steering.clone(),

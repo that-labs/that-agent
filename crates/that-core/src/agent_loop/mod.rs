@@ -125,6 +125,10 @@ pub struct ToolContext {
     pub state_dir: Option<std::path::PathBuf>,
     /// Agent name for structured run logging.
     pub agent_name: String,
+    /// When `true`, memory tools (`mem_add`, `mem_recall`, etc.) are excluded from
+    /// the tool surface and blocked at dispatch. Used by the eval runner to prevent
+    /// eval runs from polluting the agent's persistent memory.
+    pub disable_memory: bool,
 }
 
 impl ToolContext {

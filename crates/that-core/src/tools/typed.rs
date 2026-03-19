@@ -1681,6 +1681,12 @@ async fn dispatch_inner(
     if let Some(err) = child_orchestration_guard(name) {
         return Err(err);
     }
+    // Block memory tools during eval runs to prevent polluting persistent memory.
+    if ctx.disable_memory && name.starts_with("mem_") {
+        return Err(ToolError(
+            "memory tools are disabled during eval runs".to_string(),
+        ));
+    }
     match name {
         "fs_ls" => {
             let args: FsLsArgs = serde_json::from_str(args_json)
@@ -3600,6 +3606,7 @@ mod tests {
             route_registry: None,
             state_dir: None,
             agent_name: String::new(),
+            disable_memory: false,
         }
     }
 
