@@ -705,10 +705,7 @@ pub fn build_preamble(
     // ── 11.6. Agent Hierarchy — parent/child context ─────────────────────────
     if let Some(parent) = &agent.parent {
         if is_k8s {
-            let agent_depth: u8 = std::env::var("THAT_AGENT_DEPTH")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(1);
+            let agent_depth = crate::orchestration::config::parse_env_u8("THAT_AGENT_DEPTH", 1);
             let delegation_note = if agent_depth <= 1 {
                 "- You can delegate bounded tasks to ephemeral workers using `agent_run`\n\
                  - Call multiple `agent_run` in one turn for parallel fan-out\n\
@@ -744,10 +741,7 @@ pub fn build_preamble(
                  - Do NOT try to access the parent's filesystem — use the git workspace for code sharing\n"
             ));
         } else {
-            let agent_depth: u8 = std::env::var("THAT_AGENT_DEPTH")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(1);
+            let agent_depth = crate::orchestration::config::parse_env_u8("THAT_AGENT_DEPTH", 1);
             let delegation_note = if agent_depth <= 1 {
                 "\n### Team delegation\n\
                  - Delegate bounded tasks to ephemeral workers using `agent_run`\n\

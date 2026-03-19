@@ -76,6 +76,13 @@ pub fn parse_env_bool(name: &str) -> Option<bool> {
     })
 }
 
+pub fn parse_env_u8(name: &str, default: u8) -> u8 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
 pub fn parse_env_nonempty(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()

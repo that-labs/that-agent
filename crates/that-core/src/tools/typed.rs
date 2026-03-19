@@ -167,10 +167,7 @@ fn shell_single_quote(value: &str) -> String {
 }
 
 fn current_agent_depth() -> u8 {
-    std::env::var("THAT_AGENT_DEPTH")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0)
+    crate::orchestration::config::parse_env_u8("THAT_AGENT_DEPTH", 0)
 }
 
 fn child_orchestration_guard(name: &str) -> Option<ToolError> {
@@ -1372,10 +1369,10 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
 
     let depth = current_agent_depth();
     if depth > 0 {
-        tools.retain(|tool| tool.name.as_str() != "spawn_agent");
-    }
-    if depth > 1 {
-        tools.retain(|tool| tool.name.as_str() != "agent_run");
+        tools.retain(|tool| {
+            let n = tool.name.as_str();
+            n != "spawn_agent" && !(depth > 1 && n == "agent_run")
+        });
     }
 
     tools
@@ -2654,7 +2651,8 @@ async fn dispatch_inner(
                 let binary = std::env::current_exe()
                     .map_err(|e| ToolError(format!("cannot find binary: {e}")))?;
                 let timeout = args.timeout_secs.unwrap_or(1800);
-                let effective_name = if current_agent_depth() > 0 && !args.name.contains('/') {
+                let depth = current_agent_depth();
+                let effective_name = if depth > 0 && !args.name.contains('/') {
                     format!("{parent}/{}", args.name)
                 } else {
                     args.name.clone()
@@ -2677,7 +2675,7 @@ async fn dispatch_inner(
                     cmd.env("THAT_PARENT_GATEWAY_TOKEN", tok);
                 }
                 cmd.env("THAT_AGENT_PARENT", &parent);
-                cmd.env("THAT_AGENT_DEPTH", (current_agent_depth() + 1).to_string());
+                cmd.env("THAT_AGENT_DEPTH", (depth + 1).to_string());
                 let start = std::time::Instant::now();
                 let output = tokio::time::timeout(Duration::from_secs(timeout), cmd.output())
                     .await

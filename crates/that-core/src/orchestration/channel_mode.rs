@@ -1320,10 +1320,7 @@ pub async fn run_listen(
                     );
                     if let Ok(active) = task_reg.list_active() {
                         if !active.is_empty() {
-                            task.push_str(&format!(
-                                "\n\n## Active tasks ({}):\n",
-                                active.len()
-                            ));
+                            task.push_str(&format!("\n\n## Active tasks ({}):\n", active.len()));
                             for t in active.iter().take(10) {
                                 let short_id: String = t.id.chars().take(8).collect();
                                 task.push_str(&format!(
@@ -1331,8 +1328,7 @@ pub async fn run_listen(
                                     t.agent, short_id, t.state
                                 ));
                                 if let Some(last_msg) = t.messages.last() {
-                                    let preview: String =
-                                        last_msg.text.chars().take(80).collect();
+                                    let preview: String = last_msg.text.chars().take(80).collect();
                                     task.push_str(&format!(" — {preview}"));
                                 }
                                 task.push('\n');

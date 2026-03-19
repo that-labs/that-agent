@@ -843,7 +843,10 @@ impl Channel for TelegramAdapter {
                                 t.message_id = mid;
                             }
                         }
-                    } else if let Err(e) = self.edit_message_text(&chat_id, existing_id, &rendered).await {
+                    } else if let Err(e) = self
+                        .edit_message_text(&chat_id, existing_id, &rendered)
+                        .await
+                    {
                         debug!(channel = %self.id, "Heartbeat status edit failed: {e:#}");
                         self.state.lock().await.notify_status.remove(&chat_id);
                     }
@@ -923,7 +926,10 @@ impl Channel for TelegramAdapter {
                             t.message_id = mid;
                         }
                     }
-                } else if let Err(e) = self.edit_message_text(&chat_id, existing_id, &rendered).await {
+                } else if let Err(e) = self
+                    .edit_message_text(&chat_id, existing_id, &rendered)
+                    .await
+                {
                     debug!(channel = %self.id, "Notify status edit failed: {e:#}");
                     // Message was deleted or too old — reset so next notify starts fresh.
                     self.state.lock().await.notify_status.remove(&chat_id);

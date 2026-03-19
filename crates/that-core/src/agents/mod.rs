@@ -617,11 +617,10 @@ pub async fn spawn_agent(
         cmd.env("THAT_PARENT_GATEWAY_TOKEN", tok);
     }
     // Propagate hierarchy depth (root=0, persistent child=1, etc.)
-    let parent_depth: u8 = std::env::var("THAT_AGENT_DEPTH")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(0);
-    cmd.env("THAT_AGENT_DEPTH", (parent_depth + 1).to_string());
+    cmd.env(
+        "THAT_AGENT_DEPTH",
+        (crate::orchestration::config::parse_env_u8("THAT_AGENT_DEPTH", 0) + 1).to_string(),
+    );
     // Detach: let the child outlive the parent.
     cmd.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -904,11 +903,7 @@ pub async fn spawn_persistent_agent_k8s(
     let labels = k8s_labels(name, parent, "persistent", role_str);
     let owner_refs = k8s_owner_refs(&parent_deploy, &deploy_uid);
 
-    let child_depth = std::env::var("THAT_AGENT_DEPTH")
-        .ok()
-        .and_then(|v| v.trim().parse::<u8>().ok())
-        .unwrap_or(0)
-        + 1;
+    let child_depth = crate::orchestration::config::parse_env_u8("THAT_AGENT_DEPTH", 0) + 1;
     let mut config_data = serde_json::json!({
         "THAT_AGENT_NAME": name,
         "THAT_AGENT_PARENT": parent,
@@ -1140,11 +1135,7 @@ pub async fn run_ephemeral_agent_k8s(
     let labels = k8s_labels(name, parent, "ephemeral", role_str);
     let owner_refs = k8s_owner_refs(&parent_deploy, &deploy_uid);
 
-    let child_depth = std::env::var("THAT_AGENT_DEPTH")
-        .ok()
-        .and_then(|v| v.trim().parse::<u8>().ok())
-        .unwrap_or(0)
-        + 1;
+    let child_depth = crate::orchestration::config::parse_env_u8("THAT_AGENT_DEPTH", 0) + 1;
     let mut config_data = serde_json::json!({
         "THAT_AGENT_NAME": name,
         "THAT_AGENT_PARENT": parent,
