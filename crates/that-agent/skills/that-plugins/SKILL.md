@@ -93,6 +93,11 @@ malformed directory names were created.
 
 ## Runtime Backends
 
+**Important distinction:** The agent itself is deployed via Helm, but plugins the agent
+authors use their own lightweight manifests deployed via `kubectl apply -k`. Plugin
+deployment is independent of the agent's Helm chart — plugins own their own deploy
+directory and lifecycle.
+
 Supported backend modes:
 - `docker` (default runtime path; can deploy/run via Docker socket on local/VPS hosts)
 - `kubernetes` (build/push/deploy orchestration path in clusters)
