@@ -1,0 +1,8 @@
+apiVersion: v2
+name: that-agent
+description: Autonomous AI agent runtime with multi-agent orchestration
+type: application
+# Keep in sync with workspace version in Cargo.toml.
+# CI overwrites these from the git tag at publish time.
+version: 0.3.0
+appVersion: "0.3.0"

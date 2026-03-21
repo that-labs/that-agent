@@ -1,0 +1,132 @@
+# -- Agent configuration
+agent:
+  name: default
+  # Role: root (full stack), child (persistent worker), ephemeral (one-shot Job)
+  role: root
+  image:
+    repository: ghcr.io/that-labs/that-agent
+    tag: ""  # defaults to Chart.AppVersion (e.g. v0.3.0)
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  terminationGracePeriodSeconds: 60
+  provider: anthropic
+  model: claude-sonnet-4-6
+  maxTurns: 75
+  bootstrapPrompt: ""
+  # Parent agent name (set automatically for children)
+  parent: ""
+  # Agent role label (explorer, developer, reviewer, etc.)
+  agentRole: ""
+  # Parent gateway (set automatically for children)
+  parentGatewayUrl: ""
+  parentGatewayToken: ""
+  storage:
+    size: 20Gi
+    storageClassName: ""
+    existingClaim: ""  # use a pre-existing PVC (e.g. from Kustomize migration)
+  # Ephemeral job settings (only used when role=ephemeral)
+  job:
+    task: ""           # task text (mounted as /etc/agent-task/task.txt)
+    workspace: false   # clone workspace repo
+    gitRepoUrl: ""     # workspace git URL
+    gitBranch: ""      # task branch name
+    ttlSeconds: 300    # cleanup after completion
+    backoffLimit: 0
+
+# -- Access level: cluster-admin | namespace-admin | readonly
+accessLevel: namespace-admin
+
+# -- Secrets — provide via --set, existingSecret, or external secret manager
+secrets:
+  # anthropicApiKey: ""
+  # claudeCodeOauthToken: ""
+  # openaiApiKey: ""
+  # openrouterApiKey: ""
+  # telegramBotToken: ""
+  # telegramChatId: ""
+  existingSecret: ""
+
+# -- Child agent resource limits
+childAgents:
+  cpuLimit: "1"
+  memoryLimit: "2Gi"
+
+# -- Git server
+gitServer:
+  enabled: true
+  storage:
+    size: 4Gi
+    storageClassName: ""
+    existingClaim: ""
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "32Mi"
+    limits:
+      cpu: "200m"
+      memory: "128Mi"
+
+# -- Container registry for agent-built images
+registry:
+  host: "registry.local:5000"
+  pushEndpoint: ""  # override if push address differs from pull
+  insecure: true    # use HTTP instead of HTTPS
+
+# -- BuildKit
+buildkit:
+  enabled: true
+  storage:
+    size: 20Gi
+    storageClassName: ""
+    existingClaim: ""
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "4"
+      memory: "4Gi"
+
+# -- Cache proxy
+cacheProxy:
+  enabled: true
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "200m"
+      memory: "512Mi"
+
+# -- DinD fallback (requires privileged — not recommended)
+dind:
+  enabled: false
+
+# -- Network policy
+networkPolicy:
+  enabled: true
+
+# -- Pod Disruption Budget
+pdb:
+  enabled: true
+  minAvailable: 1
+
+# -- Gateway
+gateway:
+  url: ""
+  addr: "0.0.0.0:8080"
+
+# -- Helm chart reference for child agent deployments
+# Override to use a local chart path or private registry
+helmChart: ""
+
+# -- Observability
+observability:
+  phoenixTracing: false
+  otelEndpoint: ""

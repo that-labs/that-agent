@@ -1,0 +1,71 @@
+{{- if .Values.gitServer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "that-agent.fullname" . }}-git-server
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git-server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "that-agent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: git-server
+  template:
+    metadata:
+      labels:
+        {{- include "that-agent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: git-server
+    spec:
+      containers:
+        - name: git-server
+          image: "{{ .Values.agent.image.repository }}:{{ include "that-agent.imageTag" . }}"
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          command: ["that-git-server"]
+          env:
+            - name: THAT_GIT_REPO_ROOT
+              value: "/repos"
+            - name: THAT_GIT_BIND_ADDR
+              value: "0.0.0.0:9418"
+            - name: THAT_GIT_EXPIRY_HOURS
+              value: "24"
+            - name: THAT_GIT_WEBHOOK_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "that-agent.fullname" . }}-config
+                  key: THAT_GIT_WEBHOOK_URL
+                  optional: true
+            - name: THAT_GIT_AUTO_MERGE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "that-agent.fullname" . }}-config
+                  key: THAT_GIT_AUTO_MERGE
+                  optional: true
+          ports:
+            - containerPort: 9418
+              name: git-http
+          volumeMounts:
+            - name: git-repos
+              mountPath: /repos
+          resources:
+            {{- toYaml .Values.gitServer.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /api/repos
+              port: 9418
+            initialDelaySeconds: 3
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /api/repos
+              port: 9418
+            initialDelaySeconds: 1
+            periodSeconds: 5
+      volumes:
+        - name: git-repos
+          persistentVolumeClaim:
+            claimName: {{ .Values.gitServer.storage.existingClaim | default (printf "%s-git-repos" (include "that-agent.fullname" .)) }}
+{{- end }}

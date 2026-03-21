@@ -1,13 +1,13 @@
-# that-agent Workspace
+# that-agent
 
-Rust workspace — see README for layout, ARCHITECTURE.md for design detail.
+Single consolidated Rust crate (`that-agent`) + standalone `that-git-server`. See README for layout, ARCHITECTURE.md for design detail.
 
 ## Practices: What NOT To Do
 
 ### Dependencies
 
 - **No heavy native bindings.** Never add crates that vendor C libraries (OpenSSL, libgit2, libssh2, etc.). We removed `git2` specifically because it pulled 915KB of `openssl_sys` + `libgit2_sys` for work the `git` CLI already does. If a shell command covers the use case, use `std::process::Command` — not a binding crate.
-- **No new deps without justifying binary cost.** Run `cargo bloat --release -p that-cli --crates` before and after. If a crate adds >50KB for a non-core feature, it must be feature-gated or rejected.
+- **No new deps without justifying binary cost.** Run `cargo bloat --release -p that-agent --crates` before and after. If a crate adds >50KB for a non-core feature, it must be feature-gated or rejected.
 - **No vendored TLS stacks.** The workspace uses `rustls` everywhere. Never introduce `openssl`, `native-tls`, or `vendored-openssl` features.
 - **No duplicate functionality.** Before adding a crate, check if an existing dep or `std` already covers it. One HTTP client (`reqwest`), one TLS (`rustls`), one async runtime (`tokio`).
 
@@ -16,10 +16,6 @@ Rust workspace — see README for layout, ARCHITECTURE.md for design detail.
 - **As few lines as possible.** Prefer composition over duplication, thin abstractions over defensive layering, deletion over accumulation. 10 lines instead of 30.
 - **No dead code.** If it's unused, delete it. No `#[allow(dead_code)]` on production paths.
 - **No over-abstraction.** Three similar lines are better than a premature helper function.
-
-### Naming & Legacy
-
-- The old project name was **"anvil"**. All references have been migrated to `that-tools` / `that-agent`. Never reintroduce "anvil" in code, comments, or docs.
 
 ### Agent / Skill Prompts
 
@@ -93,7 +89,7 @@ Adding a field to any agent-facing struct (Heartbeat, channel config, etc.) with
 
 ### Channel Router
 
-`ChannelRouter` fans out to all adapters. `TuiChannel` lives in `that-core::tui` (not `that-channels`) to avoid a circular dep. Channel adapters must clear their text buffer on every tool-call boundary.
+`ChannelRouter` fans out to all adapters. `TuiChannel` lives in `tui/` alongside all other modules (no circular dep in single-crate layout). Channel adapters must clear their text buffer on every tool-call boundary.
 
 ### Unicode Truncation
 

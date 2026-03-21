@@ -3404,173 +3404,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
-name = "that-channels"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chrono",
- "dashmap",
- "dirs",
- "futures",
- "rand 0.8.5",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tower-http",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "that-cli"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chacha20poly1305",
- "chrono",
- "clap",
- "dirs",
- "dotenvy",
- "ignore",
- "rand 0.8.5",
- "reqwest",
- "serde",
- "serde_json",
- "that-core",
- "that-eval",
- "that-plugins",
- "that-tools",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "that-core"
-version = "0.2.0"
+name = "that-agent"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "assert_cmd",
  "async-trait",
+ "axum",
  "base64 0.22.1",
+ "chacha20poly1305",
  "chrono",
  "chrono-tz",
  "clap",
- "crossterm",
- "dirs",
- "dotenvy",
- "futures",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "ratatui",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "that-channels",
- "that-plugins",
- "that-sandbox",
- "that-tools",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "toml",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "tui-textarea",
- "uuid",
-]
-
-[[package]]
-name = "that-eval"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dirs",
- "dotenvy",
- "reqwest",
- "serde",
- "serde_json",
- "that-core",
- "that-tools",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "that-git-server"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "clap",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "that-plugins"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "dirs",
- "serde",
- "serde_json",
- "that-sandbox",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "that-sandbox"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "dirs",
- "serde",
- "tracing",
-]
-
-[[package]]
-name = "that-tools"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "base64 0.22.1",
- "chrono",
- "clap",
  "criterion",
+ "crossterm",
+ "dashmap",
  "dialoguer",
  "diffy",
  "dirs",
+ "dotenvy",
  "figment",
+ "futures",
  "globset",
  "ignore",
  "image",
@@ -3578,13 +3433,19 @@ dependencies = [
  "libc",
  "memmap2",
  "moka",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "petgraph",
  "predicates",
  "pretty_assertions",
+ "rand 0.8.5",
+ "ratatui",
  "rayon",
  "regex",
  "reqwest",
  "rusqlite",
+ "rustls",
  "schemars",
  "scraper",
  "serde",
@@ -3596,8 +3457,12 @@ dependencies = [
  "thiserror 2.0.18",
  "tiktoken-rs",
  "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
  "toml",
+ "tower-http",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-go",
@@ -3605,8 +3470,26 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "tui-textarea",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "that-git-server"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

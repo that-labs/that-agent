@@ -1,0 +1,19 @@
+{{- if ne .Values.agent.role "ephemeral" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "that-agent.fullname" . }}
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: gateway
+      protocol: TCP
+      name: gateway
+  selector:
+    {{- include "that-agent.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime
+{{- end }}

@@ -1,0 +1,45 @@
+# Default agent overlay — matches the previous Kustomize default overlay.
+# Secrets are expected as an existing K8s Secret created externally.
+#
+# Usage:
+#   kubectl create secret generic that-agent-secrets \
+#     --from-literal=ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+#     --from-literal=CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN \
+#     --from-literal=OPENAI_API_KEY=$OPENAI_API_KEY \
+#     --from-literal=OPENROUTER_API_KEY=$OPENROUTER_API_KEY \
+#     --from-literal=TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN \
+#     --from-literal=TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID \
+#     -n that-agent-default
+#
+#   helm install that-agent deploy/helm/that-agent/ \
+#     -n that-agent-default --create-namespace \
+#     -f deploy/helm/values-default.yaml
+
+agent:
+  name: default
+  provider: anthropic
+  model: claude-sonnet-4-6
+  maxTurns: 75
+  bootstrapPrompt: ""
+  storage:
+    existingClaim: that-agent-home
+
+accessLevel: cluster-admin
+
+secrets:
+  existingSecret: that-agent-secrets
+
+gitServer:
+  enabled: true
+
+registry:
+  host: "myregistry.localhost:5000"
+  insecure: true
+
+buildkit:
+  enabled: true
+  storage:
+    existingClaim: that-agent-buildkit-cache
+
+cacheProxy:
+  enabled: true

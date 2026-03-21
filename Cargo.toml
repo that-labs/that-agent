@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/that-tools", "crates/that-channels", "crates/that-core", "crates/that-cli", "crates/that-eval", "crates/that-plugins", "crates/that-sandbox", "crates/that-git-server"]
+members = ["crates/that-agent", "crates/that-git-server"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/that-labs/that-agent"

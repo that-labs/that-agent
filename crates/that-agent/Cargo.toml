@@ -1,0 +1,127 @@
+[package]
+name = "that-agent"
+description = "Autonomous agent framework with orchestration, tools, channels, and multi-turn LLM loops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "that"
+path = "src/bin/that.rs"
+
+[[bin]]
+name = "that-eval"
+path = "src/bin/that_eval.rs"
+
+[features]
+default = ["tui", "code-analysis"]
+tui = ["dep:ratatui", "dep:tui-textarea", "dep:crossterm", "dep:arboard"]
+code-analysis = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-go",
+    "dep:tree-sitter-json",
+]
+pairing = []
+daemon = ["dep:jsonrpsee"]
+
+[dependencies]
+# Workspace deps
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+
+# Async
+futures = "0.3"
+async-trait = "0.1"
+
+# HTTP/WebSocket (union of all crate needs: blocking + stream + multipart)
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "stream", "multipart", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+tokio-stream = "0.1"
+dashmap = "6"
+url = "2"
+
+# Encoding
+base64 = "0.22"
+
+# Env
+dotenvy = "0.15"
+
+# Config (from that-tools)
+figment = { version = "0.10", features = ["toml", "env"] }
+schemars = "0.8"
+
+# Code/text tools (from that-tools)
+tiktoken-rs = "0.6"
+tree-sitter = { version = "0.24", optional = true }
+tree-sitter-rust = { version = "0.23", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-python = { version = "0.23", optional = true }
+tree-sitter-go = { version = "0.23", optional = true }
+tree-sitter-json = { version = "0.24", optional = true }
+ignore = "0.4"
+memmap2 = "0.9"
+regex = "1"
+globset = "0.4"
+rayon = "1"
+libc = "0.2"
+similar = "2"
+diffy = "0.4"
+rusqlite = { version = "0.34", features = ["bundled"] }
+petgraph = "0.8"
+sha2 = "0.10"
+streaming-iterator = "0.1"
+dialoguer = "0.11"
+moka = { version = "0.12", features = ["sync"] }
+scraper = "0.25"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+jsonrpsee = { version = "0.24", features = ["server"], optional = true }
+
+# Secrets (from that-cli)
+chacha20poly1305 = "0.10"
+
+# TUI (optional)
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"], optional = true }
+tui-textarea = { version = "0.7", features = ["crossterm"], optional = true }
+crossterm = { version = "0.28", features = ["event-stream"], optional = true }
+arboard = { version = "3", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
+pretty_assertions = "1"
+tiktoken-rs = "0.6"
+rusqlite = { version = "0.34", features = ["bundled"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "benchmarks"
+harness = false

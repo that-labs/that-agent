@@ -1,0 +1,44 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "that-agent.fullname" . }}-inter-agent
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      that-agent/managed: "true"
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic between managed pods
+    - from:
+        - podSelector:
+            matchLabels:
+              that-agent/managed: "true"
+    # Allow external traffic to gateway port (for Ingress controllers, LoadBalancers)
+    - ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # Allow traffic between managed pods
+    - to:
+        - podSelector:
+            matchLabels:
+              that-agent/managed: "true"
+    # Allow DNS resolution
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow external egress (API calls, package downloads)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+{{- end }}

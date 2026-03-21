@@ -1,0 +1,123 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use tracing::info;
+
+use crate::config::{AgentDef, WorkspaceConfig};
+use crate::default_skills;
+use crate::sandbox::SandboxClient;
+use crate::skills;
+
+/// Resolve the effective workspace directory for an agent.
+///
+/// Priority:
+/// 1. `inherit_workspace` — use the parent agent's workspace directory
+/// 2. `shared_workspace` — use the global workspace (current behavior)
+/// 3. Default — isolated per-agent workspace
+pub fn resolve_agent_workspace(ws: &WorkspaceConfig, agent: &AgentDef) -> Result<PathBuf> {
+    if agent.inherit_workspace {
+        // Inherit the parent's workspace directory
+        let dir = if let Some(parent_name) = &agent.parent {
+            AgentDef::agent_workspace_dir(parent_name)
+        } else {
+            // No parent specified — fall back to own workspace
+            AgentDef::agent_workspace_dir(&agent.name)
+        };
+        std::fs::create_dir_all(&dir).with_context(|| {
+            format!("Failed to create inherited workspace at {}", dir.display())
+        })?;
+        Ok(dir)
+    } else if agent.shared_workspace {
+        // Use the global workspace (current behavior)
+        let ws_path = ws.workspace.clone().unwrap_or_else(|| PathBuf::from("."));
+        Ok(ws_path)
+    } else {
+        // Isolated per-agent workspace
+        let dir = AgentDef::agent_workspace_dir(&agent.name);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create agent workspace at {}", dir.display()))?;
+        Ok(dir)
+    }
+}
+
+/// Ensure the sandbox container is running and return the container name.
+/// In local mode, returns None.
+pub async fn prepare_container(
+    agent: &AgentDef,
+    workspace: &Path,
+    sandbox: bool,
+) -> Result<Option<String>> {
+    // Always install skills on the host — ReadSkillTool reads from the host regardless of mode.
+    // Run both installs concurrently to reduce PVC I/O time on network storage.
+    let name1 = agent.name.clone();
+    let name2 = agent.name.clone();
+    let (_, _) = tokio::join!(
+        tokio::task::spawn_blocking(move || default_skills::install_default_skills(&name1)),
+        tokio::task::spawn_blocking(move || install_that_tools_skills_local(&name2)),
+    );
+
+    if sandbox {
+        let mode = crate::sandbox::backend::SandboxMode::from_env();
+        if mode == crate::sandbox::backend::SandboxMode::Kubernetes {
+            // Already running inside a Kubernetes pod — the pod is the sandbox.
+            // Tools route via THAT_SANDBOX_MODE; no Docker container needed.
+            info!(agent = %agent.name, "Kubernetes sandbox mode — pod is the sandbox, skipping container setup");
+            Ok(None)
+        } else {
+            info!(agent = %agent.name, "Preparing Docker sandbox container");
+            let sc = SandboxClient::connect(agent, workspace).await?;
+            Ok(Some(sc.container_name))
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+/// Install that-tools skills in the agent skills directory.
+///
+/// Skips the write when the installed version marker already matches the
+/// current binary — avoids redundant PVC writes on network-attached storage.
+pub fn install_that_tools_skills_local(agent_name: &str) {
+    let Some(skills_dir) = skills::skills_dir_local(agent_name) else {
+        return;
+    };
+
+    let marker = skills_dir.join(".that-tools-installed-version");
+    if crate::default_skills::version_matches(&marker) {
+        return;
+    }
+
+    fn legacy_skill_dir_name() -> String {
+        ['o', 'w', 'a', 'n', 'a', 'i'].iter().collect()
+    }
+
+    let legacy_dir = skills_dir.join(legacy_skill_dir_name());
+    if legacy_dir.exists() {
+        if let Err(err) = std::fs::remove_dir_all(&legacy_dir) {
+            tracing::warn!(
+                agent = %agent_name,
+                path = %legacy_dir.display(),
+                error = %err,
+                "Failed to remove legacy skill directory"
+            );
+        } else {
+            tracing::info!(
+                agent = %agent_name,
+                path = %legacy_dir.display(),
+                "Removed legacy skill directory"
+            );
+        }
+    }
+
+    match crate::tools::impls::skills::install(None, Some(&skills_dir), true) {
+        Ok(_) => {
+            crate::default_skills::stamp_version(&marker);
+            info!(agent = %agent_name, "Installed that-tools skills locally");
+        }
+        Err(err) => tracing::warn!(
+            agent = %agent_name,
+            error = %err,
+            "Failed to install that-tools skills locally"
+        ),
+    }
+}

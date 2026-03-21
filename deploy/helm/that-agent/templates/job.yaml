@@ -1,0 +1,65 @@
+{{- if eq .Values.agent.role "ephemeral" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "that-agent.fullname" . }}-task
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+data:
+  task.txt: {{ .Values.agent.job.task | quote }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "that-agent.fullname" . }}
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runtime
+spec:
+  backoffLimit: {{ .Values.agent.job.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.agent.job.ttlSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "that-agent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: runtime
+    spec:
+      serviceAccountName: {{ include "that-agent.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: agent
+          image: "{{ .Values.agent.image.repository }}:{{ include "that-agent.imageTag" . }}"
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              exec that --agent "$THAT_AGENT_NAME" run query \
+                --parent "$THAT_AGENT_PARENT" \
+                --no-sandbox \
+                --task-file /etc/agent-task/task.txt
+          envFrom:
+            - configMapRef:
+                name: {{ include "that-agent.fullname" . }}-config
+            - secretRef:
+                name: {{ include "that-agent.secretName" . }}
+                optional: true
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: task
+              mountPath: /etc/agent-task
+              readOnly: true
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: task
+          configMap:
+            name: {{ include "that-agent.fullname" . }}-task
+{{- end }}

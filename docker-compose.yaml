@@ -1,0 +1,141 @@
+# that-agent Docker Compose — standalone local deployment
+#
+# Quick start:
+#   cp .env.example .env   # fill in API keys
+#   docker compose up
+#
+# Optional buildkit profile:
+#   docker compose --profile build up
+
+x-common: &common
+  image: ghcr.io/that-labs/that-agent:latest
+  restart: unless-stopped
+
+services:
+  agent:
+    <<: *common
+    command:
+      - -c
+      - |
+        rm -f /tmp/that-agent-ready /tmp/that-agent-alive
+        AGENT_NAME="$${THAT_AGENT_NAME:-default}"
+        AGENT_DIR="/home/agent/.that-agent/agents/$${AGENT_NAME}"
+        if [ ! -f "$${AGENT_DIR}/config.toml" ]; then
+          if [ -n "$${THAT_AGENT_BOOTSTRAP_PROMPT:-}" ]; then
+            that agent init "$${AGENT_NAME}" --prompt "$${THAT_AGENT_BOOTSTRAP_PROMPT}"
+          else
+            that agent init "$${AGENT_NAME}"
+          fi
+        fi
+        exec that run listen --agent "$${AGENT_NAME}" --no-sandbox
+    ports:
+      - "8080:8080"
+    volumes:
+      - agent-home:/home/agent/.that-agent
+      - ./workspace:/workspace
+    environment:
+      THAT_SANDBOX_MODE: docker
+      THAT_TRUSTED_LOCAL_SANDBOX: "1"
+      THAT_GATEWAY_ADDR: "0.0.0.0:8080"
+      THAT_GIT_SERVER_URL: "http://git-server:9418"
+      THAT_CACHE_PROXY_URL: "http://cache-proxy:3128"
+      RUST_LOG: info
+    env_file:
+      - path: .env
+        required: false
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/that-agent-ready"]
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+    depends_on:
+      git-server:
+        condition: service_healthy
+
+  git-server:
+    <<: *common
+    command: ["that-git-server"]
+    ports:
+      - "9418:9418"
+    volumes:
+      - git-repos:/repos
+    environment:
+      THAT_GIT_BIND_ADDR: "0.0.0.0:9418"
+      THAT_GIT_REPO_ROOT: /repos
+      THAT_GIT_EXPIRY_HOURS: "24"
+      THAT_GIT_AUTO_MERGE: "false"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9418/api/repos"]
+      interval: 5s
+      timeout: 3s
+      start_period: 3s
+      retries: 3
+
+  cache-proxy:
+    <<: *common
+    command:
+      - -c
+      - |
+        if command -v squid >/dev/null 2>&1; then
+          exec squid -N -f /etc/squid/squid.conf 2>&1
+        else
+          echo "No squid — running TCP passthrough on port 3128"
+          exec python3 -c "
+        import socket, threading, sys
+        def relay(s,d):
+            try:
+                while True:
+                    b=s.recv(65536)
+                    if not b: break
+                    d.sendall(b)
+            except: pass
+            finally: s.close(); d.close()
+        def handle(c):
+            data=c.recv(8192)
+            if not data: c.close(); return
+            line=data.split(b'\r\n')[0]
+            parts=line.split()
+            if len(parts)<2: c.close(); return
+            if parts[0]==b'CONNECT':
+                hp=parts[1].split(b':')
+                host,port=hp[0].decode(),int(hp[1]) if len(hp)>1 else 443
+                try:
+                    s=socket.create_connection((host,port),timeout=10)
+                    c.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+                    threading.Thread(target=relay,args=(c,s),daemon=True).start()
+                    relay(s,c)
+                except: c.sendall(b'HTTP/1.1 502 Bad Gateway\r\n\r\n'); c.close()
+            else: c.close()
+        srv=socket.socket(); srv.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+        srv.bind(('0.0.0.0',3128)); srv.listen(128)
+        print('TCP proxy on :3128',flush=True)
+        while True:
+            c,_=srv.accept()
+            threading.Thread(target=handle,args=(c,),daemon=True).start()
+        "
+        fi
+    ports:
+      - "3128:3128"
+
+  buildkit:
+    image: moby/buildkit:v0.25.1-rootless
+    profiles: ["build"]
+    restart: unless-stopped
+    command:
+      - --oci-worker-no-process-sandbox
+      - --oci-worker-gc
+      - --oci-worker-gc-keepstorage=15360
+      - --addr
+      - tcp://0.0.0.0:1234
+    ports:
+      - "1234:1234"
+    volumes:
+      - buildkit-cache:/home/user/.local/share/buildkit
+    environment:
+      BUILDKIT_HOST: tcp://0.0.0.0:1234
+
+volumes:
+  agent-home:
+  git-repos:
+  buildkit-cache:

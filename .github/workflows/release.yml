@@ -34,7 +34,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} -p that-cli
+        run: cargo build --release --target ${{ matrix.target }} -p that-agent --bin that
 
       - name: Package
         run: |

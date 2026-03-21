@@ -1,0 +1,65 @@
+name: Publish Helm Chart (OCI)
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  CHART_OCI: oci://ghcr.io/that-labs/helm
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Set version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # Release tag: v0.3.1 → 0.3.1
+            TAG="${GITHUB_REF_NAME#v}"
+            echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            # Main branch: latest tag + patch bump + SHA pre-release
+            # e.g. last release was v0.3.0 → main gets 0.3.1-abc1234
+            LATEST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "v0.0.0")
+            BASE="${LATEST_TAG#v}"
+            MAJOR="${BASE%%.*}"
+            REST="${BASE#*.}"
+            MINOR="${REST%%.*}"
+            PATCH="${REST#*.}"
+            NEXT_PATCH=$((PATCH + 1))
+            SHA=$(git rev-parse --short HEAD)
+            echo "version=${MAJOR}.${MINOR}.${NEXT_PATCH}-${SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update Chart.yaml version
+        run: |
+          sed -i "s/^version:.*/version: ${{ steps.version.outputs.version }}/" deploy/helm/that-agent/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.version }}\"/" deploy/helm/that-agent/Chart.yaml
+          cat deploy/helm/that-agent/Chart.yaml
+
+      - name: Lint chart
+        run: helm lint deploy/helm/that-agent/
+
+      - name: Package chart
+        run: helm package deploy/helm/that-agent/ --destination /tmp/helm-pkg
+
+      - name: Push to GHCR
+        run: helm push /tmp/helm-pkg/that-agent-${{ steps.version.outputs.version }}.tgz ${{ env.CHART_OCI }}
