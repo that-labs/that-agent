@@ -109,6 +109,7 @@ pub async fn run_task(
         bootstrap.apply_local(&agent.name);
     }
     let ws = load_workspace_files(agent, sandbox);
+    config::set_working_notes(&session_id, ws.working_notes.clone());
     let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
 
     let skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
@@ -125,7 +126,8 @@ pub async fn run_task(
         Some(&plugin_registry),
         None,
     );
-    let task_for_model = append_system_reminder(task, &session_id, sandbox, &agent.name);
+    let mem_cfg = config::agent_memory_config(&agent.name);
+    let task_for_model = append_system_reminder(task, &session_id, sandbox, &agent.name, &mem_cfg);
 
     let response = execute_agent_run_streaming(
         agent,
@@ -243,6 +245,7 @@ pub async fn run_chat(
         bootstrap.apply_local(&agent.name);
     }
     let ws = load_workspace_files(agent, sandbox);
+    config::set_working_notes(&session_id, ws.working_notes.clone());
     let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
 
     let skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
@@ -260,6 +263,7 @@ pub async fn run_chat(
         None,
     );
 
+    let mem_cfg = config::agent_memory_config(&agent.name);
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -299,7 +303,8 @@ pub async fn run_chat(
             },
         )?;
 
-        let task_for_model = append_system_reminder(input, &session_id, sandbox, &agent.name);
+        let task_for_model =
+            append_system_reminder(input, &session_id, sandbox, &agent.name, &mem_cfg);
         match execute_agent_run_streaming(
             agent,
             container.clone(),

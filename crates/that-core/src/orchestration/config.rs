@@ -1,4 +1,5 @@
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 use crate::config::AgentDef;
 
@@ -19,6 +20,115 @@ pub fn set_agent_status(content: Option<String>) {
 /// Get the cached Status.md content for injection into system reminders.
 pub fn get_agent_status() -> Option<String> {
     AGENT_STATUS_CACHE.lock().ok().and_then(|c| c.clone())
+}
+
+// ── Working Notes cache (WorkingNotes.md) ─────────────────────────────────────
+
+static WORKING_NOTES_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Set the cached WorkingNotes.md content for a session.
+pub fn set_working_notes(session_id: &str, content: Option<String>) {
+    if let Ok(mut cache) = WORKING_NOTES_CACHE.lock() {
+        match content {
+            Some(c) if !c.trim().is_empty() => {
+                let capped: String = c.chars().take(2000).collect();
+                cache.insert(session_id.to_string(), capped);
+            }
+            _ => {
+                cache.remove(session_id);
+            }
+        }
+    }
+}
+
+/// Get the cached WorkingNotes.md content for injection into system reminders.
+pub fn get_working_notes(session_id: &str) -> Option<String> {
+    WORKING_NOTES_CACHE
+        .lock()
+        .ok()
+        .and_then(|c| c.get(session_id).cloned())
+}
+
+/// Update working notes for all currently cached sessions (used when session_id is unavailable).
+pub fn set_working_notes_all(content: Option<String>) {
+    if let Ok(mut cache) = WORKING_NOTES_CACHE.lock() {
+        match content {
+            Some(c) if !c.trim().is_empty() => {
+                let capped: String = c.chars().take(2000).collect();
+                for v in cache.values_mut() {
+                    *v = capped.clone();
+                }
+            }
+            _ => {
+                cache.clear();
+            }
+        }
+    }
+}
+
+// ── Pinned Context cache ──────────────────────────────────────────────────────
+
+static PINNED_CONTEXT_CACHE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Invalidate the pinned context cache (called on pin/unpin/compact).
+pub fn invalidate_pinned_context() {
+    if let Ok(mut cache) = PINNED_CONTEXT_CACHE.lock() {
+        *cache = None;
+    }
+}
+
+/// Get or refresh the pinned context string for injection into system reminders.
+pub fn get_or_refresh_pinned_context(config: &that_tools::config::MemoryConfig) -> Option<String> {
+    if let Ok(cache) = PINNED_CONTEXT_CACHE.lock() {
+        if let Some(ref cached) = *cache {
+            return if cached.is_empty() {
+                None
+            } else {
+                Some(cached.clone())
+            };
+        }
+    }
+    let entries = match that_tools::tools::memory::get_pinned(5, config) {
+        Ok(e) if !e.is_empty() => e,
+        _ => {
+            if let Ok(mut cache) = PINNED_CONTEXT_CACHE.lock() {
+                *cache = Some(String::new());
+            }
+            return None;
+        }
+    };
+    let mut result = String::new();
+    for (i, entry) in entries.iter().enumerate() {
+        let date = entry
+            .updated_at
+            .split(' ')
+            .next()
+            .unwrap_or(&entry.updated_at);
+        let line = format!("[{}] {} (pinned {})\n", i + 1, entry.content, date);
+        if result.len() + line.len() > 2000 {
+            break;
+        }
+        result.push_str(&line);
+    }
+    if let Ok(mut cache) = PINNED_CONTEXT_CACHE.lock() {
+        *cache = Some(result.clone());
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Build a `MemoryConfig` pointing to the agent-scoped memory DB.
+pub fn agent_memory_config(agent_name: &str) -> that_tools::config::MemoryConfig {
+    that_tools::config::MemoryConfig {
+        db_path: AgentDef::agent_memory_db_path(agent_name)
+            .display()
+            .to_string(),
+        ..Default::default()
+    }
 }
 
 /// Initial backoff delay in ms; doubles each attempt (0.5 s -> 1 -> 2 -> 4 -> 8 s).
@@ -258,14 +368,6 @@ If blocked, explicitly state the blocker and one concrete next step.\n\
 /// Append volatile runtime metadata to the tail of the user message so it
 /// doesn't invalidate the shared system-prompt cache prefix.
 pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
-    fn runtime_home_dir() -> std::path::PathBuf {
-        std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .ok()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-    }
-
     fn append_rbac_runtime_lines(lines: &mut Vec<String>, namespace: Option<&str>) {
         let scope = std::env::var("THAT_RBAC_SCOPE")
             .ok()
@@ -300,29 +402,7 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
         lines.push("rbac_cluster_scope_requires: ClusterRole + ClusterRoleBinding".to_string());
     }
 
-    let mut lines = vec![format!("sandbox_enabled: {sandbox}")];
-    let home_dir = runtime_home_dir();
-    let persistent_home_dir = home_dir.join(".that-agent");
-    lines.push(format!("home_dir: {}", home_dir.display()));
-    lines.push(format!(
-        "task_workspace_dir: {}",
-        if sandbox { "/workspace" } else { "." }
-    ));
-    lines.push(format!(
-        "persistent_home_dir: {}",
-        persistent_home_dir.display()
-    ));
-    lines.push(format!(
-        "agent_home_dir: {}",
-        persistent_home_dir
-            .join("agents")
-            .join(agent_name)
-            .display()
-    ));
-    lines.push(format!(
-        "state_dir: {}",
-        persistent_home_dir.join("state").display()
-    ));
+    let mut lines = Vec::new();
     if !sandbox {
         if trusted_local_sandbox_enabled() {
             lines.push("trusted_local_sandbox: true".to_string());
@@ -442,13 +522,6 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
             }
             append_rbac_runtime_lines(&mut lines, Some(&k8s.namespace));
             lines.push("multi_agent_enabled: true".to_string());
-            lines.push(
-                "multi_agent_hint: Use agent_run(name, task) to delegate work to \
-                 ephemeral K8s Jobs. Use spawn_agent(name, role) for persistent agents. \
-                 Use workspace_admin(action=share, path) before agent_run with workspace=true for coding tasks. \
-                 Do NOT use shell_exec to manually run agents or push to git servers."
-                    .to_string(),
-            );
             if let Some(img) = std::env::var("THAT_AGENT_IMAGE")
                 .ok()
                 .filter(|v| !v.trim().is_empty())
@@ -478,6 +551,7 @@ pub fn append_system_reminder(
     session_id: &str,
     sandbox: bool,
     agent_name: &str,
+    memory_config: &that_tools::config::MemoryConfig,
 ) -> String {
     if task.contains("<system-reminder>") {
         return task.to_string();
@@ -486,14 +560,16 @@ pub fn append_system_reminder(
     let mut reminder = vec![
         format!("current_date_utc: {today_utc}"),
         format!("session_id: {session_id}"),
-        "completion_verification_required: After creating/modifying executable artifacts (scripts, services, deploy manifests), run at least one behavior check before claiming done.".to_string(),
-        "shell_script_verification_required: For shell scripts, validate with `sh -n <file>` and execute at least one path unless blocked by environment.".to_string(),
-        "skill_usage_evidence_required: If claiming a skill was used this run, ensure `read_skill` evidence exists in this run; otherwise state it came from prior memory.".to_string(),
-        "skill_naming_determinism: When creating skills without a user-provided name, use deterministic kebab-case from capability phrase; for JSON formatting skills use `json-formatter`.".to_string(),
     ];
     reminder.extend(runtime_reminder_lines(sandbox, agent_name));
     if let Some(status) = get_agent_status() {
         reminder.push(format!("agent_status:\n{status}"));
+    }
+    if let Some(notes) = get_working_notes(session_id) {
+        reminder.push(format!("<working-notes>\n{notes}\n</working-notes>"));
+    }
+    if let Some(pinned) = get_or_refresh_pinned_context(memory_config) {
+        reminder.push(format!("<pinned-context>\n{pinned}</pinned-context>"));
     }
     format!(
         "{task}\n\n<system-reminder>\n{}\n</system-reminder>",

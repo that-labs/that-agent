@@ -183,9 +183,9 @@ fn task_delegation_preamble() -> &'static str {
      Do not dump hidden chain-of-thought. Externalize only concise decisions, progress, blockers, and requests that the team needs in order to act.\n\n\
      #### Anti-loop protection\n\n\
      The harness tracks consecutive turns where you only use exploration tools \
-     (filesystem listing, file reading, grep, search, shell). If you spend 8+ turns exploring \
-     without producing output or using non-exploration tools, you will receive a warning. \
-     At 12 turns the harness forces you to stop. Duplicate tool calls (same tool + same arguments) \
+     (filesystem listing, file reading, grep, search, shell). At 8 turns a soft warning fires; \
+     at 12 turns the harness forces a stop. The streak counter decays (halves) when you use \
+     a non-exploration tool, rather than resetting to zero. Duplicate tool calls (same tool + same arguments) \
      accelerate the counter. To avoid triggering this:\n\
      - Read the scratchpad FIRST for paths and context\n\
      - Use provided paths directly instead of searching for them\n\
@@ -325,13 +325,20 @@ pub fn build_preamble(
          Do not assume those changes are live until verified.\n\n\
          When uncertain about current capability, inspect your tool surface, plugin state, \
          runtime reminders, and workspace files. Do not guess.\n\n\
-         ### Status.md — Live Awareness\n\n\
-         `Status.md` is your self-maintained awareness file. Its content appears in every \
-         `<system-reminder>` as `agent_status:` so you always see it.\n\n\
-         Use `identity_update(file=\"Status.md\", content=\"...\")` to update it. Keep it concise. \
-         Track: active deployments and their URLs, spawned child agents, key capabilities you've \
-         discovered, and anything you need to remember across turns. Remove entries when they're \
-         no longer relevant. This is your live operational context — not a log.\n\n",
+         ### Context Layers\n\n\
+         Three auto-injected sections appear in every `<system-reminder>` — use the right layer for each type of information:\n\n\
+         **`Status.md`** — durable operational state. Persists across sessions. \
+         Track: active deployments (`## Deployments`), spawned child agents (`## Children`), \
+         key capabilities (`## Capabilities`). Remove stale entries. Not a log. \
+         Update via `identity_update(file=\"Status.md\", content=\"...\")`.\n\n\
+         **`WorkingNotes.md`** — session working context. Current findings, decisions, constraints. \
+         Cleared between sessions. Use to remember facts you will need later this session. \
+         Update via `identity_update(file=\"WorkingNotes.md\", content=\"...\")`.\n\n\
+         **Task scratchpad** (`agent_task(action=scratchpad_*)`) — inter-agent coordination on shared tasks. \
+         Different purpose entirely — not for personal notes.\n\n\
+         **`<pinned-context>`** — auto-injected pinned memories. Use `mem_add(pin=true)` for facts that \
+         should be visible every turn without recall. Pinned memories appear automatically. \
+         Use for critical project facts, not transient details.\n\n",
     );
 
     // ── 2.6 Self-Evaluation — thin pointer (not a nudge) ───────────────────────
@@ -446,7 +453,11 @@ pub fn build_preamble(
          - Assist with defensive security tasks only. Refuse to create, modify, or improve \
          code that could be used maliciously.\n\
          - Never generate or guess URLs unless you are confident they are required for \
-         legitimate programming help. Prefer URLs provided by the user or found in local files.\n\n",
+         legitimate programming help. Prefer URLs provided by the user or found in local files.\n\
+         - After creating or modifying executable artifacts, run at least one behavior check before claiming done.\n\
+         - For shell scripts, validate syntax and execute at least one path unless blocked by environment.\n\
+         - If claiming a skill was used this run, ensure evidence exists in this run; otherwise state it came from prior memory.\n\
+         - When creating skills without a user-provided name, use deterministic kebab-case derived from the capability.\n\n",
     );
 
     // ── 5. User — who the user is (if present) ────────────────────────────────

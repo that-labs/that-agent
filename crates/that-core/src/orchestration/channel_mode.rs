@@ -2335,11 +2335,13 @@ async fn run_agent_for_sender(
             },
         },
     );
+    let mem_cfg = agent_memory_config(&agent.name);
     let task_for_model = append_system_reminder(
         &enriched_task,
         &session_id,
         container.is_some(),
         &agent.name,
+        &mem_cfg,
     );
 
     let route_channel_id = if channel_id == "heartbeat" {

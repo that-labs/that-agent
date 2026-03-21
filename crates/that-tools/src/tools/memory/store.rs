@@ -37,6 +37,7 @@ impl MemoryStore {
         tags: &[String],
         source: Option<&str>,
         session_id: Option<&str>,
+        pin: bool,
     ) -> Result<AddResult, Box<dyn std::error::Error>> {
         let content = content.trim();
         if content.is_empty() {
@@ -89,8 +90,8 @@ impl MemoryStore {
         let tags_str = tags.join(",");
 
         self.conn.execute(
-            "INSERT INTO memories (id, content, tags, source, session_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            params![id, content, tags_str, source, session_id, now],
+            "INSERT INTO memories (id, content, tags, source, session_id, pinned, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![id, content, tags_str, source, session_id, if pin { 1i64 } else { 0i64 }, now],
         )?;
 
         Ok(AddResult {
@@ -458,6 +459,42 @@ impl MemoryStore {
         Ok(results)
     }
 
+    /// Return recently pinned memories (within 30 days), ordered by most recent first.
+    pub fn get_pinned(&self, limit: usize) -> Result<Vec<MemoryEntry>, Box<dyn std::error::Error>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, summary, tags, source, session_id,
+                    created_at, updated_at, access_count, last_accessed, pinned
+             FROM memories
+             WHERE pinned = 1 AND updated_at > datetime('now', '-30 days')
+             ORDER BY updated_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(MemoryEntry {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                summary: row.get(2)?,
+                tags: parse_tags(&row.get::<_, String>(3)?),
+                source: row.get(4)?,
+                session_id: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+                access_count: row.get::<_, i64>(8)? as u64,
+                last_accessed: row.get(9)?,
+                pinned: true,
+                rank: 0.0,
+            })
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            match row {
+                Ok(entry) => results.push(entry),
+                Err(e) => tracing::warn!("failed to read pinned row: {}", e),
+            }
+        }
+        Ok(results)
+    }
+
     /// Remove a single memory by ID.
     pub fn remove_by_id(&self, id: &str) -> Result<bool, Box<dyn std::error::Error>> {
         let deleted = self
@@ -648,6 +685,7 @@ mod tests {
                 &["tag1".to_string(), "tag2".to_string()],
                 Some("test"),
                 None,
+                false,
             )
             .unwrap();
         assert!(!result.id.is_empty());
@@ -662,10 +700,16 @@ mod tests {
     fn test_add_and_search() {
         let store = MemoryStore::open_in_memory().unwrap();
         store
-            .add("search me please", &["findable".to_string()], None, None)
+            .add(
+                "search me please",
+                &["findable".to_string()],
+                None,
+                None,
+                false,
+            )
             .unwrap();
         store
-            .add("another memory", &["other".to_string()], None, None)
+            .add("another memory", &["other".to_string()], None, None, false)
             .unwrap();
 
         let results = store.search("search", None, 10, None).unwrap();
@@ -683,10 +727,10 @@ mod tests {
     fn test_stats_with_data() {
         let store = MemoryStore::open_in_memory().unwrap();
         store
-            .add("memory 1", &["tag1".to_string()], None, None)
+            .add("memory 1", &["tag1".to_string()], None, None, false)
             .unwrap();
         store
-            .add("memory 2", &["tag2".to_string()], None, None)
+            .add("memory 2", &["tag2".to_string()], None, None, false)
             .unwrap();
         let stats = store.stats().unwrap();
         assert_eq!(stats.total_memories, 2);
@@ -695,7 +739,7 @@ mod tests {
     #[test]
     fn test_prune_by_access() {
         let store = MemoryStore::open_in_memory().unwrap();
-        store.add("low access", &[], None, None).unwrap();
+        store.add("low access", &[], None, None, false).unwrap();
         let deleted = store.prune(None, Some(5)).unwrap();
         assert_eq!(deleted, 1);
     }
@@ -704,7 +748,7 @@ mod tests {
     fn test_export_import() {
         let store1 = MemoryStore::open_in_memory().unwrap();
         store1
-            .add("export me", &["export".to_string()], None, None)
+            .add("export me", &["export".to_string()], None, None, false)
             .unwrap();
         let exported = store1.export_all().unwrap();
         assert!(!exported.is_empty());
@@ -729,7 +773,7 @@ mod tests {
     #[test]
     fn test_add_empty_content_rejected() {
         let store = MemoryStore::open_in_memory().unwrap();
-        let result = store.add("", &[], None, None);
+        let result = store.add("", &[], None, None, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }
@@ -737,14 +781,14 @@ mod tests {
     #[test]
     fn test_add_whitespace_only_rejected() {
         let store = MemoryStore::open_in_memory().unwrap();
-        let result = store.add("   \n\t  ", &[], None, None);
+        let result = store.add("   \n\t  ", &[], None, None, false);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_recall_special_chars_in_query() {
         let store = MemoryStore::open_in_memory().unwrap();
-        store.add("i love pizza", &[], None, None).unwrap();
+        store.add("i love pizza", &[], None, None, false).unwrap();
         // '?' should not cause FTS5 syntax error
         let results = store.recall("what pizza?", 5, None).unwrap();
         assert!(
@@ -756,7 +800,7 @@ mod tests {
     #[test]
     fn test_recall_multi_word_matches_individual_terms() {
         let store = MemoryStore::open_in_memory().unwrap();
-        store.add("i love pizza", &[], None, None).unwrap();
+        store.add("i love pizza", &[], None, None, false).unwrap();
         // "love" is not a stop word, so it should match
         let results = store.recall("love pizza", 5, None).unwrap();
         assert!(
@@ -768,7 +812,7 @@ mod tests {
     #[test]
     fn test_recall_pure_punctuation_returns_empty() {
         let store = MemoryStore::open_in_memory().unwrap();
-        store.add("some content", &[], None, None).unwrap();
+        store.add("some content", &[], None, None, false).unwrap();
         let results = store.recall("???", 5, None).unwrap();
         assert!(results.is_empty());
     }
@@ -777,10 +821,10 @@ mod tests {
     fn test_recall_prefix_deploy_finds_deployment() {
         let store = MemoryStore::open_in_memory().unwrap();
         store
-            .add("deployment pipeline for production", &[], None, None)
+            .add("deployment pipeline for production", &[], None, None, false)
             .unwrap();
         store
-            .add("deploy the service now", &[], None, None)
+            .add("deploy the service now", &[], None, None, false)
             .unwrap();
         // "deploy" → "deploy*" via prefix matching → finds both
         let results = store.recall("deploy", 5, None).unwrap();
@@ -795,7 +839,7 @@ mod tests {
     fn test_recall_prefix_argo_finds_argocd() {
         let store = MemoryStore::open_in_memory().unwrap();
         store
-            .add("ArgoCD pipeline configuration", &[], None, None)
+            .add("ArgoCD pipeline configuration", &[], None, None, false)
             .unwrap();
         let results = store.recall("argo", 5, None).unwrap();
         assert!(!results.is_empty(), "prefix: 'argo' should find 'ArgoCD'");
@@ -805,12 +849,14 @@ mod tests {
     fn test_recall_stop_words_filtered() {
         let store = MemoryStore::open_in_memory().unwrap();
         store
-            .add("database config in /etc/db.conf", &[], None, None)
+            .add("database config in /etc/db.conf", &[], None, None, false)
             .unwrap();
         store
-            .add("unrelated stuff about servers", &[], None, None)
+            .add("unrelated stuff about servers", &[], None, None, false)
             .unwrap();
-        store.add("more unrelated things", &[], None, None).unwrap();
+        store
+            .add("more unrelated things", &[], None, None, false)
+            .unwrap();
 
         // "where is the" are all stop words — only "db" and "config" matter
         let results = store.recall("where is the db config?", 10, None).unwrap();
@@ -828,7 +874,9 @@ mod tests {
     #[test]
     fn test_recall_all_stop_words_returns_empty() {
         let store = MemoryStore::open_in_memory().unwrap();
-        store.add("something stored", &[], None, None).unwrap();
+        store
+            .add("something stored", &[], None, None, false)
+            .unwrap();
         let results = store.recall("where is the", 5, None).unwrap();
         assert!(results.is_empty(), "all stop words should return empty");
     }
@@ -836,8 +884,12 @@ mod tests {
     #[test]
     fn test_dedup_same_content_returns_same_id() {
         let store = MemoryStore::open_in_memory().unwrap();
-        let first = store.add("exact same content", &[], None, None).unwrap();
-        let second = store.add("exact same content", &[], None, None).unwrap();
+        let first = store
+            .add("exact same content", &[], None, None, false)
+            .unwrap();
+        let second = store
+            .add("exact same content", &[], None, None, false)
+            .unwrap();
         assert_eq!(
             first.id, second.id,
             "duplicate content should return same ID"
@@ -850,16 +902,16 @@ mod tests {
     #[test]
     fn test_dedup_case_insensitive() {
         let store = MemoryStore::open_in_memory().unwrap();
-        let first = store.add("Hello World", &[], None, None).unwrap();
-        let second = store.add("hello world", &[], None, None).unwrap();
+        let first = store.add("Hello World", &[], None, None, false).unwrap();
+        let second = store.add("hello world", &[], None, None, false).unwrap();
         assert_eq!(first.id, second.id, "case-insensitive dedup");
     }
 
     #[test]
     fn test_dedup_different_content_creates_new() {
         let store = MemoryStore::open_in_memory().unwrap();
-        let first = store.add("content one", &[], None, None).unwrap();
-        let second = store.add("content two", &[], None, None).unwrap();
+        let first = store.add("content one", &[], None, None, false).unwrap();
+        let second = store.add("content two", &[], None, None, false).unwrap();
         assert_ne!(first.id, second.id);
 
         let stats = store.stats().unwrap();
@@ -898,7 +950,7 @@ mod tests {
     fn test_trigram_fallback_finds_substring() {
         let store = MemoryStore::open_in_memory().unwrap();
         store
-            .add("ArgoCD workflow configuration", &[], None, None)
+            .add("ArgoCD workflow configuration", &[], None, None, false)
             .unwrap();
 
         // "rgoC" won't match via BM25+prefix but trigram should find substring
@@ -913,7 +965,7 @@ mod tests {
     #[test]
     fn test_trigram_fallback_short_query_skipped() {
         let store = MemoryStore::open_in_memory().unwrap();
-        store.add("hello world", &[], None, None).unwrap();
+        store.add("hello world", &[], None, None, false).unwrap();
 
         // Queries with only 1-2 char words after cleaning should return empty from trigram
         // (trigram needs >= 3 chars). But BM25 prefix should still work.
@@ -932,6 +984,7 @@ mod tests {
                 &[],
                 None,
                 None,
+                false,
             )
             .unwrap();
         let second = store
@@ -940,6 +993,7 @@ mod tests {
                 &[],
                 None,
                 None,
+                false,
             )
             .unwrap();
         assert_eq!(first.id, second.id, "near-duplicate should return same ID");
@@ -955,10 +1009,16 @@ mod tests {
     fn test_near_dedup_different_content_creates_new() {
         let store = MemoryStore::open_in_memory().unwrap();
         let first = store
-            .add("kubernetes cluster configuration", &[], None, None)
+            .add("kubernetes cluster configuration", &[], None, None, false)
             .unwrap();
         let second = store
-            .add("postgres database optimization tuning", &[], None, None)
+            .add(
+                "postgres database optimization tuning",
+                &[],
+                None,
+                None,
+                false,
+            )
             .unwrap();
         assert_ne!(
             first.id, second.id,
@@ -993,12 +1053,14 @@ mod tests {
     fn test_session_id_filters_recall() {
         let store = MemoryStore::open_in_memory().unwrap();
         store
-            .add("session alpha content", &[], None, Some("session-a"))
+            .add("session alpha content", &[], None, Some("session-a"), false)
             .unwrap();
         store
-            .add("session beta content", &[], None, Some("session-b"))
+            .add("session beta content", &[], None, Some("session-b"), false)
             .unwrap();
-        store.add("global memory content", &[], None, None).unwrap();
+        store
+            .add("global memory content", &[], None, None, false)
+            .unwrap();
 
         // Session-scoped recall should only return entries for that session
         let results_a = store.recall("content", 10, Some("session-a")).unwrap();
@@ -1042,7 +1104,7 @@ mod tests {
 
         // Add a regular memory
         store
-            .add("auth decisions and workflow", &[], None, None)
+            .add("auth decisions and workflow", &[], None, None, false)
             .unwrap();
         // Add a compaction summary (older timestamp, but pinned)
         store
@@ -1117,6 +1179,7 @@ mod tests {
                 &[],
                 None,
                 None,
+                false,
             )
             .unwrap();
         // Nearly identical — should be detected as near-duplicate
@@ -1126,6 +1189,7 @@ mod tests {
                 &[],
                 None,
                 None,
+                false,
             )
             .unwrap();
         assert_eq!(

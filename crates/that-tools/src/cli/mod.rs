@@ -362,6 +362,9 @@ pub enum MemCommands {
         /// Scope this memory to a specific session.
         #[arg(long)]
         session_id: Option<String>,
+        /// Pin this memory so it appears in every system reminder automatically.
+        #[arg(long)]
+        pin: bool,
     },
     /// Recall memories with recency-boosted ranking and substring fallback.
     Recall {

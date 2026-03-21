@@ -166,11 +166,13 @@ fn mem_to_request(cmd: cli::MemCommands) -> Result<ToolRequest, String> {
             tags,
             source,
             session_id,
+            pin,
         } => Ok(ToolRequest::MemAdd {
             content,
             tags,
             source,
             session_id,
+            pin,
         }),
         cli::MemCommands::Recall {
             query,
