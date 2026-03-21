@@ -1,0 +1,75 @@
+name: Test install.sh
+
+on:
+  pull_request:
+    paths:
+      - scripts/install.sh
+      - deploy/helm/**
+      - Dockerfile
+      - .github/workflows/install-test.yml
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  install-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ANTHROPIC_API_KEY: sk-ant-test-ci-not-a-real-key
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run install.sh in CI mode
+        run: |
+          bash scripts/install.sh \
+            --ci \
+            --k3d \
+            --no-cilium \
+            --no-tailscale \
+            --no-k9s \
+            --namespace test-agent
+
+      - name: Wait for agent pod ready
+        run: |
+          kubectl wait --for=condition=ready pod \
+            -l app.kubernetes.io/component=runtime \
+            -n test-agent \
+            --timeout=120s
+
+      - name: Verify gateway responds
+        run: |
+          kubectl port-forward svc/that-agent 8080:8080 -n test-agent &
+          sleep 3
+          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/health || echo "000")
+          kill %1 2>/dev/null || true
+          echo "Gateway health: HTTP ${HTTP_CODE}"
+          [ "$HTTP_CODE" = "200" ]
+
+      - name: Verify Helm release exists
+        run: helm list -n test-agent | grep -q that-agent
+
+      - name: Verify git-server healthy
+        run: |
+          kubectl port-forward svc/that-agent-that-agent-git-server 9418:9418 -n test-agent &
+          sleep 2
+          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:9418/api/repos || echo "000")
+          kill %1 2>/dev/null || true
+          echo "Git server health: HTTP ${HTTP_CODE}"
+          [ "$HTTP_CODE" = "200" ]
+
+      - name: Show debug info on failure
+        if: failure()
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -n test-agent -o wide
+          echo "=== Events ==="
+          kubectl get events -n test-agent --sort-by='.lastTimestamp' | tail -30
+          echo "=== Agent logs ==="
+          kubectl logs -l app.kubernetes.io/component=runtime -n test-agent --tail=50 || true
+
+      - name: Cleanup
+        if: always()
+        run: k3d cluster delete that-agent 2>/dev/null || true

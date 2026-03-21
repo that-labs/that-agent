@@ -38,6 +38,8 @@ data:
   {{- if .Values.buildkit.enabled }}
   BUILDKIT_HOST: {{ include "that-agent.buildkitHost" . | quote }}
   {{- end }}
+  THAT_HELM_CHART: {{ .Values.helmChart | default "oci://ghcr.io/that-labs/helm/that-agent" | quote }}
+  THAT_HELM_CHART_VERSION: {{ .Chart.Version | quote }}
   THAT_GIT_WEBHOOK_URL: ""
   THAT_GIT_AUTO_MERGE: "false"
   THAT_AGENT_PARENT: {{ .Values.agent.parent | quote }}

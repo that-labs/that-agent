@@ -818,8 +818,13 @@ fn sanitize_name(input: &str) -> String {
 
 // ── Helm chart reference ─────────────────────────────────────────────────────
 
-/// OCI chart reference for child agent deployments.
-const HELM_CHART_OCI: &str = "oci://ghcr.io/that-labs/helm/that-agent";
+/// Default OCI chart reference for child agent deployments.
+/// Override with THAT_HELM_CHART env var for local charts or private registries.
+const HELM_CHART_OCI_DEFAULT: &str = "oci://ghcr.io/that-labs/helm/that-agent";
+
+fn helm_chart_ref() -> String {
+    std::env::var("THAT_HELM_CHART").unwrap_or_else(|_| HELM_CHART_OCI_DEFAULT.to_string())
+}
 
 /// Run `helm upgrade --install` with the given --set args. Returns stdout.
 async fn helm_install(release: &str, ns: &str, sets: &[String]) -> Result<String> {
@@ -836,11 +841,18 @@ async fn helm_run(release: &str, ns: &str, sets: &[String], wait: bool) -> Resul
         "upgrade".to_string(),
         "--install".to_string(),
         release.to_string(),
-        HELM_CHART_OCI.to_string(),
+        helm_chart_ref(),
         "--namespace".to_string(),
         ns.to_string(),
         "--create-namespace".to_string(),
     ];
+    // Pin chart version to match the running agent's version
+    if let Ok(ver) = std::env::var("THAT_HELM_CHART_VERSION") {
+        if !ver.is_empty() {
+            args.push("--version".to_string());
+            args.push(ver);
+        }
+    }
     if wait {
         args.extend([
             "--wait".to_string(),

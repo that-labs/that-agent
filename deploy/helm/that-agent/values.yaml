@@ -116,6 +116,10 @@ gateway:
   url: ""
   addr: "0.0.0.0:8080"
 
+# -- Helm chart reference for child agent deployments
+# Override to use a local chart path or private registry
+helmChart: ""
+
 # -- Observability
 observability:
   phoenixTracing: false

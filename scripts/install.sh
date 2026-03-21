@@ -40,6 +40,8 @@ header(){ echo -e "\n${_BOLD}$*${_RESET}"; }
 # ── Defaults ────────────────────────────────────────────────────────────────
 AGENT_IMAGE="${AGENT_IMAGE:-ghcr.io/that-labs/that-agent:latest}"
 AGENT_NAMESPACE="${AGENT_NAMESPACE:-}"   # derived from agent name if not set
+AGENT_NAME="${THAT_AGENT_NAME:-}"        # non-interactive: set via env
+AGENT_DESCRIPTION="${THAT_AGENT_DESCRIPTION:-}"
 INSTALL_CILIUM="${INSTALL_CILIUM:-true}"
 INSTALL_TAILSCALE_OPERATOR="${INSTALL_TAILSCALE_OPERATOR:-true}"
 INSTALL_K9S="${INSTALL_K9S:-true}"
@@ -47,6 +49,7 @@ ENABLE_SUBAGENTS="${ENABLE_SUBAGENTS:-true}"
 CLUSTER_ADMIN="${CLUSTER_ADMIN:-false}"
 FORCE_K3S="${FORCE_K3S:-false}"
 FORCE_K3D="${FORCE_K3D:-false}"
+NON_INTERACTIVE="${CI:-false}"           # auto-detect CI or set --ci
 KUBECTL="kubectl"
 K3D_CLUSTER_NAME="that-agent"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd)" || SCRIPT_DIR=""
@@ -83,8 +86,9 @@ while [[ $# -gt 0 ]]; do
     --no-k9s)     INSTALL_K9S=false;   shift   ;;
     --no-subagents) ENABLE_SUBAGENTS=false; shift ;;
     --cluster-admin) CLUSTER_ADMIN=true; shift ;;
+    --ci) NON_INTERACTIVE=true; shift ;;
     --help|-h)
-      echo "Usage: $0 [--image IMAGE:TAG] [--namespace NS] [--k3s] [--k3d] [--no-cilium] [--no-tailscale] [--no-k9s] [--no-subagents] [--cluster-admin]"
+      echo "Usage: $0 [--image IMAGE:TAG] [--namespace NS] [--k3s] [--k3d] [--no-cilium] [--no-tailscale] [--no-k9s] [--no-subagents] [--cluster-admin] [--ci]"
       exit 0
       ;;
     *) die "Unknown option: $1" ;;
@@ -548,6 +552,41 @@ EOF
 }
 
 gather_config() {
+  # Detect provider from key prefix
+  detect_provider() {
+    local key="$1"
+    if   [[ "${key}" == sk-ant-oat* ]];   then echo "anthropic"   # Claude Code OAuth
+    elif [[ "${key}" == sk-ant-* ]];        then echo "anthropic"
+    elif [[ "${key}" == sk-or-* ]];         then echo "openrouter"
+    elif [[ "${key}" == sk-* ]];            then echo "openai"
+    else echo ""
+    fi
+  }
+
+  # ── Non-interactive mode (CI / --ci) ──────────────────────────────────────
+  if [[ "${NON_INTERACTIVE}" == "true" ]]; then
+    AGENT_NAME="${AGENT_NAME:-ci-test-agent}"
+    AGENT_DESCRIPTION="${AGENT_DESCRIPTION:-CI test agent}"
+    LLM_API_KEY="${ANTHROPIC_API_KEY:-${CLAUDE_CODE_OAUTH_TOKEN:-${OPENAI_API_KEY:-${OPENROUTER_API_KEY:-}}}}"
+    [[ -z "${LLM_API_KEY}" ]] && die "Non-interactive mode requires an API key in the environment."
+    LLM_PROVIDER="$(detect_provider "${LLM_API_KEY}")"
+    [[ -z "${LLM_PROVIDER}" ]] && die "Could not detect provider from key prefix."
+    case "${LLM_PROVIDER}" in
+      anthropic)  DEFAULT_MODEL="claude-sonnet-4-6" ;;
+      openai)     DEFAULT_MODEL="gpt-5.2-codex"     ;;
+      openrouter) DEFAULT_MODEL=""                   ;;
+    esac
+    AGENT_MODEL="${AGENT_MODEL:-${DEFAULT_MODEL}}"
+    TELEGRAM_BOT_TOKEN=""
+    TELEGRAM_CHAT_ID=""
+    [[ -z "${AGENT_NAMESPACE}" ]] && AGENT_NAMESPACE="that-${AGENT_NAME}"
+    VALUES_DIR="${HOME}/.that-agent-install/${AGENT_NAME}"
+    ok "Non-interactive mode — using defaults."
+    echo "  Agent: ${AGENT_NAME} | Provider: ${LLM_PROVIDER} | Namespace: ${AGENT_NAMESPACE}"
+    return
+  fi
+
+  # ── Interactive mode ──────────────────────────────────────────────────────
   echo ""
   echo "  This installer will create a long-lived autonomous agent running on your cluster."
   echo "  The description you provide will be used to shape the agent's identity and"
@@ -591,17 +630,6 @@ gather_config() {
   if [[ -z "${LLM_API_KEY}" ]]; then
     die "API key is required."
   fi
-
-  # Detect provider from key prefix
-  detect_provider() {
-    local key="$1"
-    if   [[ "${key}" == sk-ant-oat* ]];   then echo "anthropic"   # Claude Code OAuth
-    elif [[ "${key}" == sk-ant-* ]];        then echo "anthropic"
-    elif [[ "${key}" == sk-or-* ]];         then echo "openrouter"
-    elif [[ "${key}" == sk-* ]];            then echo "openai"
-    else echo ""
-    fi
-  }
 
   LLM_PROVIDER="$(detect_provider "${LLM_API_KEY}")"
   if [[ -z "${LLM_PROVIDER}" ]]; then
@@ -653,14 +681,20 @@ gather_config() {
   echo "  Image:        ${AGENT_IMAGE}"
   echo "  Values dir:   ${VALUES_DIR}"
   echo ""
-  read -rp "  Proceed with deployment? [Y/n]: " CONFIRM < /dev/tty
-  case "${CONFIRM:-y}" in
-    [Yy]*) ;;
-    *) info "Aborted."; exit 0 ;;
-  esac
+  if [[ "${NON_INTERACTIVE}" != "true" ]]; then
+    read -rp "  Proceed with deployment? [Y/n]: " CONFIRM < /dev/tty
+    case "${CONFIRM:-y}" in
+      [Yy]*) ;;
+      *) info "Aborted."; exit 0 ;;
+    esac
+  fi
 }
 
 resolve_image() {
+  if [[ "${NON_INTERACTIVE}" == "true" ]]; then
+    info "Using image: ${AGENT_IMAGE}"
+    return
+  fi
   if [[ -n "${REPO_ROOT}" && -f "${REPO_ROOT}/build.sh" ]] && command -v docker &>/dev/null; then
     echo ""
     read -rp "  Local repo detected. Build image from source? [y/N]: " BUILD_LOCAL < /dev/tty

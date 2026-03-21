@@ -2,6 +2,8 @@ name: Publish Helm Chart (OCI)
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -26,11 +28,26 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
 
-      - name: Set version from tag
+      - name: Set version
         id: version
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # Release tag: v0.3.1 → 0.3.1
+            TAG="${GITHUB_REF_NAME#v}"
+            echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            # Main branch: latest tag + patch bump + SHA pre-release
+            # e.g. last release was v0.3.0 → main gets 0.3.1-abc1234
+            LATEST_TAG=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "v0.0.0")
+            BASE="${LATEST_TAG#v}"
+            MAJOR="${BASE%%.*}"
+            REST="${BASE#*.}"
+            MINOR="${REST%%.*}"
+            PATCH="${REST#*.}"
+            NEXT_PATCH=$((PATCH + 1))
+            SHA=$(git rev-parse --short HEAD)
+            echo "version=${MAJOR}.${MINOR}.${NEXT_PATCH}-${SHA}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Update Chart.yaml version
         run: |
