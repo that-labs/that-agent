@@ -140,6 +140,47 @@ need the updated main.
 - Consider splitting failed tasks into smaller, more focused subtasks
 - Store failure patterns in memory to avoid repeating them
 
+## Deployment Model
+
+All agents — root, persistent children, and ephemeral workers — are deployed
+via the same Helm chart. This ensures every agent gets identical security
+contexts, probes, labels, and network policy regardless of when it was created.
+
+- `spawn_agent` and `agent_run` deploy children as Helm releases
+- `agent_unregister` removes a child by uninstalling its Helm release
+- `agent_list` discovers all managed agents via their labels
+
+### Upgrading Children
+
+When you are upgraded to a new version, your existing children may still run
+the previous version. To bring them up to date:
+
+1. List all managed Helm releases in the namespace
+2. Compare each child's chart version to your own
+3. For each outdated child, run a Helm upgrade with the current chart version
+4. Verify each child is healthy after upgrade before moving to the next
+
+Children inherit the parent's secret for credentials — no key rotation needed
+during upgrades. Their persistent volume claims survive the upgrade.
+
+### Migrating Legacy Children
+
+If you discover children that were deployed before the Helm migration (created
+via raw manifests, not managed by Helm), they need to be adopted:
+
+1. Identify legacy children — they appear in the namespace with managed labels
+   but have no corresponding Helm release
+2. Note each child's name and its persistent volume claim name
+3. Delete the legacy resources (deployment, service, service account, role
+   binding, config map) — do NOT delete the persistent volume claim
+4. Re-deploy the child using `spawn_agent`, which creates a proper Helm release
+5. The new deployment automatically mounts the surviving persistent volume,
+   preserving the child's memory, config, and identity
+
+Always migrate one child at a time and verify it is healthy before proceeding
+to the next. If a child has active tasks, wait for them to complete or cancel
+them before migrating.
+
 ## Memory-Based Team Evolution
 
 After orchestration completes, store learnings in persistent memory:

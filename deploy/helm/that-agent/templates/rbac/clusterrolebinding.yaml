@@ -1,0 +1,16 @@
+{{- if eq .Values.accessLevel "cluster-admin" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "that-agent.fullname" . }}-cluster
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "that-agent.fullname" . }}-cluster
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "that-agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

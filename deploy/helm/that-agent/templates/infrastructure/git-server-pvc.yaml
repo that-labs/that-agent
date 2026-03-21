@@ -1,0 +1,18 @@
+{{- if and .Values.gitServer.enabled (not .Values.gitServer.storage.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "that-agent.fullname" . }}-git-repos
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git-server
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.gitServer.storage.size }}
+  {{- if .Values.gitServer.storage.storageClassName }}
+  storageClassName: {{ .Values.gitServer.storage.storageClassName | quote }}
+  {{- end }}
+{{- end }}

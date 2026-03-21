@@ -88,6 +88,8 @@ pub enum ToolRequest {
         source: Option<String>,
         #[serde(default)]
         session_id: Option<String>,
+        #[serde(default)]
+        pin: bool,
     },
     MemSearch {
         query: String,
@@ -465,11 +467,13 @@ pub fn execute_tool(
             tags,
             source,
             session_id,
+            pin,
         } => match crate::tools::impls::memory::add(
             content,
             tags,
             source.as_deref(),
             session_id.as_deref(),
+            *pin,
             &config.memory,
         ) {
             Ok(result) => {

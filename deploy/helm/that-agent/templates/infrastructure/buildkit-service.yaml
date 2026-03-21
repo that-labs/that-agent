@@ -1,0 +1,19 @@
+{{- if .Values.buildkit.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "that-agent.fullname" . }}-buildkit
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkit
+spec:
+  type: ClusterIP
+  ports:
+    - port: 1234
+      targetPort: buildkit
+      protocol: TCP
+      name: buildkit
+  selector:
+    {{- include "that-agent.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkit
+{{- end }}

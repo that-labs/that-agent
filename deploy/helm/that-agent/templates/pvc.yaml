@@ -1,0 +1,17 @@
+{{- if and (ne .Values.agent.role "ephemeral") (not .Values.agent.storage.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "that-agent.fullname" . }}-home
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.agent.storage.size }}
+  {{- if .Values.agent.storage.storageClassName }}
+  storageClassName: {{ .Values.agent.storage.storageClassName | quote }}
+  {{- end }}
+{{- end }}

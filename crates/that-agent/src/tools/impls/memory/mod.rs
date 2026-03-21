@@ -122,12 +122,13 @@ pub fn add(
     tags: &[String],
     source: Option<&str>,
     session_id: Option<&str>,
+    pin: bool,
     config: &MemoryConfig,
 ) -> Result<AddResult, Box<dyn std::error::Error>> {
     let db_path = resolve_db_path(config);
     ensure_db_dir(&db_path)?;
     let store = MemoryStore::open(&db_path)?;
-    store.add(content, tags, source, session_id)
+    store.add(content, tags, source, session_id, pin)
 }
 
 /// Store a durable compaction summary as a pinned memory entry.
@@ -186,6 +187,19 @@ pub fn remove(id: &str, config: &MemoryConfig) -> Result<RemoveResult, Box<dyn s
         id: id.to_string(),
         removed,
     })
+}
+
+/// Return recently pinned memories for auto-injection into system reminders.
+pub fn get_pinned(
+    limit: usize,
+    config: &MemoryConfig,
+) -> Result<Vec<MemoryEntry>, Box<dyn std::error::Error>> {
+    let db_path = resolve_db_path(config);
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let store = MemoryStore::open(&db_path)?;
+    store.get_pinned(limit)
 }
 
 /// Recall memories with recency-boosted BM25 ranking and trigram fallback.

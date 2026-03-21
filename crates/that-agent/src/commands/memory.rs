@@ -16,12 +16,14 @@ pub fn handle_mem(
             tags,
             source,
             session_id,
+            pin,
         } => {
             let result = crate::tools::impls::memory::add(
                 content,
                 tags,
                 source.as_deref(),
                 session_id.as_deref(),
+                *pin,
                 &ctx.config.memory,
             )?;
             let budgeted = output::emit_json(&result, ctx.max_tokens);

@@ -391,7 +391,7 @@ pub fn format_plugin_preamble_full(
                      Active image builder: `{}` from `<system-reminder>`. \
                      Follow backend strictly: use BuildKit when backend is `buildkit`; \
                      do not request Docker socket unless backend is explicitly `docker`. \
-                     Prefer manifest + kustomize workflows with rollout checks.",
+                     Prefer manifest + kubectl apply workflows with rollout checks.",
                     k8s.namespace, k8s.registry, image_backend
                 )
             }
@@ -426,7 +426,7 @@ pub fn format_plugin_preamble_full(
                      Active image builder: `{}` from `<system-reminder>`. \
                      Follow backend strictly: use BuildKit when backend is `buildkit`; \
                      do not request Docker socket unless backend is explicitly `docker`. \
-                     Prefer manifest + kustomize workflows with rollout checks.",
+                     Prefer manifest + kubectl apply workflows with rollout checks.",
                     k8s.namespace, k8s.registry, image_backend
                 )
             }

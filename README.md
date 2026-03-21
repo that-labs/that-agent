@@ -97,15 +97,24 @@ The installer detects your platform automatically. On Linux it uses k3s (single 
 **Already have a cluster?**
 
 ```bash
-cp -r deploy/k8s/overlays/example deploy/k8s/overlays/my-agent
-# edit namespace, configmap, secret
-kubectl apply -k deploy/k8s/overlays/my-agent
+helm install that-agent oci://ghcr.io/that-labs/helm/that-agent \
+  -n my-agent --create-namespace \
+  --set agent.name=my-agent \
+  --set secrets.anthropicApiKey=sk-ant-... \
+  --set accessLevel=namespace-admin
+```
+
+**Just want Docker Compose?**
+
+```bash
+cp .env.example .env    # fill in API keys
+docker compose up
 ```
 
 **Just want to try it locally?**
 
 ```bash
-cargo install --git https://github.com/that-labs/that-agent that-cli
+cargo install --git https://github.com/that-labs/that-agent that-agent --bin that
 echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
 that run "Create a hello-world Python script and verify it runs"
 that chat       # interactive session
@@ -124,7 +133,7 @@ The agent works at three levels. Each tier adds capabilities:
 | **Docker** (`docker run`) | Docker | Same + sandboxed file and shell execution, fs isolation |
 | **Kubernetes** (`k3d` / `k3s` / any cluster) | Docker + k3d (macOS), k3s (Linux), or existing cluster | Full power — sandbox pods, plugins, sub-agents, in-cluster registry, BuildKit, gateway extension, eval harness with sandbox scenarios |
 
-**Upgrade path:** The binary is the same everywhere — `THAT_SANDBOX_MODE` flips between host, Docker, and Kubernetes. Moving from local dev to a cluster means setting one environment variable and applying the same Kustomize overlay.
+**Upgrade path:** The binary is the same everywhere — `THAT_SANDBOX_MODE` flips between host, Docker, and Kubernetes. Moving from local dev to a cluster means setting one environment variable and running `helm install`.
 
 **Evals in a cluster:** Scenarios with `sandbox = true` spin up sandbox pods, run assertions inside them, and tear them down — same as production. On k3d, this works identically to a remote cluster. Point `KUBECONFIG` at your k3d cluster and run `that eval`.
 
@@ -157,7 +166,7 @@ Override the auto-detection with `--k3s` or `--k3d` on any platform. All infrast
 | — | Sub-agent RBAC | ClusterRole for namespace creation and cross-namespace orchestration | `--no-subagents` |
 | — | Cluster admin | Bind to `cluster-admin` instead of scoped ClusterRole (opt-in) | `--cluster-admin` |
 | 5 | In-cluster registry | Private container registry (NodePort) for agent-built images | always |
-| 6–9 | Agent config + deploy | Interactive prompts → Kustomize overlay → `kubectl apply` | — |
+| 6–9 | Agent config + deploy | Interactive prompts → Helm values → `helm install` | — |
 
 #### Interactive prompts
 
@@ -226,6 +235,16 @@ TS_TAILNET_NAME=myteam \
 | `INSTALL_K9S` | Install K9s | `true` |
 | `ENABLE_SUBAGENTS` | ClusterRole for cross-namespace sub-agents | `true` |
 | `CLUSTER_ADMIN` | Bind to built-in `cluster-admin` ClusterRole | `false` |
+| `THAT_AGENT_NAME` | Agent name (non-interactive mode) | prompted |
+| `THAT_AGENT_DESCRIPTION` | Agent description (non-interactive mode) | prompted |
+
+**CI / non-interactive mode:**
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... bash install.sh --ci --k3d --no-cilium --no-tailscale --no-k9s
+```
+
+The `--ci` flag (or `CI=true` env var) skips all interactive prompts and reads configuration from environment variables. Used by the project's own CI to validate the install flow end-to-end.
 
 #### Post-install
 
@@ -302,40 +321,38 @@ This is the least-privilege approach — the ClusterRole only grants the ability
 
 For single-user VPS setups where the agent is the sole operator of the cluster, pass `--cluster-admin` to the installer. This binds the agent's ServiceAccount to the built-in `cluster-admin` ClusterRole — full unrestricted access to all resources in all namespaces. Use this when you want the agent to manage the entire cluster (install operators, configure cluster-wide resources, manage all namespaces) without RBAC friction. **Not recommended for shared or multi-tenant clusters.**
 
-Manifests: [`deploy/k8s/base/role.yaml`](./deploy/k8s/base/role.yaml) (namespace), [`deploy/k8s/base/clusterrole.yaml`](./deploy/k8s/base/clusterrole.yaml) (cluster).
+Manifests: [`deploy/helm/that-agent/templates/rbac/`](./deploy/helm/that-agent/templates/rbac/) (namespace and cluster roles, gated by `accessLevel` value).
 
 ### Existing Kubernetes cluster
 
 ```bash
-cp -r deploy/k8s/overlays/example deploy/k8s/overlays/my-agent
-# edit namespace, configmap, secret
-kubectl apply -k deploy/k8s/overlays/my-agent
+helm install that-agent oci://ghcr.io/that-labs/helm/that-agent \
+  -n my-agent --create-namespace \
+  --set agent.name=my-agent \
+  --set secrets.anthropicApiKey=sk-ant-... \
+  --set accessLevel=namespace-admin
 ```
 
-The default overlay pulls `ghcr.io/that-labs/that-agent:latest`. Same manifests work on a single node or across multiple regions. See [OPERATORS.md](./OPERATORS.md) for full configuration, environment variables, and observability setup.
+The chart deploys the agent, git server, BuildKit, and cache proxy. All infrastructure services are configurable via `values.yaml`. See [OPERATORS.md](./OPERATORS.md) for full configuration, environment variables, and observability setup.
 
-### Docker (local development)
+Three access levels: `cluster-admin` (full RBAC + child spawning across namespaces), `namespace-admin` (own namespace only), `readonly` (observe only).
 
-For quick local experimentation without a cluster:
+### Docker Compose (local development)
+
+The fastest way to run the full stack locally without a Kubernetes cluster:
 
 ```bash
-docker run -it --rm \
-  -e ANTHROPIC_API_KEY \
-  -e THAT_AGENT_NAME=my-agent \
-  -v that-agent-home:/home/agent/.that-agent \
-  -v that-workspace:/workspace \
-  ghcr.io/that-labs/that-agent:latest \
-  -c "that chat --agent my-agent --no-sandbox"
+cp .env.example .env    # fill in at least one LLM API key
+docker compose up
 ```
 
-Two image variants are published to `ghcr.io/that-labs/that-agent`:
+This starts the agent, git server, and cache proxy. The agent gateway is available at `http://localhost:8080`. Add BuildKit for image builds:
 
-| Tag | Contents |
-|---|---|
-| `latest` / `v*` | Slim — Python, Git, curl, ripgrep, kubectl, Docker CLI |
-| `latest-full` / `v*-full` | Full — adds Rust, Go, Node.js, TypeScript, Python dev packages |
+```bash
+docker compose --profile build up
+```
 
-> The agent runs and works in Docker, but without a cluster it can't deploy services, manage workloads, or interact with the Kubernetes control plane. For the full experience, use k3s or any conformant cluster.
+> The agent runs and works in Docker, but without a cluster it can't deploy services, manage workloads, or spawn sub-agents. For the full experience, use k3s or any conformant cluster.
 
 ### Pre-built binary
 
@@ -359,7 +376,7 @@ sudo mv that /usr/local/bin/
 
 ```bash
 # Install directly from GitHub
-cargo install --git https://github.com/that-labs/that-agent that-cli
+cargo install --git https://github.com/that-labs/that-agent that-agent --bin that
 
 # Or clone and build locally
 cargo build --release
@@ -409,26 +426,17 @@ Before deploying to production, apply these hardening measures:
 
 ## Architecture
 
-```text
-that-cli -------> that-core ---------> that-channels
-  |                 |   |   |
-  |                 |   |   +--------> that-plugins
-  |                 |   +------------> that-sandbox
-  |                 +----------------> that-tools
-  +---------------------------------> that-tools
+Single consolidated crate (`that-agent`) plus standalone `that-git-server`.
 
-that-eval -------> that-core + that-tools
-```
-
-| Crate | Role |
+| Module | Role |
 |---|---|
-| `that-core` | Orchestration runtime — agent loop, preamble, sessions, all execution paths |
-| `that-tools` | Capability plane — fs, code, memory, search, exec, human, cluster — with policy gates |
-| `that-sandbox` | Execution boundary — Kubernetes-native with Docker fallback |
-| `that-channels` | Channel router and adapters |
-| `that-plugins` | Runtime extension plane — commands, activations, routines |
-| `that-eval` | Behavioral scenario harness with LLM judge and structured reports |
-| `that-cli` | Operator entrypoint — the `that` binary |
+| `orchestration/` | Agent loop, preamble, sessions, all execution paths |
+| `tools/` | Capability plane — fs, code, memory, search, exec, human — with policy gates |
+| `sandbox/` | Execution boundary — Kubernetes-native with Docker fallback |
+| `channels/` | Channel router and adapters (Telegram, HTTP gateway, TUI) |
+| `plugins/` | Runtime extension plane — commands, activations, routines |
+| `eval/` | Behavioral scenario harness with LLM judge and structured reports |
+| `commands/` | CLI command handlers — the `that` binary |
 
 Full narrative in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
@@ -497,16 +505,10 @@ Runtime:      Kubernetes (k3d on macOS, k3s on Linux, any conformant cluster in 
 
 ```text
 crates/
-  that-cli/          # operator binary
-  that-core/         # orchestration runtime
-  that-tools/        # tool engine + policy
-  that-sandbox/      # container backends
-  that-channels/     # channel router + adapters
-  that-plugins/      # plugin registry
-  that-eval/         # eval runner + judge
+  that-agent/        # consolidated crate (CLI + orchestration + tools + channels + plugins + eval)
+  that-git-server/   # standalone Git Smart HTTP server
 evals/scenarios/     # TOML scenario definitions
-sandbox/             # Dockerfile + build script
-deploy/k8s/          # Kubernetes manifests
+deploy/helm/         # Helm chart (single chart for root, child, and ephemeral agents)
 ```
 
 ## Community

@@ -46,6 +46,8 @@ pub fn load_workspace_files(agent: &AgentDef, sandbox: bool) -> workspace::Works
         workspace::load_all_local(&agent.name)
     };
     super::config::set_agent_status(ws.status.clone());
+    // WorkingNotes loaded but not seeded into cache here — session_id is needed
+    // at the call site; the caller is responsible for calling set_working_notes.
     ws
 }
 

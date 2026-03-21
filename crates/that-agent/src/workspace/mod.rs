@@ -131,6 +131,11 @@ pub struct WorkspaceFiles {
     /// to track active deployments, capabilities, and runtime state. Capped at 8000
     /// chars (~2k tokens) on read. Updated via `identity_update(file="Status.md", ...)`.
     pub status: Option<String>,
+    /// `WorkingNotes.md` — session working context (current findings, decisions).
+    ///
+    /// Cleared between sessions. Injected into the system reminder as `<working-notes>`.
+    /// Capped at 2000 chars on read.
+    pub working_notes: Option<String>,
     /// `Context.md` — domain context provided by the parent at spawn time.
     ///
     /// Written via `GoldBootstrap` before the agent loop starts. Contains links,
@@ -227,7 +232,7 @@ pub fn load_all_local(agent_name: &str) -> WorkspaceFiles {
         if let Some(name) = entry.file_name().to_str() {
             match name {
                 "Soul.md" | "Identity.md" | "Agents.md" | "User.md" | "Tools.md" | "Memory.md"
-                | "Boot.md" | "Bootstrap.md" | "Status.md" | "Context.md" => {
+                | "Boot.md" | "Bootstrap.md" | "Status.md" | "Context.md" | "WorkingNotes.md" => {
                     match std::fs::read_to_string(entry.path()) {
                         Ok(c) => {
                             files.insert(name.to_string(), c);
@@ -252,6 +257,7 @@ pub fn load_all_local(agent_name: &str) -> WorkspaceFiles {
         boot: files.remove("Boot.md"),
         bootstrap: files.remove("Bootstrap.md"),
         status: files.remove("Status.md").map(cap_status),
+        working_notes: files.remove("WorkingNotes.md").map(cap_working_notes),
         context: files.remove("Context.md"),
     }
 }
@@ -268,6 +274,8 @@ pub fn load_all_sandbox(container: &str, agent_name: &str) -> WorkspaceFiles {
         boot: read_sandbox(container, agent_name, "Boot.md"),
         bootstrap: read_sandbox(container, agent_name, "Bootstrap.md"),
         status: read_sandbox(container, agent_name, "Status.md").map(cap_status),
+        working_notes: read_sandbox(container, agent_name, "WorkingNotes.md")
+            .map(cap_working_notes),
         context: read_sandbox(container, agent_name, "Context.md"),
     }
 }
@@ -279,6 +287,16 @@ fn cap_status(s: String) -> String {
         s
     } else {
         s.chars().take(MAX_STATUS_CHARS).collect::<String>() + "\n[truncated]"
+    }
+}
+
+/// Cap WorkingNotes.md content at ~500 tokens (2000 chars).
+fn cap_working_notes(s: String) -> String {
+    const MAX_NOTES_CHARS: usize = 2000;
+    if s.len() <= MAX_NOTES_CHARS {
+        s
+    } else {
+        s.chars().take(MAX_NOTES_CHARS).collect::<String>() + "\n[truncated]"
     }
 }
 
@@ -359,6 +377,7 @@ const WRITABLE_WORKSPACE_FILES: &[&str] = &[
     "Tasks.md",
     "Status.md",
     "Bootstrap.md",
+    "WorkingNotes.md",
 ];
 
 /// Resolve a short name like "agents" to its filename "Agents.md".
@@ -584,6 +603,7 @@ results following your Communication Style.
 
 - Recall first on ongoing topics.
 - Use `mem_add` for durable facts: decisions, preferences, constraints, failures, fixes, and reusable patterns.
+- Use `pin: true` on `mem_add` for facts that should be visible every turn without recall. Pinned memories appear automatically in `<pinned-context>`.
 - Be proactive about your own development. When a lesson should survive the session, decide whether it belongs in memory, `Agents.md`, `Tools.md`, or a skill, and update the right place.
 - After meaningful completion, store a memory chunk that explains what changed, what matters now, and any follow-up.
 - Compact noisy topics with `mem_compact`.

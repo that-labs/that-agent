@@ -445,6 +445,8 @@ pub struct MemAddArgs {
     pub tags: Vec<String>,
     pub source: Option<String>,
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub pin: bool,
 }
 #[derive(Debug, Deserialize)]
 pub struct MemRecallArgs {
@@ -806,7 +808,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "content": { "type": "string", "description": "Information to remember" },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Categorisation tags" },
                     "source": { "type": "string", "description": "Optional source file or URL" },
-                    "session_id": { "type": "string" }
+                    "session_id": { "type": "string" },
+                    "pin": { "type": "boolean", "description": "Pin this memory so it appears in every system reminder automatically" }
                 },
                 "required": ["content"]
             }),
@@ -1966,16 +1969,22 @@ async fn dispatch_inner(
         "mem_add" => {
             let args: MemAddArgs = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            run_on_host(
+            let pin = args.pin;
+            let result = run_on_host(
                 config.clone(),
                 ToolRequest::MemAdd {
                     content: args.content,
                     tags: args.tags,
                     source: args.source,
                     session_id: args.session_id,
+                    pin,
                 },
             )
-            .await
+            .await;
+            if pin {
+                crate::orchestration::config::invalidate_pinned_context();
+            }
+            result
         }
         "mem_recall" => {
             let args: MemRecallArgs = serde_json::from_str(args_json)
@@ -2009,6 +2018,7 @@ async fn dispatch_inner(
         "mem_compact" => {
             let args: MemCompactArgs = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::orchestration::config::invalidate_pinned_context();
             run_on_host(
                 config.clone(),
                 ToolRequest::MemCompact {
@@ -2026,6 +2036,7 @@ async fn dispatch_inner(
         "mem_unpin" => {
             let args: MemUnpinArgs = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+            crate::orchestration::config::invalidate_pinned_context();
             run_on_host(config.clone(), ToolRequest::MemUnpin { id: args.id }).await
         }
         "search_query" => {
@@ -2554,9 +2565,12 @@ async fn dispatch_inner(
                 ),
             }
             .map_err(ToolError)?;
-            // Refresh the in-memory Status.md cache when the agent updates it.
+            // Refresh in-memory caches when the agent updates tracked files.
             if args.file == "Status.md" {
                 crate::orchestration::config::set_agent_status(Some(args.content.clone()));
+            }
+            if args.file == "WorkingNotes.md" || args.file == "workingnotes" {
+                crate::orchestration::config::set_working_notes_all(Some(args.content.clone()));
             }
             Ok(serde_json::json!({ "status": "ok", "file": args.file }))
         }

@@ -63,6 +63,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # fd-find installs as 'fdfind' on Debian — symlink for convenience
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
+# Helm CLI — used by the agent to deploy child agents via the same chart
+RUN curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
 # that binaries — from builder stage (local) or pre-built via --build-context (CI)
 COPY --from=builder /build/that /usr/local/bin/that
 COPY --from=builder /build/that-git-server /usr/local/bin/that-git-server

@@ -807,57 +807,6 @@ pub fn is_k8s_mode() -> bool {
 }
 
 /// Resolve the container image for child agents.
-///
-/// 1. `THAT_AGENT_IMAGE` env var (explicit override)
-/// 2. Own pod image via `kubectl get pod $HOSTNAME`
-/// 3. Fallback default
-pub async fn resolve_agent_image() -> String {
-    if let Ok(img) = std::env::var("THAT_AGENT_IMAGE") {
-        if !img.trim().is_empty() {
-            return img.trim().to_string();
-        }
-    }
-    if let Ok(hostname) = std::env::var("HOSTNAME") {
-        let output = tokio::process::Command::new("kubectl")
-            .args([
-                "get",
-                "pod",
-                &hostname,
-                "-o",
-                "jsonpath={.spec.containers[0].image}",
-            ])
-            .output()
-            .await;
-        if let Ok(o) = output {
-            if o.status.success() {
-                let img = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if !img.is_empty() {
-                    return img;
-                }
-            }
-        }
-    }
-    "ghcr.io/that-labs/that-agent:latest".to_string()
-}
-
-/// Get the parent deployment's UID for ownerReferences.
-async fn parent_deploy_uid() -> Result<String> {
-    let deploy_name =
-        std::env::var("THAT_K8S_DEPLOYMENT_NAME").unwrap_or_else(|_| "that-agent".to_string());
-    let output = tokio::process::Command::new("kubectl")
-        .args([
-            "get",
-            "deployment",
-            &deploy_name,
-            "-o",
-            "jsonpath={.metadata.uid}",
-        ])
-        .output()
-        .await?;
-    anyhow::ensure!(output.status.success(), "failed to get parent deploy UID");
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 /// Get the K8s namespace from env (POD_NAMESPACE) or default.
 fn k8s_namespace() -> String {
     std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string())
@@ -867,211 +816,154 @@ fn sanitize_name(input: &str) -> String {
     crate::sandbox::kubernetes::sanitize_k8s_name(input)
 }
 
+// ── Helm chart reference ─────────────────────────────────────────────────────
+
+/// Default OCI chart reference for child agent deployments.
+/// Override with THAT_HELM_CHART env var for local charts or private registries.
+const HELM_CHART_OCI_DEFAULT: &str = "oci://ghcr.io/that-labs/helm/that-agent";
+
+fn helm_chart_ref() -> String {
+    std::env::var("THAT_HELM_CHART").unwrap_or_else(|_| HELM_CHART_OCI_DEFAULT.to_string())
+}
+
+/// Run `helm upgrade --install` with the given --set args. Returns stdout.
+async fn helm_install(release: &str, ns: &str, sets: &[String]) -> Result<String> {
+    helm_run(release, ns, sets, true).await
+}
+
+/// Run `helm upgrade --install` without --wait (for async ephemeral Jobs).
+async fn helm_install_nowait(release: &str, ns: &str, sets: &[String]) -> Result<String> {
+    helm_run(release, ns, sets, false).await
+}
+
+async fn helm_run(release: &str, ns: &str, sets: &[String], wait: bool) -> Result<String> {
+    let mut args = vec![
+        "upgrade".to_string(),
+        "--install".to_string(),
+        release.to_string(),
+        helm_chart_ref(),
+        "--namespace".to_string(),
+        ns.to_string(),
+        "--create-namespace".to_string(),
+    ];
+    // Pin chart version to match the running agent's version
+    if let Ok(ver) = std::env::var("THAT_HELM_CHART_VERSION") {
+        if !ver.is_empty() {
+            args.push("--version".to_string());
+            args.push(ver);
+        }
+    }
+    if wait {
+        args.extend([
+            "--wait".to_string(),
+            "--timeout".to_string(),
+            "120s".to_string(),
+        ]);
+    }
+    for s in sets {
+        args.push("--set".to_string());
+        args.push(s.clone());
+    }
+    let output = tokio::process::Command::new("helm")
+        .args(&args)
+        .output()
+        .await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "helm install failed for '{}': {}",
+        release,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Run `helm uninstall` for a release.
+async fn helm_uninstall(release: &str, ns: &str) -> Result<()> {
+    let output = tokio::process::Command::new("helm")
+        .args(["uninstall", release, "--namespace", ns])
+        .output()
+        .await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "helm uninstall failed for '{}': {}",
+        release,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+/// Build common --set args for child agent Helm installs.
+fn child_helm_sets(
+    name: &str,
+    role_type: &str,
+    agent_role: &str,
+    parent: &str,
+    model: &str,
+) -> Vec<String> {
+    let parent_gw = crate::orchestration::support::resolve_gateway_url();
+    let gw_token = std::env::var("THAT_GATEWAY_TOKEN").unwrap_or_default();
+    let provider = std::env::var("THAT_AGENT_PROVIDER").unwrap_or_default();
+    let cpu_limit = std::env::var("THAT_AGENT_CHILD_CPU_LIMIT").unwrap_or_else(|_| "1".into());
+    let mem_limit = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT").unwrap_or_else(|_| "2Gi".into());
+
+    let mut sets = vec![
+        format!("agent.name={name}"),
+        format!("agent.role={role_type}"),
+        format!("agent.agentRole={agent_role}"),
+        format!("agent.parent={parent}"),
+        format!("agent.parentGatewayUrl={parent_gw}"),
+        format!("agent.parentGatewayToken={gw_token}"),
+        format!("agent.provider={provider}"),
+        format!("agent.model={model}"),
+        format!("agent.resources.limits.cpu={cpu_limit}"),
+        format!("agent.resources.limits.memory={mem_limit}"),
+        "agent.resources.requests.cpu=200m".to_string(),
+        "agent.resources.requests.memory=256Mi".to_string(),
+        "secrets.existingSecret=that-agent-secrets".to_string(),
+        "accessLevel=namespace-admin".to_string(),
+        "gitServer.enabled=false".to_string(),
+        "buildkit.enabled=false".to_string(),
+        "cacheProxy.enabled=false".to_string(),
+        "pdb.enabled=false".to_string(),
+        "agent.storage.size=1Gi".to_string(),
+    ];
+
+    // Forward the image so children use the same version as parent
+    if let Ok(image) = std::env::var("THAT_AGENT_IMAGE") {
+        if let Some((repo, tag)) = image.rsplit_once(':') {
+            sets.push(format!("agent.image.repository={repo}"));
+            sets.push(format!("agent.image.tag={tag}"));
+        }
+    }
+
+    sets
+}
+
 // ── K8s Spawn — Persistent Agent ─────────────────────────────────────────────
 
-/// Spawn a persistent agent as a K8s Deployment + Service.
+/// Spawn a persistent agent via Helm (Deployment + Service).
 ///
-/// Creates: ServiceAccount, RoleBinding, ConfigMap, Deployment, Service.
-/// All resources are labeled for scoped management.
+/// Uses the same Helm chart as the root agent with `agent.role=child`.
 pub async fn spawn_persistent_agent_k8s(
     name: &str,
     role: Option<&str>,
     parent: &str,
     model: Option<&str>,
-    env_overrides: Option<&std::collections::HashMap<String, String>>,
+    _env_overrides: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let safe_name = sanitize_name(name);
-    let sa_name = format!("that-agent-{safe_name}");
-    let image = resolve_agent_image().await;
-    let deploy_uid = parent_deploy_uid().await.unwrap_or_default();
-    let parent_deploy =
-        std::env::var("THAT_K8S_DEPLOYMENT_NAME").unwrap_or_else(|_| "that-agent".to_string());
-    let parent_gw = crate::orchestration::support::resolve_gateway_url();
-    let gw_token = std::env::var("THAT_GATEWAY_TOKEN").unwrap_or_default();
+    let release_name = format!("that-agent-{safe_name}");
 
-    let provider = std::env::var("THAT_AGENT_PROVIDER").unwrap_or_default();
     let model_str = model
         .map(crate::model_catalog::normalize_model)
         .or_else(|| std::env::var("THAT_AGENT_MODEL").ok())
         .unwrap_or_default();
 
-    let cpu_limit = std::env::var("THAT_AGENT_CHILD_CPU_LIMIT").unwrap_or_else(|_| "1".into());
-    let mem_limit = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT").unwrap_or_else(|_| "2Gi".into());
+    let sets = child_helm_sets(name, "child", role.unwrap_or(""), parent, &model_str);
+    helm_install(&release_name, &ns, &sets).await?;
 
-    let role_str = role.unwrap_or("");
-    let labels = k8s_labels(name, parent, "persistent", role_str);
-    let owner_refs = k8s_owner_refs(&parent_deploy, &deploy_uid);
-
-    let child_depth = crate::orchestration::config::parse_env_u8("THAT_AGENT_DEPTH", 0) + 1;
-    let mut config_data = serde_json::json!({
-        "THAT_AGENT_NAME": name,
-        "THAT_AGENT_PARENT": parent,
-        "THAT_AGENT_ROLE": role_str,
-        "THAT_AGENT_DEPTH": child_depth.to_string(),
-        "THAT_SANDBOX_MODE": "kubernetes",
-        "THAT_TRUSTED_LOCAL_SANDBOX": "1",
-        "THAT_AGENT_PROVIDER": provider,
-        "THAT_AGENT_MODEL": model_str,
-        "THAT_PARENT_GATEWAY_URL": parent_gw,
-        "THAT_PARENT_GATEWAY_TOKEN": gw_token,
-        "THAT_SANDBOX_K8S_NAMESPACE": ns,
-        // Blank out channel tokens so children don't steal the parent's channels.
-        // Children communicate via their HTTP gateway only.
-        "TELEGRAM_BOT_TOKEN": "",
-        "DISCORD_BOT_TOKEN": "",
-        "SLACK_BOT_TOKEN": "",
-        "SLACK_APP_TOKEN": "",
-    });
-    if let Some(api_key) = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        config_data["ANTHROPIC_API_KEY"] = serde_json::json!(api_key);
-    }
-    if let Some(token) = crate::auth::anthropic_oauth_token_from_env() {
-        config_data["CLAUDE_CODE_OAUTH_TOKEN"] = serde_json::json!(&token);
-        config_data["CLAUDE_CODE_AUTH_TOKEN"] = serde_json::json!(&token);
-        config_data["CLAUDE_CODE_AUTH"] = serde_json::json!(token);
-    }
-
-    // Apply caller-provided env overrides (e.g. a dedicated TELEGRAM_BOT_TOKEN).
-    if let Some(overrides) = env_overrides {
-        for (k, v) in overrides {
-            config_data[k] = serde_json::json!(v);
-        }
-    }
-
-    let resources = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "List",
-        "items": [
-            {
-                "apiVersion": "v1",
-                "kind": "ServiceAccount",
-                "metadata": {
-                    "name": sa_name,
-                    "namespace": ns,
-                    "labels": labels,
-                    "ownerReferences": owner_refs,
-                }
-            },
-            {
-                "apiVersion": "rbac.authorization.k8s.io/v1",
-                "kind": "RoleBinding",
-                "metadata": {
-                    "name": sa_name,
-                    "namespace": ns,
-                    "labels": labels,
-                    "ownerReferences": owner_refs,
-                },
-                "roleRef": {
-                    "apiGroup": "rbac.authorization.k8s.io",
-                    "kind": "Role",
-                    "name": "that-agent-child-readonly"
-                },
-                "subjects": [{
-                    "kind": "ServiceAccount",
-                    "name": sa_name,
-                    "namespace": ns,
-                }]
-            },
-            {
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {
-                    "name": format!("{sa_name}-config"),
-                    "namespace": ns,
-                    "labels": labels,
-                    "ownerReferences": owner_refs,
-                },
-                "data": config_data,
-            },
-            {
-                "apiVersion": "v1",
-                "kind": "PersistentVolumeClaim",
-                "metadata": {
-                    "name": format!("{sa_name}-home"),
-                    "namespace": ns,
-                    "labels": labels,
-                },
-                "spec": {
-                    "accessModes": ["ReadWriteOnce"],
-                    "resources": { "requests": { "storage": "1Gi" } },
-                }
-            },
-            {
-                "apiVersion": "apps/v1",
-                "kind": "Deployment",
-                "metadata": {
-                    "name": sa_name,
-                    "namespace": ns,
-                    "labels": labels,
-                    "ownerReferences": owner_refs,
-                },
-                "spec": {
-                    "replicas": 1,
-                    "selector": { "matchLabels": { "that-agent/name": sanitize_label_value(name) } },
-                    "template": {
-                        "metadata": { "labels": labels },
-                        "spec": {
-                            "serviceAccountName": sa_name,
-                            "automountServiceAccountToken": true,
-                            "containers": [{
-                                "name": "agent",
-                                "image": image,
-                                "command": ["that", "--agent", name, "run", "listen", "--no-sandbox"],
-                                "envFrom": [
-                                    { "secretRef": { "name": "that-agent-secrets", "optional": true } },
-                                    { "configMapRef": { "name": format!("{sa_name}-config") } },
-                                ],
-                                "ports": [{ "containerPort": 8080, "name": "gateway" }],
-                                "readinessProbe": {
-                                    "exec": { "command": ["/bin/sh", "-c", "test -f /tmp/that-agent-ready"] },
-                                    "initialDelaySeconds": 5,
-                                    "periodSeconds": 5,
-                                },
-                                "livenessProbe": {
-                                    "exec": { "command": ["/bin/sh", "-c",
-                                        "test -f /tmp/that-agent-alive && [ $(( $(date +%s) - $(stat -c %Y /tmp/that-agent-alive) )) -lt 30 ]"] },
-                                    "initialDelaySeconds": 30,
-                                    "periodSeconds": 10,
-                                },
-                                "resources": {
-                                    "requests": { "cpu": "200m", "memory": "256Mi" },
-                                    "limits": { "cpu": cpu_limit, "memory": mem_limit },
-                                },
-                                "volumeMounts": [{ "name": "agent-home", "mountPath": "/home/agent/.that-agent" }],
-                            }],
-                            "volumes": [{
-                                "name": "agent-home",
-                                "persistentVolumeClaim": { "claimName": format!("{sa_name}-home") }
-                            }],
-                        }
-                    }
-                }
-            },
-            {
-                "apiVersion": "v1",
-                "kind": "Service",
-                "metadata": {
-                    "name": sa_name,
-                    "namespace": ns,
-                    "labels": labels,
-                    "ownerReferences": owner_refs,
-                },
-                "spec": {
-                    "selector": { "that-agent/name": sanitize_label_value(name) },
-                    "ports": [{ "name": "gateway", "port": 8080, "targetPort": 8080 }],
-                }
-            }
-        ]
-    });
-
-    kubectl_apply_json(&resources).await?;
-
-    let gateway_url = format!("http://{sa_name}.{ns}.svc.cluster.local:8080");
+    let gateway_url = format!("http://{release_name}.{ns}.svc.cluster.local:8080");
     Ok(serde_json::json!({
         "name": name,
         "type": "persistent",
@@ -1081,7 +973,9 @@ pub async fn spawn_persistent_agent_k8s(
 
 // ── K8s Spawn — Ephemeral Agent (agent_run) ──────────────────────────────────
 
-/// Run an ephemeral task agent as a K8s Job. Blocks until completion.
+/// Run an ephemeral task agent as a Helm release (K8s Job). Async non-blocking.
+///
+/// The parent monitors the Job via kubectl and reports progress.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_ephemeral_agent_k8s(
     name: &str,
@@ -1091,33 +985,19 @@ pub async fn run_ephemeral_agent_k8s(
     model: Option<&str>,
     workspace: bool,
     timeout_secs: u64,
-    bootstrap: Option<&crate::workspace::GoldBootstrap>,
+    _bootstrap: Option<&crate::workspace::GoldBootstrap>,
 ) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let safe_name = sanitize_name(name);
-    let sa_name = format!("that-agent-{safe_name}");
-    let image = resolve_agent_image().await;
-    let deploy_uid = parent_deploy_uid().await.unwrap_or_default();
-    let parent_deploy =
-        std::env::var("THAT_K8S_DEPLOYMENT_NAME").unwrap_or_else(|_| "that-agent".to_string());
-    let parent_gw = crate::orchestration::support::resolve_gateway_url();
-    let gw_token = std::env::var("THAT_GATEWAY_TOKEN").unwrap_or_default();
+    let release_name = format!("that-agent-{safe_name}");
     let git_svc = git_server_url(&ns);
-    let proxy_svc = cache_proxy_url(&ns);
 
-    let provider = std::env::var("THAT_AGENT_PROVIDER").unwrap_or_default();
     let model_str = model
         .map(crate::model_catalog::normalize_model)
         .or_else(|| std::env::var("THAT_AGENT_MODEL").ok())
         .unwrap_or_default();
 
-    let cpu_limit = std::env::var("THAT_AGENT_CHILD_CPU_LIMIT").unwrap_or_else(|_| "1".into());
-    let mem_limit = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT").unwrap_or_else(|_| "2Gi".into());
-
-    let role_str = role.unwrap_or("");
-
     if workspace {
-        // Verify the workspace repo exists on the git server (workspace_share must have been called).
         let check = reqwest::Client::new()
             .get(format!("{git_svc}/api/repos/workspace/activity"))
             .timeout(std::time::Duration::from_secs(5))
@@ -1134,172 +1014,42 @@ pub async fn run_ephemeral_agent_k8s(
         }
     }
 
-    let labels = k8s_labels(name, parent, "ephemeral", role_str);
-    let owner_refs = k8s_owner_refs(&parent_deploy, &deploy_uid);
+    let mut sets = child_helm_sets(name, "ephemeral", role.unwrap_or(""), parent, &model_str);
 
-    let child_depth = crate::orchestration::config::parse_env_u8("THAT_AGENT_DEPTH", 0) + 1;
-    let mut config_data = serde_json::json!({
-        "THAT_AGENT_NAME": name,
-        "THAT_AGENT_PARENT": parent,
-        "THAT_AGENT_ROLE": role_str,
-        "THAT_AGENT_DEPTH": child_depth.to_string(),
-        "THAT_SANDBOX_MODE": "kubernetes",
-        "THAT_TRUSTED_LOCAL_SANDBOX": "1",
-        "THAT_AGENT_PROVIDER": provider,
-        "THAT_AGENT_MODEL": model_str,
-        "THAT_PARENT_GATEWAY_URL": parent_gw,
-        "THAT_PARENT_GATEWAY_TOKEN": gw_token,
-        "HTTP_PROXY": proxy_svc,
-        "HTTPS_PROXY": proxy_svc,
-        "NO_PROXY": "*.svc.cluster.local,10.0.0.0/8,api.anthropic.com,api.openai.com,openrouter.ai",
-        "THAT_SANDBOX_K8S_NAMESPACE": ns,
-    });
+    // Ephemeral-specific settings
+    // Escape commas/special chars in task text by using a file-based approach
+    // For now, truncate task to avoid shell escaping issues with --set
+    let safe_task = task
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(4000)
+        .collect::<String>()
+        .replace('\\', "\\\\")
+        .replace(',', "\\,");
+    sets.push(format!("agent.job.task={safe_task}"));
+    sets.push("agent.job.ttlSeconds=300".to_string());
+    sets.push("networkPolicy.enabled=false".to_string());
 
-    // Forward Anthropic credentials so children inherit the parent's settings
-    // even when only the parent Deployment has them set.
-    if let Some(api_key) = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        config_data["ANTHROPIC_API_KEY"] = serde_json::json!(api_key);
-    }
-    if let Some(token) = crate::auth::anthropic_oauth_token_from_env() {
-        config_data["CLAUDE_CODE_OAUTH_TOKEN"] = serde_json::json!(&token);
-        config_data["CLAUDE_CODE_AUTH_TOKEN"] = serde_json::json!(&token);
-        config_data["CLAUDE_CODE_AUTH"] = serde_json::json!(token);
-    }
     if workspace {
-        config_data["GIT_REPO_URL"] = serde_json::json!(format!("{git_svc}/workspace.git"));
-        config_data["GIT_BRANCH"] = serde_json::json!(format!("task/{safe_name}"));
-    }
-    if let Some(bs) = bootstrap {
-        if let Ok(json) = serde_json::to_string(bs) {
-            config_data["THAT_GOLD_BOOTSTRAP"] = serde_json::json!(json);
-        }
+        sets.push("agent.job.workspace=true".to_string());
+        sets.push(format!("agent.job.gitRepoUrl={git_svc}/workspace.git"));
+        sets.push(format!("agent.job.gitBranch=task/{safe_name}"));
     }
 
-    // Build K8s resources as JSON (no YAML indentation issues)
-    let resources = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "List",
-        "items": [
-            {
-                "apiVersion": "v1",
-                "kind": "ServiceAccount",
-                "metadata": {
-                    "name": sa_name,
-                    "namespace": ns,
-                    "labels": labels,
-                    "ownerReferences": owner_refs,
-                }
-            },
-            {
-                "apiVersion": "rbac.authorization.k8s.io/v1",
-                "kind": "RoleBinding",
-                "metadata": {
-                    "name": sa_name,
-                    "namespace": ns,
-                    "labels": labels,
-                    "ownerReferences": owner_refs,
-                },
-                "roleRef": {
-                    "apiGroup": "rbac.authorization.k8s.io",
-                    "kind": "Role",
-                    "name": "that-agent-child-readonly"
-                },
-                "subjects": [{
-                    "kind": "ServiceAccount",
-                    "name": sa_name,
-                    "namespace": ns,
-                }]
-            },
-            {
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {
-                    "name": format!("{sa_name}-config"),
-                    "namespace": ns,
-                    "labels": labels,
-                    "ownerReferences": owner_refs,
-                },
-                "data": config_data,
-            },
-            {
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {
-                    "name": format!("{sa_name}-task"),
-                    "namespace": ns,
-                    "labels": labels,
-                    "ownerReferences": owner_refs,
-                },
-                "data": {
-                    "task.txt": task,
-                },
-            },
-            {
-                "apiVersion": "batch/v1",
-                "kind": "Job",
-                "metadata": {
-                    "name": sa_name,
-                    "namespace": ns,
-                    "labels": labels,
-                    "ownerReferences": owner_refs,
-                },
-                "spec": {
-                    "backoffLimit": 0,
-                    "ttlSecondsAfterFinished": 300,
-                    "template": {
-                        "metadata": { "labels": labels },
-                        "spec": {
-                            "serviceAccountName": sa_name,
-                            "automountServiceAccountToken": true,
-                            "restartPolicy": "Never",
-                            "containers": [{
-                                "name": "agent",
-                                "image": image,
-                                "command": ["/bin/bash", "-c",
-                                    "exec that --agent \"$THAT_AGENT_NAME\" run query --parent \"$THAT_AGENT_PARENT\" --no-sandbox --task-file /etc/agent-task/task.txt"],
-                                "envFrom": [
-                                    { "secretRef": { "name": "that-agent-secrets", "optional": true } },
-                                    { "configMapRef": { "name": format!("{sa_name}-config") } },
-                                ],
-                                "resources": {
-                                    "requests": { "cpu": "200m", "memory": "256Mi" },
-                                    "limits": { "cpu": cpu_limit, "memory": mem_limit },
-                                },
-                                "volumeMounts": [
-                                    { "name": "workspace", "mountPath": "/workspace" },
-                                    { "name": "task", "mountPath": "/etc/agent-task", "readOnly": true },
-                                ],
-                            }],
-                            "volumes": [
-                                { "name": "workspace", "emptyDir": {} },
-                                { "name": "task", "configMap": { "name": format!("{sa_name}-task") } },
-                            ],
-                        }
-                    }
-                }
-            }
-        ]
-    });
+    // Don't wait — ephemeral jobs are async, parent monitors
+    helm_install_nowait(&release_name, &ns, &sets).await?;
 
-    kubectl_apply_json(&resources).await?;
-
-    // Watch Job until completion or timeout.
-    // Every 30s, tail the child's logs so the parent sees progress.
+    // Monitor the Job until completion or timeout
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
-    let job_name = sa_name.clone();
+    let job_name = release_name.clone();
     let mut last_log_check = std::time::Instant::now() - Duration::from_secs(30);
     let mut last_log_line = String::new();
 
     loop {
         if start.elapsed() > timeout {
-            // Grab final logs before cleanup for the error message
             let final_logs = tail_job_logs(&job_name, &ns, 20).await;
-            let _ = kubectl_delete_by_label(name, &ns).await;
+            let _ = helm_uninstall(&release_name, &ns).await;
             anyhow::bail!("agent_run timed out after {timeout_secs}s. Last output:\n{final_logs}");
         }
 
@@ -1325,7 +1075,6 @@ pub async fn run_ephemeral_agent_k8s(
             anyhow::bail!("agent job failed: {status_str}\nLast output:\n{logs}");
         }
 
-        // Check active count as fallback
         let active_out = tokio::process::Command::new("kubectl")
             .args([
                 "get",
@@ -1343,7 +1092,7 @@ pub async fn run_ephemeral_agent_k8s(
             .to_string();
         let parts: Vec<&str> = active_str.split_whitespace().collect();
         if parts.first().map(|s| *s == "1").unwrap_or(false) {
-            break; // succeeded
+            break;
         }
         if parts
             .get(1)
@@ -1354,14 +1103,12 @@ pub async fn run_ephemeral_agent_k8s(
             anyhow::bail!("agent job failed\nLast output:\n{logs}");
         }
 
-        // Periodic progress: tail last log line every 30s, extract turn info
         if last_log_check.elapsed() >= Duration::from_secs(30) {
             last_log_check = std::time::Instant::now();
             let latest = tail_job_logs(&job_name, &ns, 3).await;
             if !latest.is_empty() && latest != last_log_line {
                 last_log_line = latest.clone();
                 let elapsed = start.elapsed().as_secs();
-                // Extract turn info like "turn 15/75" from log lines
                 let turn_info = latest
                     .lines()
                     .rev()
@@ -1381,7 +1128,6 @@ pub async fn run_ephemeral_agent_k8s(
                     .unwrap_or_else(|| "working...".to_string());
                 let msg = format!("[{name}] {turn_info} ({elapsed}s)");
                 tracing::info!(agent = %name, "{msg}");
-                // Post to parent's own gateway so it shows on the channel
                 let gw = crate::orchestration::support::resolve_gateway_url();
                 let _ = reqwest::Client::new()
                     .post(format!("{gw}/v1/notify"))
@@ -1398,13 +1144,8 @@ pub async fn run_ephemeral_agent_k8s(
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
-    // Collect logs
     let output_text = tail_job_logs(&job_name, &ns, 200).await;
-
     let elapsed = start.elapsed().as_secs();
-
-    // Note: workspace branch collection is handled by workspace_collect(path, worker),
-    // not auto-fetched here. The orchestrator calls it explicitly after agent_run returns.
 
     Ok(serde_json::json!({
         "name": name,
@@ -1538,10 +1279,12 @@ pub async fn query_agent_k8s(
 
 // ── K8s Unregister ───────────────────────────────────────────────────────────
 
-/// Remove a child agent and all its K8s resources via label-scoped delete.
+/// Remove a child agent by uninstalling its Helm release.
 pub async fn unregister_agent_k8s(name: &str) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
-    kubectl_delete_by_label(name, &ns).await?;
+    let safe_name = sanitize_name(name);
+    let release_name = format!("that-agent-{safe_name}");
+    helm_uninstall(&release_name, &ns).await?;
     Ok(serde_json::json!({ "name": name, "status": "unregistered" }))
 }
 
@@ -2066,85 +1809,12 @@ fn git_server_url(ns: &str) -> String {
         .unwrap_or_else(|_| format!("http://that-agent-git-server.{ns}.svc.cluster.local:9418"))
 }
 
-/// Resolve the cache-proxy Service URL (independent pod).
-fn cache_proxy_url(ns: &str) -> String {
-    std::env::var("THAT_CACHE_PROXY_URL")
-        .unwrap_or_else(|_| format!("http://that-agent-cache-proxy.{ns}.svc.cluster.local:3128"))
-}
-
 /// Derive the cluster directory from the memory DB path.
 ///
 /// `memory_db_path` has the form `~/.that-agent/agents/<name>/memory.db`.
 /// Walking up 3 levels gives `~/.that-agent/`; we append `cluster/`.
 pub fn cluster_dir_from_db(memory_db_path: &Path) -> Option<PathBuf> {
     memory_db_path.ancestors().nth(3).map(|p| p.join("cluster"))
-}
-
-/// Build K8s labels as a JSON object.
-fn k8s_labels(name: &str, parent: &str, agent_type: &str, role: &str) -> serde_json::Value {
-    serde_json::json!({
-        "that-agent/managed": "true",
-        "that-agent/name": sanitize_label_value(name),
-        "that-agent/parent": sanitize_label_value(parent),
-        "that-agent/type": agent_type,
-        "that-agent/role": sanitize_label_value(role),
-    })
-}
-
-/// Sanitize a string for use as a K8s label value (max 63 chars, [a-zA-Z0-9._-]).
-fn sanitize_label_value(s: &str) -> String {
-    let sanitized: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .take(63)
-        .collect();
-    sanitized.trim_matches('-').to_string()
-}
-
-/// Build ownerReferences array for K8s resources.
-fn k8s_owner_refs(deploy_name: &str, uid: &str) -> serde_json::Value {
-    if uid.is_empty() {
-        return serde_json::json!([]);
-    }
-    serde_json::json!([{
-        "apiVersion": "apps/v1",
-        "kind": "Deployment",
-        "name": deploy_name,
-        "uid": uid,
-        "controller": true,
-        "blockOwnerDeletion": false,
-    }])
-}
-
-// Keep YAML helpers for persistent agent (will migrate later)
-/// Apply a JSON K8s resource list via `kubectl apply -f -`.
-async fn kubectl_apply_json(resource: &serde_json::Value) -> Result<()> {
-    let json_str = serde_json::to_string(resource)?;
-    let mut child = tokio::process::Command::new("kubectl")
-        .args(["apply", "-f", "-"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin.write_all(json_str.as_bytes()).await?;
-    }
-
-    let output = child.wait_with_output().await?;
-    anyhow::ensure!(
-        output.status.success(),
-        "kubectl apply failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(())
 }
 
 /// Tail the last N log lines from a K8s Job pod.
@@ -2161,28 +1831,6 @@ async fn tail_job_logs(job_name: &str, ns: &str, tail: u32) -> String {
         .await
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
-}
-
-/// Delete all resources for a named child agent by label selector.
-async fn kubectl_delete_by_label(name: &str, ns: &str) -> Result<()> {
-    let output = tokio::process::Command::new("kubectl")
-        .args([
-            "delete",
-            "deployment,service,job,serviceaccount,rolebinding,configmap",
-            "-l",
-            &format!("that-agent/name={name}"),
-            "-n",
-            ns,
-            "--ignore-not-found",
-        ])
-        .output()
-        .await?;
-    anyhow::ensure!(
-        output.status.success(),
-        "kubectl delete failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(())
 }
 
 #[cfg(test)]

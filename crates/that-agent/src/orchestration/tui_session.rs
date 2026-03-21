@@ -67,6 +67,7 @@ pub async fn run_chat_tui(
     let mut plugin_commands = plugin_registry.enabled_commands();
     let mut skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
     let mut ws = load_workspace_files(agent, sandbox);
+    set_working_notes(&session_id, ws.working_notes.clone());
     let needs_onboarding = ws.needs_bootstrap();
     let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
     let mut preamble = build_preamble(
@@ -81,6 +82,8 @@ pub async fn run_chat_tui(
         Some(&plugin_registry),
         None,
     );
+
+    let mem_cfg = agent_memory_config(&agent.name);
 
     // Setup TUI terminal — suppress stderr tracing to avoid corrupting the alternate screen
     crate::observability::suppress_fmt_output();
@@ -476,6 +479,7 @@ pub async fn run_chat_tui(
                                                     &session_id,
                                                     sandbox,
                                                     &agent.name,
+                                                    &mem_cfg,
                                                 );
                                                 let cont = container.clone();
                                                 let session_id_for_trace = session_id.clone();
@@ -555,7 +559,7 @@ pub async fn run_chat_tui(
                                                         let pre = preamble.clone();
                                                         let agent_clone = agent.clone();
                                                         let hist = history.clone();
-                                                        let task_for_model = append_system_reminder(&msg, &session_id, sandbox, &agent.name);
+                                                        let task_for_model = append_system_reminder(&msg, &session_id, sandbox, &agent.name, &mem_cfg);
                                                         let cont = container.clone();
                                                         let session_id_for_trace = session_id.clone();
                                                         let run_id_for_trace = run_id.clone();
@@ -654,7 +658,7 @@ pub async fn run_chat_tui(
                                     let pre = preamble.clone();
                                     let agent_clone = agent.clone();
                                     let hist = history.clone();
-                                    let task_text = append_system_reminder(&text, &session_id, sandbox, &agent.name);
+                                    let task_text = append_system_reminder(&text, &session_id, sandbox, &agent.name, &mem_cfg);
                                     let cont = container.clone();
                                     let session_id_for_trace = session_id.clone();
                                     let run_id_for_trace = run_id.clone();
