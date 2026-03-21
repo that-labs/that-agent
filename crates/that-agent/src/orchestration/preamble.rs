@@ -663,6 +663,11 @@ pub fn build_preamble(
              **Step 5 — Merge (coding).** Use `workspace_admin(action=activity)` to see which workers pushed, \
              then `workspace_admin(action=collect, path, worker)` to merge each one sequentially.\n\n\
              ### Rules\n\
+             - **Agent-first for autonomous workloads.** Any service that needs to poll, listen, monitor, \
+             or run autonomously MUST be deployed as a child agent via `spawn_agent` — not as a raw \
+             Kubernetes Deployment, standalone service, or plugin service. Child agents get gateway \
+             communication, lifecycle management, and cluster registration for free. Only deploy raw \
+             K8s resources when the workload has zero agent interaction (e.g. a pure database or cache).\n\
              - NEVER simulate agent_run with shell_exec — use the actual tool\n\
              - Prefer `agent_task` when the parent needs visibility, steering, cancellation, or shared coordination state\n\
              - For coding tasks: ALWAYS call `workspace_admin(action=share, path)` BEFORE `agent_run` with `workspace=true`\n\

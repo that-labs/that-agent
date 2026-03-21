@@ -16,8 +16,14 @@ Use this skill when the user asks for plugin work: create, update, install, enab
 Plugins are the primary way the agent ecosystem grows.
 
 Use a plugin when the capability should persist beyond the current session, be reusable, expose commands
-or routines, run as its own service, or carry its own deploy/runtime contract. Do not leave durable
+or routines, or carry its own deploy/runtime contract. Do not leave durable
 agent capabilities trapped in ad-hoc shell scripts or one-off local edits when they should become a plugin.
+
+**Plugins vs agents:** Plugins extend the current agent's own capabilities (new commands, skills,
+routines). If the workload needs to run autonomously — polling, listening, monitoring, or acting
+independently — deploy it as a child agent via `spawn_agent`, not as a plugin service or standalone
+Kubernetes deployment. Child agents get gateway communication, lifecycle management, and cluster
+registration automatically.
 
 ## Task Discipline (Required)
 
