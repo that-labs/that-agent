@@ -1,5 +1,49 @@
 use crate::cli::{self, PluginCommands};
 
+/// Lightweight pre-flight checks before an agent run. Warns but does not bail.
+fn preflight_checks(agent: &crate::config::AgentDef, sandbox: bool) {
+    if dirs::home_dir().is_none() {
+        tracing::warn!("$HOME is not set — agent state may be written to the current directory");
+    }
+
+    let mode = std::env::var("THAT_SANDBOX_MODE")
+        .unwrap_or_else(|_| "docker".to_string())
+        .to_ascii_lowercase();
+
+    if sandbox
+        && mode == "docker"
+        && std::process::Command::new("docker")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_err()
+    {
+        tracing::warn!(
+            "Docker CLI not found — sandbox mode requires Docker. Run with --no-sandbox or install Docker."
+        );
+    }
+
+    let has_key = matches!(
+        agent.provider.as_str(),
+        "anthropic"
+            if std::env::var("ANTHROPIC_API_KEY").is_ok()
+                || std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok()
+    ) || matches!(
+        agent.provider.as_str(),
+        "openai" if std::env::var("OPENAI_API_KEY").is_ok()
+    ) || matches!(
+        agent.provider.as_str(),
+        "openrouter" if std::env::var("OPENROUTER_API_KEY").is_ok()
+    );
+    if !has_key {
+        tracing::warn!(
+            provider = %agent.provider,
+            "No API key found for provider — set the appropriate environment variable"
+        );
+    }
+}
+
 fn required_agent_name_or_exit(
     cli: &cli::Cli,
     ws: &crate::config::WorkspaceConfig,
@@ -236,6 +280,8 @@ pub async fn handle_agent_orchestration_command(cli: &cli::Cli) -> anyhow::Resul
             "Failed to load agent profile exports from .bashrc"
         );
     }
+
+    preflight_checks(&agent, !cli.no_sandbox);
 
     match &cli.command {
         cli::Commands::Run { command } => match command {

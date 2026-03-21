@@ -1,0 +1,48 @@
+name: Publish Helm Chart (OCI)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  CHART_OCI: oci://ghcr.io/that-labs/helm
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Set version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Update Chart.yaml version
+        run: |
+          sed -i "s/^version:.*/version: ${{ steps.version.outputs.version }}/" deploy/helm/that-agent/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.version }}\"/" deploy/helm/that-agent/Chart.yaml
+          cat deploy/helm/that-agent/Chart.yaml
+
+      - name: Lint chart
+        run: helm lint deploy/helm/that-agent/
+
+      - name: Package chart
+        run: helm package deploy/helm/that-agent/ --destination /tmp/helm-pkg
+
+      - name: Push to GHCR
+        run: helm push /tmp/helm-pkg/that-agent-${{ steps.version.outputs.version }}.tgz ${{ env.CHART_OCI }}

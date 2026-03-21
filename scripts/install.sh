@@ -9,10 +9,10 @@
 #
 # What this script does:
 #   1. Detects platform and installs Kubernetes (k3s on Linux, k3d on macOS — or override with --k3s/--k3d)
-#   2. Prompts for agent name, description, and LLM API credentials
-#   3. Optionally configures a Telegram channel
-#   4. Generates a Kubernetes overlay for your agent
-#   5. Deploys to the local cluster
+#   2. Installs Helm CLI
+#   3. Prompts for agent name, description, and LLM API credentials
+#   4. Optionally configures a Telegram channel
+#   5. Deploys via Helm chart from OCI registry
 #
 # Platform strategy:
 #   Linux VPS/server → k3s (single binary, containerd, no Docker needed)
@@ -54,7 +54,10 @@ REPO_ROOT=""
 if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/../build.sh" ]]; then
   REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 fi
-OVERLAY_DIR=""              # set after we know the agent name
+VALUES_DIR=""              # set after we know the agent name
+
+# Helm chart OCI reference
+HELM_CHART_OCI="oci://ghcr.io/that-labs/helm/that-agent"
 
 # In-cluster registry (k3s path)
 REGISTRY_NODEPORT=30500
@@ -171,48 +174,49 @@ ${KUBECTL} patch storageclass local-path \
   2>/dev/null && ok "local-path marked as default StorageClass." \
   || warn "Could not patch local-path StorageClass — PVCs may need an explicit storageClassName."
 
-# ── Step 2: Cilium CNI ────────────────────────────────────────────────────────
+# ── Step 2: Helm CLI ─────────────────────────────────────────────────────────
+header "Step 2 — Helm"
+install_helm
+
+# ── Step 3: Cilium CNI ────────────────────────────────────────────────────────
 if [[ "${INSTALL_CILIUM}" == "true" ]]; then
-  header "Step 2 — Cilium CNI"
+  header "Step 3 — Cilium CNI"
   install_cilium
 else
   info "Skipping Cilium CNI (--no-cilium)."
 fi
 
-# ── Step 3: Tailscale Operator ────────────────────────────────────────────────
+# ── Step 4: Tailscale Operator ────────────────────────────────────────────────
 if [[ "${INSTALL_TAILSCALE_OPERATOR}" == "true" ]]; then
-  header "Step 3 — Tailscale Operator"
+  header "Step 4 — Tailscale Operator"
   install_tailscale
 else
   info "Skipping Tailscale Operator (--no-tailscale)."
 fi
 
-# ── Step 4: K9s ──────────────────────────────────────────────────────────────
+# ── Step 5: K9s ──────────────────────────────────────────────────────────────
 if [[ "${INSTALL_K9S}" == "true" ]]; then
-  header "Step 4 — K9s"
+  header "Step 5 — K9s"
   install_k9s
 else
   info "Skipping K9s (--no-k9s)."
 fi
 
-# ── Step 5: In-cluster image registry ───────────────────────────────────────
-header "Step 5 — In-cluster image registry"
+# ── Step 6: In-cluster image registry ───────────────────────────────────────
+header "Step 6 — In-cluster image registry"
 install_registry
 
-# ── Step 6: Gather configuration ────────────────────────────────────────────
-header "Step 6 — Agent configuration"
+# ── Step 7: Gather configuration ────────────────────────────────────────────
+header "Step 7 — Agent configuration"
 gather_config
 
-# ── Step 7: Build or pull image ──────────────────────────────────────────────
-header "Step 7 — Container image"
+# ── Step 8: Build or pull image ──────────────────────────────────────────────
+header "Step 8 — Container image"
 resolve_image
 
-# ── Step 8: Generate overlay ─────────────────────────────────────────────────
-header "Step 8 — Generating Kubernetes overlay"
-generate_overlay
-
-# ── Step 9: Deploy ────────────────────────────────────────────────────────────
-header "Step 9 — Deploying to cluster"
+# ── Step 9: Generate Helm values & deploy ─────────────────────────────────────
+header "Step 9 — Deploying via Helm"
+generate_values
 deploy
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -231,22 +235,34 @@ echo ""
 echo "    # Restart the agent"
 echo "    ${KUBECTL} -n ${AGENT_NAMESPACE} rollout restart deploy/that-agent"
 echo ""
+echo "    # Upgrade the agent"
+echo "    helm upgrade that-agent ${HELM_CHART_OCI} -n ${AGENT_NAMESPACE} -f ${VALUES_DIR}/values.yaml"
+echo ""
 echo "    # Remove the agent entirely"
-echo "    ${KUBECTL} delete namespace ${AGENT_NAMESPACE}"
+echo "    helm uninstall that-agent -n ${AGENT_NAMESPACE} && ${KUBECTL} delete namespace ${AGENT_NAMESPACE}"
 if [[ "${CLUSTER_TOOL}" == "k3d" ]]; then
   echo ""
   echo "    # Delete the entire k3d cluster"
   echo "    k3d cluster delete ${K3D_CLUSTER_NAME}"
 fi
 echo ""
-echo "  Your overlay lives at: ${OVERLAY_DIR}"
-echo "  The secret.yaml in that directory contains your API key — keep it safe."
+echo "  Your values file: ${VALUES_DIR}/values.yaml"
 echo ""
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Functions
 # ═══════════════════════════════════════════════════════════════════════════════
+
+install_helm() {
+  if command -v helm &>/dev/null; then
+    ok "Helm already installed: $(helm version --short 2>/dev/null)"
+    return
+  fi
+  info "Installing Helm…"
+  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  ok "Helm installed: $(helm version --short 2>/dev/null)"
+}
 
 install_k3s() {
   info "Installing k3s…"
@@ -356,13 +372,6 @@ install_cilium() {
 }
 
 install_tailscale() {
-  # Ensure Helm is available
-  if ! command -v helm &>/dev/null; then
-    info "Installing Helm…"
-    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-    ok "Helm installed."
-  fi
-
   echo ""
   echo "  The Tailscale Operator needs OAuth client credentials."
   echo "  Create them at: https://login.tailscale.com/admin/settings/oauth"
@@ -629,8 +638,8 @@ gather_config() {
     AGENT_NAMESPACE="that-${AGENT_NAME}"
   fi
 
-  # Overlay output directory
-  OVERLAY_DIR="${HOME}/.that-agent-install/${AGENT_NAME}"
+  # Values output directory
+  VALUES_DIR="${HOME}/.that-agent-install/${AGENT_NAME}"
 
   echo ""
   ok "Configuration collected."
@@ -642,7 +651,7 @@ gather_config() {
   echo "  Model:        ${AGENT_MODEL:-<provider default>}"
   echo "  Telegram:     ${TELEGRAM_BOT_TOKEN:+configured}${TELEGRAM_BOT_TOKEN:-not configured}"
   echo "  Image:        ${AGENT_IMAGE}"
-  echo "  Overlay dir:  ${OVERLAY_DIR}"
+  echo "  Values dir:   ${VALUES_DIR}"
   echo ""
   read -rp "  Proceed with deployment? [Y/n]: " CONFIRM < /dev/tty
   case "${CONFIRM:-y}" in
@@ -682,156 +691,94 @@ resolve_image() {
   fi
 }
 
-generate_overlay() {
-  mkdir -p "${OVERLAY_DIR}"
+generate_values() {
+  mkdir -p "${VALUES_DIR}"
 
-  # Ensure base manifests are available locally
-  BASE_REF="./base"
-  if [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}/deploy/k8s/base" ]]; then
-    cp -r "${REPO_ROOT}/deploy/k8s/base" "${OVERLAY_DIR}/base"
-    ok "Copied base manifests from local repo."
-  else
-    info "Downloading base manifests from GitHub…"
-    mkdir -p "${OVERLAY_DIR}/base"
-    LATEST_TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/that-labs/that-agent/releases/latest" | grep -oE '[^/]+$')
-    curl -fsSL "https://github.com/that-labs/that-agent/archive/refs/tags/${LATEST_TAG}.tar.gz" | \
-      tar -xz --strip-components=4 -C "${OVERLAY_DIR}/base" "that-agent-${LATEST_TAG#v}/deploy/k8s/base/"
-    ok "Base manifests downloaded."
-  fi
-
-  # kustomization.yaml
-  KUSTOMIZE_PATCHES="  - path: patch-configmap.yaml"
-  if [[ "${ENABLE_SUBAGENTS}" == "true" ]]; then
-    KUSTOMIZE_PATCHES="${KUSTOMIZE_PATCHES}
-  - path: patch-clusterrolebinding.yaml"
-  fi
-
-  cat > "${OVERLAY_DIR}/kustomization.yaml" <<EOF
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-
-namespace: ${AGENT_NAMESPACE}
-
-resources:
-  - ${BASE_REF}
-  - namespace.yaml
-  - secret.yaml
-
-patches:
-${KUSTOMIZE_PATCHES}
-
-images:
-  - name: that-agent
-    newName: ${AGENT_IMAGE%:*}
-    newTag: ${AGENT_IMAGE##*:}
-EOF
-
-  # namespace.yaml
-  cat > "${OVERLAY_DIR}/namespace.yaml" <<EOF
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: ${AGENT_NAMESPACE}
-EOF
-
-  # patch-clusterrolebinding.yaml
+  # Determine access level
+  local access_level="namespace-admin"
   if [[ "${CLUSTER_ADMIN}" == "true" ]]; then
-    cat > "${OVERLAY_DIR}/patch-clusterrolebinding.yaml" <<EOF
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: that-agent-cluster
-subjects:
-  - kind: ServiceAccount
-    name: that-agent
-    namespace: ${AGENT_NAMESPACE}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-admin
-EOF
-    warn "⚠  --cluster-admin: agent will have FULL cluster-admin privileges."
-  else
-    cat > "${OVERLAY_DIR}/patch-clusterrolebinding.yaml" <<EOF
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: that-agent-cluster
-subjects:
-  - kind: ServiceAccount
-    name: that-agent
-    namespace: ${AGENT_NAMESPACE}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: that-agent-cluster
-EOF
+    access_level="cluster-admin"
+  elif [[ "${ENABLE_SUBAGENTS}" == "false" ]]; then
+    access_level="readonly"
   fi
 
-  # patch-configmap.yaml
-  cat > "${OVERLAY_DIR}/patch-configmap.yaml" <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: that-agent-config
-data:
-  THAT_AGENT_NAME: "${AGENT_NAME}"
-  THAT_AGENT_BOOTSTRAP_PROMPT: "${AGENT_DESCRIPTION}"
-  THAT_AGENT_PROVIDER: "${LLM_PROVIDER}"
-  THAT_AGENT_MODEL: "${AGENT_MODEL}"
-  THAT_SANDBOX_MODE: "kubernetes"
-  THAT_TRUSTED_LOCAL_SANDBOX: "1"
-  THAT_SANDBOX_K8S_NAMESPACE: "${AGENT_NAMESPACE}"
-  THAT_SANDBOX_K8S_REGISTRY: "${REGISTRY_PULL_HOST}"
-  THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT: "${REGISTRY_PUSH_ENDPOINT}"
-  THAT_CLUSTER_BACKEND: "kubernetes"
-  THAT_CLUSTER_CNI: "$(if [[ "${INSTALL_CILIUM}" == "true" ]]; then echo cilium; else echo flannel; fi)"
-  THAT_CLUSTER_TAILSCALE: "${INSTALL_TAILSCALE_OPERATOR}"
-  THAT_CLUSTER_TAILNET_NAME: "${TS_TAILNET_NAME:-}"
-  THAT_CLUSTER_K9S: "${INSTALL_K9S}"
-  THAT_AGENT_PARENT: ""
-  THAT_AGENT_ROLE: ""
-  THAT_BUILDKIT_GC_KEEPSTORAGE_MB: "4096"
+  # Determine image repo and tag
+  local image_repo="${AGENT_IMAGE%:*}"
+  local image_tag="${AGENT_IMAGE##*:}"
+
+  cat > "${VALUES_DIR}/values.yaml" <<EOF
+agent:
+  name: "${AGENT_NAME}"
+  image:
+    repository: "${image_repo}"
+    tag: "${image_tag}"
+    pullPolicy: Always
+  provider: "${LLM_PROVIDER}"
+  model: "${AGENT_MODEL}"
+  maxTurns: 75
+  bootstrapPrompt: "${AGENT_DESCRIPTION}"
+
+accessLevel: "${access_level}"
+
+secrets:
+  existingSecret: that-agent-secrets
+
+gitServer:
+  enabled: true
+
+buildkit:
+  enabled: true
+
+cacheProxy:
+  enabled: true
 EOF
 
-  # secret.yaml
-  SECRET_API_KEY_VAR=""
+  # Create the K8s secret with API credentials
+  local secret_args=()
+
+  # Map API key to the right env var
   if [[ "${LLM_API_KEY}" == sk-ant-oat* ]]; then
-    SECRET_API_KEY_VAR="CLAUDE_CODE_OAUTH_TOKEN"
+    secret_args+=(--from-literal="CLAUDE_CODE_OAUTH_TOKEN=${LLM_API_KEY}")
   else
     case "${LLM_PROVIDER}" in
-      anthropic)   SECRET_API_KEY_VAR="ANTHROPIC_API_KEY" ;;
-      openai)      SECRET_API_KEY_VAR="OPENAI_API_KEY"    ;;
-      openrouter)  SECRET_API_KEY_VAR="OPENROUTER_API_KEY" ;;
+      anthropic)   secret_args+=(--from-literal="ANTHROPIC_API_KEY=${LLM_API_KEY}") ;;
+      openai)      secret_args+=(--from-literal="OPENAI_API_KEY=${LLM_API_KEY}") ;;
+      openrouter)  secret_args+=(--from-literal="OPENROUTER_API_KEY=${LLM_API_KEY}") ;;
     esac
   fi
 
-  cat > "${OVERLAY_DIR}/secret.yaml" <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: that-agent-secrets
-type: Opaque
-stringData:
-  ${SECRET_API_KEY_VAR}: "${LLM_API_KEY}"
-  TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
-  TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID}"
-EOF
-  chmod 600 "${OVERLAY_DIR}/secret.yaml"
+  if [[ -n "${TELEGRAM_BOT_TOKEN}" ]]; then
+    secret_args+=(--from-literal="TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}")
+    secret_args+=(--from-literal="TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}")
+  fi
 
-  ok "Overlay written to ${OVERLAY_DIR}"
+  info "Creating namespace and secret…"
+  ${KUBECTL} create namespace "${AGENT_NAMESPACE}" 2>/dev/null || true
+  ${KUBECTL} -n "${AGENT_NAMESPACE}" create secret generic that-agent-secrets \
+    "${secret_args[@]}" \
+    --dry-run=client -o yaml | ${KUBECTL} apply -f -
+
+  ok "Values written to ${VALUES_DIR}/values.yaml"
 }
 
 deploy() {
-  info "Applying manifests…"
-  ${KUBECTL} apply -k "${OVERLAY_DIR}"
+  # Try OCI chart first, fall back to local chart if available
+  local chart_ref="${HELM_CHART_OCI}"
+  if [[ -n "${REPO_ROOT}" && -f "${REPO_ROOT}/deploy/helm/that-agent/Chart.yaml" ]]; then
+    chart_ref="${REPO_ROOT}/deploy/helm/that-agent"
+    info "Using local Helm chart from repo."
+  fi
 
-  info "Waiting for rollout…"
-  ${KUBECTL} -n "${AGENT_NAMESPACE}" rollout status deploy/that-agent --timeout=120s || {
-    warn "Rollout did not complete in 120 s. Check pod status:"
-    echo "  ${KUBECTL} -n ${AGENT_NAMESPACE} get pods"
-    echo "  ${KUBECTL} -n ${AGENT_NAMESPACE} logs deploy/that-agent"
-  }
+  info "Running helm upgrade --install…"
+  helm upgrade --install that-agent "${chart_ref}" \
+    --namespace "${AGENT_NAMESPACE}" \
+    --create-namespace \
+    -f "${VALUES_DIR}/values.yaml" \
+    --wait --timeout 120s || {
+      warn "Helm install did not complete in 120s. Check pod status:"
+      echo "  ${KUBECTL} -n ${AGENT_NAMESPACE} get pods"
+      echo "  ${KUBECTL} -n ${AGENT_NAMESPACE} logs deploy/that-agent"
+    }
 }
 
 main "$@"

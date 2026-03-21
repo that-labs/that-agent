@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "that-agent.fullname" . }}
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "that-agent.roleName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "that-agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

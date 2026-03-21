@@ -1,0 +1,75 @@
+{{- if .Values.cacheProxy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "that-agent.fullname" . }}-cache-proxy
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "that-agent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: cache-proxy
+  template:
+    metadata:
+      labels:
+        {{- include "that-agent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: cache-proxy
+    spec:
+      containers:
+        - name: cache-proxy
+          image: "{{ .Values.agent.image.repository }}:{{ include "that-agent.imageTag" . }}"
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              if command -v squid >/dev/null 2>&1; then
+                exec squid -N -f /etc/squid/squid.conf 2>&1
+              else
+                echo "No squid — running TCP passthrough on port 3128"
+                exec python3 -c "
+              import socket, threading
+              def relay(s,d):
+                  try:
+                      while True:
+                          b=s.recv(65536)
+                          if not b: break
+                          d.sendall(b)
+                  except: pass
+                  finally: s.close(); d.close()
+              def handle(c):
+                  data=c.recv(8192)
+                  if not data: c.close(); return
+                  line=data.split(b'\r\n')[0]; parts=line.split()
+                  if len(parts)<2: c.close(); return
+                  if parts[0]==b'CONNECT':
+                      hp=parts[1].split(b':')
+                      host,port=hp[0].decode(),int(hp[1]) if len(hp)>1 else 443
+                      try:
+                          s=socket.create_connection((host,port),timeout=10)
+                          c.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+                          threading.Thread(target=relay,args=(c,s),daemon=True).start()
+                          relay(s,c)
+                      except: c.sendall(b'HTTP/1.1 502 Bad Gateway\r\n\r\n'); c.close()
+                  else: c.close()
+              srv=socket.socket(); srv.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+              srv.bind(('0.0.0.0',3128)); srv.listen(128)
+              print('TCP proxy on :3128',flush=True)
+              while True:
+                  c,_=srv.accept()
+                  threading.Thread(target=handle,args=(c,),daemon=True).start()
+              "
+              fi
+          ports:
+            - containerPort: 3128
+              name: proxy
+          resources:
+            {{- toYaml .Values.cacheProxy.resources | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: 3128
+            initialDelaySeconds: 3
+            periodSeconds: 5
+{{- end }}

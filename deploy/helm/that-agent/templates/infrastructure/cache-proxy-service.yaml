@@ -1,0 +1,19 @@
+{{- if .Values.cacheProxy.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "that-agent.fullname" . }}-cache-proxy
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cache-proxy
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3128
+      targetPort: proxy
+      protocol: TCP
+      name: proxy
+  selector:
+    {{- include "that-agent.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: cache-proxy
+{{- end }}

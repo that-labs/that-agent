@@ -1,0 +1,15 @@
+that-agent deployed to namespace {{ .Release.Namespace }}
+
+Access level: {{ .Values.accessLevel }}
+Agent name:   {{ .Values.agent.name }}
+Gateway:      http://{{ include "that-agent.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8080
+
+{{- if .Values.gitServer.enabled }}
+Git server:   {{ include "that-agent.gitServerUrl" . }}
+{{- end }}
+{{- if .Values.buildkit.enabled }}
+BuildKit:     {{ include "that-agent.buildkitHost" . }}
+{{- end }}
+
+To check status:
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}

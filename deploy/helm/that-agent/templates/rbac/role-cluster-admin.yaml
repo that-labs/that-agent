@@ -1,0 +1,50 @@
+{{- if or (eq .Values.accessLevel "cluster-admin") (eq .Values.accessLevel "namespace-admin") }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "that-agent.fullname" . }}-runtime
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+rules:
+  # Core resources — agent operation + child management
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - configmaps
+      - secrets
+      - serviceaccounts
+      - persistentvolumeclaims
+      - events
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # App resources — manage own + child deployments
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Batch resources — ephemeral agent Jobs
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Networking — manage ingresses for exposing agent services
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # RBAC — create RoleBindings to pre-deployed child Roles
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - rolebindings
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+    verbs: ["get", "list"]
+    resourceNames:
+      - {{ include "that-agent.fullname" . }}-child-readonly
+      - {{ include "that-agent.fullname" . }}-child-sandbox
+{{- end }}

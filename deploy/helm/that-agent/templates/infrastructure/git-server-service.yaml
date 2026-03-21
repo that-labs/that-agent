@@ -1,0 +1,19 @@
+{{- if .Values.gitServer.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "that-agent.fullname" . }}-git-server
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: git-server
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9418
+      targetPort: git-http
+      protocol: TCP
+      name: git-http
+  selector:
+    {{- include "that-agent.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: git-server
+{{- end }}

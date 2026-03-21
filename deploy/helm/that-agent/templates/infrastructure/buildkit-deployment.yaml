@@ -1,0 +1,66 @@
+{{- if .Values.buildkit.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "that-agent.fullname" . }}-buildkit
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: buildkit
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "that-agent.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: buildkit
+  template:
+    metadata:
+      labels:
+        {{- include "that-agent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: buildkit
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: buildkit
+          image: moby/buildkit:v0.25.1-rootless
+          args:
+            - --oci-worker-no-process-sandbox
+            - --oci-worker-gc
+            - --oci-worker-gc-keepstorage
+            - "{{ div (mul (.Values.buildkit.storage.size | trimSuffix "Gi" | int) 1024) 1 }}"
+            - --addr
+            - tcp://0.0.0.0:1234
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: true
+            seccompProfile:
+              type: Unconfined
+          ports:
+            - containerPort: 1234
+              name: buildkit
+          volumeMounts:
+            - name: buildkit-cache
+              mountPath: /home/user/.local/share/buildkit
+          resources:
+            {{- toYaml .Values.buildkit.resources | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: ["buildctl", "--addr", "tcp://127.0.0.1:1234", "debug", "workers"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["buildctl", "--addr", "tcp://127.0.0.1:1234", "debug", "workers"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+      volumes:
+        - name: buildkit-cache
+          persistentVolumeClaim:
+            claimName: {{ .Values.buildkit.storage.existingClaim | default (printf "%s-buildkit" (include "that-agent.fullname" .)) }}
+{{- end }}

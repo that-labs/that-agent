@@ -1,0 +1,14 @@
+.git
+target/
+deploy/
+evals/
+docs/
+assets/
+*.md
+!README.md
+.env*
+.that-agent/
+.that/
+.cache/
+.idea/
+.vscode/
