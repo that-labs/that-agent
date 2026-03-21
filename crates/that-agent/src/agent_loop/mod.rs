@@ -712,6 +712,11 @@ async fn run_from_checkpoint(
         }
 
         // ── Anti-loop: exploration streak detection ────────────────────────
+        // `seen_calls` persists across streak resets so that duplicate commands
+        // always get the repeat-booster, even when non-exploration tools (e.g.
+        // writes) are interleaved. The streak decays (halves) instead of
+        // resetting to zero so that alternating explore→fix→explore patterns
+        // still accumulate pressure.
         if !tool_calls.is_empty()
             && tool_calls
                 .iter()
@@ -729,8 +734,8 @@ async fn run_from_checkpoint(
                 }
             }
         } else {
-            exploration_streak = 0;
-            seen_calls.clear();
+            // Decay instead of zeroing — keeps pressure from alternating patterns.
+            exploration_streak /= 2;
         }
 
         if exploration_streak >= EXPLORATION_HARD_LIMIT {
@@ -739,8 +744,10 @@ async fn run_from_checkpoint(
                 "Anti-loop hard limit reached — forcing input_required"
             );
             messages.push(Message::user(
-                "STOP exploring. You have exceeded the exploration limit. \
-                 Report input_required with a specific question about what context is missing."
+                "STOP. You have been retrying the same approach repeatedly without making \
+                 progress. You MUST either report to the user what is blocking you (via \
+                 input_required with a specific question) or take a completely different \
+                 approach. Do NOT retry the same command or strategy again."
                     .to_string(),
             ));
         } else if exploration_streak >= EXPLORATION_SOFT_LIMIT {
@@ -749,10 +756,11 @@ async fn run_from_checkpoint(
                 "Anti-loop soft warning — injecting nudge"
             );
             messages.push(Message::user(format!(
-                "You have been exploring for {exploration_streak} turns without progress. \
-                 Check if the information you need was provided in the task message or \
-                 scratchpad. If you cannot find what you need, report input_required \
-                 with a specific question about what is missing."
+                "You have been repeating similar actions for {exploration_streak} turns \
+                 without meaningful progress. Step back and reconsider your approach \
+                 entirely. If you are stuck on a recurring error, analyze the root cause \
+                 fully before retrying. Try a fundamentally different strategy rather than \
+                 repeating the same steps."
             )));
         }
 

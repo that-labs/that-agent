@@ -224,7 +224,7 @@ TS_TAILNET_NAME=myteam \
 | `ANTHROPIC_API_KEY` | Anthropic API key (auto-detected) | — |
 | `OPENAI_API_KEY` | OpenAI API key (auto-detected) | — |
 | `OPENROUTER_API_KEY` | OpenRouter API key (auto-detected) | — |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code OAuth token (auto-detected) | — |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code OAuth token (auto-detected) — **see notice below** | — |
 | `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client ID | prompted |
 | `TS_OAUTH_CLIENT_SECRET` | Tailscale OAuth client secret | prompted |
 | `TS_TAILNET_NAME` | Tailnet name (e.g. `myteam` from `myteam.ts.net`) | prompted |
@@ -237,6 +237,12 @@ TS_TAILNET_NAME=myteam \
 | `CLUSTER_ADMIN` | Bind to built-in `cluster-admin` ClusterRole | `false` |
 | `THAT_AGENT_NAME` | Agent name (non-interactive mode) | prompted |
 | `THAT_AGENT_DESCRIPTION` | Agent description (non-interactive mode) | prompted |
+
+> **Heads up — Claude Code OAuth tokens**
+>
+> As of 2026-02-19, Anthropic's Consumer Terms of Service restrict Claude Code OAuth tokens to Claude Code and Claude.ai only.
+> We still auto-detect `CLAUDE_CODE_OAUTH_TOKEN`, but you should review Anthropic's terms before using it outside those products.
+> For production use, we recommend a standard `ANTHROPIC_API_KEY` from the Anthropic Console.
 
 **CI / non-interactive mode:**
 

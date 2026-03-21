@@ -121,8 +121,11 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                  - Example BuildKit push: `buildctl --addr ${{BUILDKIT_HOST}} build --frontend dockerfile.v0 --local context=. --local dockerfile=. --opt filename=Dockerfile --output type=image,name=<registry>/<image>:<tag>,push=true`.\n\
                  - If backend is `docker`, check `docker_daemon_source` before Docker-based build/push.\n\
                  - If backend is `none`, use prebuilt images or a Kubernetes-native builder job.\n\
-                 - For deploy requests: build image, push to registry, generate/update manifests, and deploy with `kubectl apply -k`.\n\
+                 - **Build verification before image build:** Always verify compilation locally in the workspace first (e.g. `cargo check`, `npm run build`, `go build ./...`, or the project's equivalent) before running any container image build. Fix all compilation errors locally where feedback is instant. Only proceed to image build once the project compiles cleanly. If an image build fails, reproduce and fix the error locally rather than re-running the image build in a loop. After a successful local build, clean up build artifacts before the image build to reclaim disk.\n\
+                 - **Workspace is source of truth, not the cluster.** Always write or edit manifest files in your workspace, then apply with `kubectl apply`. Never mutate cluster state directly with `kubectl patch`, `kubectl edit`, `kubectl set`, or `kubectl delete` followed by imperative recreation. If you need to change a resource, update the manifest file and re-apply. This ensures your workspace always reflects the live state and you can re-deploy from disk at any time.\n\
+                 - For deploy requests: build image, push to registry, generate/update manifests, and deploy with `kubectl apply`.\n\
                  - Validate with `kubectl rollout status` and list managed resources after deploy.\n\
+                 - Read-only `kubectl` commands (`get`, `describe`, `logs`, `rollout status`, `top`, `auth can-i`) are always fine.\n\
                  - **Environment context:** This is a Kubernetes cluster. Resources are namespaced and network-accessible.\n\
                  - **Cluster management skill**: Use `read_skill cluster-management` for networking, security policies, and operational patterns. \
                  Load backend-specific references (networking-k8s, operations-k8s) for detailed guidance.\n\n",
@@ -285,6 +288,12 @@ pub fn build_preamble(
              - **Runtime metadata** delivered in `<system-reminder>` blocks at message time.\n\n\
              You own this container entirely — install packages, delete files, run processes, \
              make network calls without asking. When uncertain, try it.\n\n\
+             **Storage awareness**: Your home directory has finite disk. Before large operations \
+             (cloning repos, building projects, installing dependencies), check available space \
+             with `df -h .`. After successful builds, clean up build artifacts and caches \
+             (e.g. compiler target directories, dependency caches, temporary files). \
+             If disk usage exceeds 80%, proactively prune old workspaces, build outputs, and \
+             unused clones. Never let the disk fill up — a full disk breaks everything.\n\n\
              **Channel access control** (Telegram adapter):\n\
              - `chat_id` — primary chat for outbound notifications\n\
              - `allowed_chats` — additional group or DM chat IDs (Telegram group IDs are negative)\n\

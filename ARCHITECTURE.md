@@ -28,44 +28,22 @@ The foundation — orchestration, tools, memory, channels, sandbox, eval — is 
 
 ---
 
-## 2. Crate Map
+## 2. Module Map
 
-Seven workspace crates with strict ownership boundaries.
+Single consolidated crate (`that-agent`) with a standalone `that-git-server`. All modules live under one crate — no circular-dep workarounds needed.
 
-| Crate | Owns | Does NOT Own |
-|---|---|---|
-| **that-tools** | Tool capabilities, dispatch API (`ToolRequest` -> `ToolResponse`), policy model (Allow/Prompt/Deny), memory engine, search engine, code analysis, filesystem execution | Orchestration, sessions, preamble |
-| **that-core** | Agent runtime, preamble building, skill discovery, plugin integration, session transcript lifecycle, sandbox coordination (delegates to that-sandbox). Run modes: task, chat, TUI, listen, eval, channel | Tool definitions, policy model |
-| **that-cli** | Unified binary. Dispatches orchestration commands or low-level tool invocations | Runtime logic — pure dispatch layer |
-| **that-sandbox** | Kubernetes-native sandbox lifecycle with Docker fallback, `SandboxMode` enum, `BackendClient` dispatch, exec routing | No workspace dependencies |
-| **that-channels** | `Channel` trait, capability model, `ChannelRouter`, inbound routing, channel hook, notify tool. Adapters: Telegram, HTTP | No workspace dependencies. TuiChannel lives in that-core to avoid circular dep |
-| **that-plugins** | Agent-scoped plugin discovery/enablement, commands, activations, routines, emoji catalogs, runtime queue | No workspace dependencies except that-sandbox |
-| **that-eval** | Scenario TOML format, step runner, assertion engine, LLM judge, persisted reports | Agent runtime — delegates entirely to that-core |
+| Module | Owns |
+|---|---|
+| `tools/` | Tool capabilities, dispatch API (`ToolRequest` → `ToolResponse`), policy model (Allow/Prompt/Deny), memory engine, search engine, code analysis, filesystem execution |
+| `orchestration/` | Agent runtime, preamble building, session transcript lifecycle, sandbox coordination. Run modes: task, chat, TUI, listen, eval, channel |
+| `commands/` + `cli.rs` | Unified binary. Dispatches orchestration commands or low-level tool invocations |
+| `sandbox/` | Kubernetes-native sandbox lifecycle with Docker fallback, `SandboxMode` enum, `BackendClient` dispatch, exec routing |
+| `channels/` | `Channel` trait, capability model, `ChannelRouter`, inbound routing, channel hook, notify tool. Adapters: Telegram, HTTP, TUI |
+| `plugins/` | Agent-scoped plugin discovery/enablement, commands, activations, routines, runtime queue |
+| `eval/` | Scenario TOML format, step runner, assertion engine, LLM judge, persisted reports |
+| `tool_dispatch/` | Agent-loop dispatch layer — bridges orchestration to the tools module |
 
-### Dependency Graph
-
-```
-that-cli -------> that-core --------> that-channels
-   |               |   |   |
-   |               |   |   +--------> that-plugins
-   |               |   |
-   |               |   +-----------> that-sandbox
-   |               |
-   |               +---------------> that-tools
-   |
-   +------------------------------> that-tools
-   +------------------------------> that-plugins
-
-that-eval -------> that-core
-that-eval -------> that-tools
-
-that-sandbox:  no workspace deps
-that-channels: no workspace deps
-that-plugins:  depends on that-sandbox only
-that-tools:    foundational layer — no workspace deps
-```
-
-**Reading the graph:** Arrows point from consumer to dependency. `that-tools` is the foundation. `that-core` is the integration hub. `that-cli` and `that-eval` are leaf consumers that compose the layers below.
+Binaries: `that` (CLI), `that-eval` (eval harness), `that-git-server` (standalone)
 
 ---
 
@@ -73,7 +51,7 @@ that-tools:    foundational layer — no workspace deps
 
 ### Four Execution Paths
 
-All four live in `that-core`'s orchestration module. All four **must** call `load_agent_config(container)` — this is the critical policy invariant (see Section 6).
+All four live in the `orchestration/` module. All four **must** call `load_agent_config(container)` — this is the critical policy invariant (see Section 6).
 
 | Function | Mode | Hook Type | When Used |
 |---|---|---|---|
@@ -241,7 +219,7 @@ The `Channel` trait defines the adapter interface. Each adapter declares its cap
 
 **MessageHandle** returned by `send_event` carries platform-native message and conversation IDs. Adapters that support editing (e.g., Telegram) populate these fields; others return defaults.
 
-**Adapters:** Telegram, HTTP. TuiChannel lives in `that-core::tui` (not in `that-channels`) to avoid a circular dependency.
+**Adapters:** Telegram, HTTP, TUI. All live under `channels/` in the single-crate layout.
 
 ---
 
@@ -257,7 +235,7 @@ In listen mode, the agent polls `Heartbeat.md` from its agent directory at a con
 
 ## 8. Eval Harness
 
-The eval system (`that-eval`) runs scripted scenarios against the agent and scores results with an LLM judge.
+The eval system (`eval/` module) runs scripted scenarios against the agent and scores results with an LLM judge.
 
 ### Scenario Format
 
