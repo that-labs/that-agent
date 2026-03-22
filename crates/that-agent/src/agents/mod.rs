@@ -891,9 +891,11 @@ async fn helm_uninstall(release: &str, ns: &str) -> Result<()> {
     // Clean up identity ConfigMap (created by parent, not managed by Helm)
     let _ = tokio::process::Command::new("kubectl")
         .args([
-            "delete", "configmap",
+            "delete",
+            "configmap",
             &format!("{release}-identity"),
-            "--namespace", ns,
+            "--namespace",
+            ns,
             "--ignore-not-found",
         ])
         .output()
@@ -983,7 +985,14 @@ pub async fn spawn_persistent_agent_k8s(
         .or_else(|| std::env::var("THAT_AGENT_MODEL").ok())
         .unwrap_or_default();
 
-    let sets = child_helm_sets(name, "child", role.unwrap_or(""), parent, &model_str, identity_configmap);
+    let sets = child_helm_sets(
+        name,
+        "child",
+        role.unwrap_or(""),
+        parent,
+        &model_str,
+        identity_configmap,
+    );
     helm_install(&release_name, &ns, &sets).await?;
 
     let gateway_url = format!("http://{release_name}.{ns}.svc.cluster.local:8080");
@@ -1052,7 +1061,14 @@ pub async fn run_ephemeral_agent_k8s(
         }
     }
 
-    let mut sets = child_helm_sets(name, "ephemeral", role.unwrap_or(""), parent, &model_str, identity_configmap);
+    let mut sets = child_helm_sets(
+        name,
+        "ephemeral",
+        role.unwrap_or(""),
+        parent,
+        &model_str,
+        identity_configmap,
+    );
 
     // Ephemeral-specific settings
     // Escape commas/special chars in task text by using a file-based approach
