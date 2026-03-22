@@ -32,10 +32,11 @@ rules:
       - jobs
       - cronjobs
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Networking — manage ingresses for exposing agent services
+  # Networking — ingresses + network policies for agent isolation
   - apiGroups: ["networking.k8s.io"]
     resources:
       - ingresses
+      - networkpolicies
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # RBAC — create RoleBindings to pre-deployed child Roles
   - apiGroups: ["rbac.authorization.k8s.io"]

@@ -2,6 +2,15 @@
 
 Single consolidated Rust crate (`that-agent`) + standalone `that-git-server`. See README for layout, ARCHITECTURE.md for design detail.
 
+## Release Tagging
+
+When creating a release tag, **always** bump the version in all three places before tagging:
+1. `Cargo.toml` — `workspace.package.version`
+2. `deploy/helm/that-agent/Chart.yaml` — both `version` and `appVersion`
+3. `Cargo.lock` — run `cargo check` after bumping `Cargo.toml` to update it
+
+Tag, commit, and push in one shot. Never tag without bumping versions first.
+
 ## Practices: What NOT To Do
 
 ### Dependencies
