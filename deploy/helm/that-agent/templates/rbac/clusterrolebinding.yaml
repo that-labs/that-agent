@@ -1,18 +1,29 @@
-{{- if or (eq .Values.accessLevel "cluster-admin") (eq .Values.accessLevel "namespace-admin") }}
+{{- if eq .Values.accessLevel "cluster-admin" }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "that-agent.fullname" . }}-cluster
+  name: {{ include "that-agent.fullname" . }}-cluster-admin
   labels:
     {{- include "that-agent.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  {{- if eq .Values.accessLevel "cluster-admin" }}
   name: cluster-admin
-  {{- else }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "that-agent.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- else if eq .Values.accessLevel "namespace-admin" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "that-agent.fullname" . }}-cluster-monitor
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
   name: {{ include "that-agent.fullname" . }}-cluster
-  {{- end }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "that-agent.serviceAccountName" . }}
