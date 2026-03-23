@@ -1,5 +1,6 @@
 {{- if .Values.buildkit.enabled }}
-{{- if .Values.registry.insecure }}
+{{- $needsConfig := or .Values.registry.insecure .Values.registry.credentialSecret }}
+{{- if $needsConfig }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -9,11 +10,13 @@ metadata:
     app.kubernetes.io/component: buildkit
 data:
   buildkitd.toml: |
+    {{- if .Values.registry.insecure }}
     [registry."{{ .Values.registry.host }}"]
       http = true
     {{- if and .Values.registry.pushEndpoint (ne .Values.registry.pushEndpoint .Values.registry.host) }}
     [registry."{{ .Values.registry.pushEndpoint }}"]
       http = true
+    {{- end }}
     {{- end }}
 ---
 {{- end }}
@@ -42,6 +45,10 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: buildkit
           image: moby/buildkit:v0.25.1-rootless
@@ -52,7 +59,7 @@ spec:
             - "{{ div (mul (.Values.buildkit.storage.size | trimSuffix "Gi" | int) 1024) 1 }}"
             - --addr
             - tcp://0.0.0.0:1234
-          {{- if .Values.registry.insecure }}
+          {{- if $needsConfig }}
             - --config
             - /etc/buildkit/buildkitd.toml
           {{- end }}
@@ -68,9 +75,14 @@ spec:
           volumeMounts:
             - name: buildkit-cache
               mountPath: /home/user/.local/share/buildkit
-          {{- if .Values.registry.insecure }}
+          {{- if $needsConfig }}
             - name: buildkit-config
               mountPath: /etc/buildkit
+              readOnly: true
+          {{- end }}
+          {{- if .Values.registry.credentialSecret }}
+            - name: registry-creds
+              mountPath: /home/user/.docker
               readOnly: true
           {{- end }}
           resources:
@@ -90,9 +102,17 @@ spec:
         - name: buildkit-cache
           persistentVolumeClaim:
             claimName: {{ .Values.buildkit.storage.existingClaim | default (printf "%s-buildkit" (include "that-agent.fullname" .)) }}
-      {{- if .Values.registry.insecure }}
+      {{- if $needsConfig }}
         - name: buildkit-config
           configMap:
             name: {{ include "that-agent.fullname" . }}-buildkit-config
+      {{- end }}
+      {{- if .Values.registry.credentialSecret }}
+        - name: registry-creds
+          secret:
+            secretName: {{ .Values.registry.credentialSecret }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
       {{- end }}
 {{- end }}

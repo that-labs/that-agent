@@ -112,18 +112,18 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                  - Namespace: `{}`\n\
                  - Registry: `{}`\n\
                  {infra}\
-                 - Use `k8s_registry_push` from `<system-reminder>` for in-cluster push endpoint when it differs from image reference registry.\n\
-                 - Base deployment includes a rootless BuildKit sidecar exposed via `${{BUILDKIT_HOST}}`.\n\
+                 - **Image delivery:** Check `<system-reminder>` for `k8s_registry_push` and `image_build_backend`.\n\
+                 - If `k8s_registry_push` is present → push images there. BuildKit sidecar is pre-configured for HTTP access to the registry; do not add insecure flags yourself.\n\
+                 - If `k8s_registry_push` is absent → the cluster may load images directly (e.g. local engine import). Use `--output type=docker,dest=<file>.tar` or `--output type=oci,dest=<file>.tar` to export, then load via the engine's import mechanism.\n\
                  - Use `image_build_backend` from `<system-reminder>` to choose builder (`buildkit`, `docker`, or `none`) and follow it strictly.\n\
-                 - BuildKit is preferred by default (`image_build_backend_preferred=buildkit`).\n\
-                 - If backend is `buildkit`, do not run `docker build/push` and do not ask for Docker socket access; build/push via `buildctl`.\n\
-                 - Serialize build/push jobs: run only one image build per plugin at a time (use a lock file in plugin `scripts/run.sh`).\n\
-                 - Example BuildKit push: `buildctl --addr ${{BUILDKIT_HOST}} build --frontend dockerfile.v0 --local context=. --local dockerfile=. --opt filename=Dockerfile --output type=image,name=<registry>/<image>:<tag>,push=true`.\n\
+                 - If backend is `buildkit`, build/push via `buildctl --addr ${{BUILDKIT_HOST}}`. Do not run `docker build/push` and do not ask for Docker socket access.\n\
                  - If backend is `docker`, check `docker_daemon_source` before Docker-based build/push.\n\
                  - If backend is `none`, use prebuilt images or a Kubernetes-native builder job.\n\
+                 - Serialize build/push jobs: run only one image build per plugin at a time (use a lock file in plugin `scripts/run.sh`).\n\
+                 - **If a build or push fails:** use the exact endpoints from `<system-reminder>`. Do not guess IPs or scan the network. If the endpoint does not work, report the error to the user or parent agent.\n\
                  - **Build verification before image build:** Always verify compilation locally in the workspace first (e.g. `cargo check`, `npm run build`, `go build ./...`, or the project's equivalent) before running any container image build. Fix all compilation errors locally where feedback is instant. Only proceed to image build once the project compiles cleanly. If an image build fails, reproduce and fix the error locally rather than re-running the image build in a loop. After a successful local build, clean up build artifacts before the image build to reclaim disk.\n\
                  - **Workspace is source of truth, not the cluster.** Always write or edit manifest files in your workspace, then apply with `kubectl apply`. Never mutate cluster state directly with `kubectl patch`, `kubectl edit`, `kubectl set`, or `kubectl delete` followed by imperative recreation. If you need to change a resource, update the manifest file and re-apply. This ensures your workspace always reflects the live state and you can re-deploy from disk at any time.\n\
-                 - For deploy requests: build image, push to registry, generate/update manifests, and deploy with `kubectl apply`.\n\
+                 - For deploy requests: build image, deliver it (push to registry or import to engine), generate/update manifests, and deploy with `kubectl apply`.\n\
                  - Validate with `kubectl rollout status` and list managed resources after deploy.\n\
                  - Read-only `kubectl` commands (`get`, `describe`, `logs`, `rollout status`, `top`, `auth can-i`) are always fine.\n\
                  - **Environment context:** This is a Kubernetes cluster. Resources are namespaced and network-accessible.\n\

@@ -150,6 +150,21 @@ contexts, probes, labels, and network policy regardless of when it was created.
 - `agent_unregister` removes a child by uninstalling its Helm release
 - `agent_list` discovers all managed agents via their labels
 
+### Infrastructure Inheritance
+
+Children automatically inherit the parent's infrastructure context at deploy time.
+You do not need to pass these manually — the harness forwards them:
+
+- **Registry**: push endpoint, TLS mode, and credential secret
+- **BuildKit**: children reuse the parent's BuildKit service (no dedicated sidecar)
+- **Image version**: children run the same agent image as the parent
+- **API credentials**: children share the parent's secret for LLM provider keys
+
+The child's `<system-reminder>` reflects the same registry and build backend
+values the parent sees. If a child reports infrastructure issues (registry
+unreachable, build failures), check your own `<system-reminder>` for the
+authoritative values and relay them — the child should have the same context.
+
 ### Upgrading Children
 
 When you are upgraded to a new version, your existing children may still run
