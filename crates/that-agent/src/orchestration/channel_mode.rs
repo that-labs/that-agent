@@ -720,6 +720,10 @@ pub async fn run_listen(
     let session_mgr = Arc::new(SessionManager::new(&state_dir)?);
     let agent_workspace = resolve_agent_workspace(ws, agent)?;
     let container = prepare_container(agent, &agent_workspace, sandbox).await?;
+    crate::workspace::seed_from_identity_mount(&agent.name);
+    if let Some(bootstrap) = crate::workspace::GoldBootstrap::from_env() {
+        bootstrap.apply_local(&agent.name);
+    }
     let ws_files = load_workspace_files(agent, sandbox);
 
     // Initial skill discovery + preamble — load plugin registry once.
