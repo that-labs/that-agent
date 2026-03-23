@@ -106,11 +106,19 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                     "                 - **K9s**: available on host for interactive cluster inspection.\n"
                 );
             }
+            let sandbox_crd_hint = if crate::agents::use_agent_sandbox_crd() {
+                "                 - **Agent Sandbox**: enabled — child agents run in runtime-isolated sandbox environments with suspend/resume lifecycle. \
+                 Ephemeral agents start near-instantly from a pre-warmed pool. \
+                 Persistent agents support suspension for cost optimization when idle.\n"
+            } else {
+                ""
+            };
             format!(
                 "### Runtime Backend: Kubernetes\n\
                  - Mode: `kubernetes`\n\
                  - Namespace: `{}`\n\
                  - Registry: `{}`\n\
+                 {sandbox_crd_hint}\
                  {infra}\
                  - **Image delivery:** Check `<system-reminder>` for `k8s_registry_push` and `image_build_backend`.\n\
                  - If `k8s_registry_push` is present → push images there. BuildKit sidecar is pre-configured for HTTP access to the registry; do not add insecure flags yourself.\n\

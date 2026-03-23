@@ -446,11 +446,7 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
          When the user provides a repository URL or download link for a skill, \
          **clone or download it** into the skills directory — never manually recreate the content with `fs_write`. \
          Use `shell_exec` to run the appropriate command (e.g. clone the repository directly into the skills path). \
-         Only use `fs_write` for skills you are authoring from scratch.\n\n\
-         ### Reading skills\n\n\
-         **Always use `read_skill(name)` to read skill content** — never use `fs_cat` or other file-reading tools \
-         on skill files. `read_skill` returns the skill body along with available reference files for progressive \
-         disclosure, which raw file reads cannot provide.\n\n"
+         Only use `fs_write` for skills you are authoring from scratch.\n\n"
     ));
 
     if skills.is_empty() {
@@ -461,6 +457,16 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
     // Partition into always-injected and catalog skills.
     let always_skills: Vec<&SkillMeta> = skills.iter().filter(|s| s.metadata.always).collect();
     let catalog_skills: Vec<&SkillMeta> = skills.iter().filter(|s| !s.metadata.always).collect();
+
+    // Only show read_skill instructions when there are catalog skills to read.
+    if !catalog_skills.is_empty() {
+        out.push_str(
+            "### Reading skills\n\n\
+             **Always use `read_skill(name)` to read skill content** — never use `fs_cat` or other file-reading tools \
+             on skill files. `read_skill` returns the skill body along with available reference files for progressive \
+             disclosure, which raw file reads cannot provide.\n\n",
+        );
+    }
 
     // Inject always-skills inline as named sections.
     for skill in &always_skills {

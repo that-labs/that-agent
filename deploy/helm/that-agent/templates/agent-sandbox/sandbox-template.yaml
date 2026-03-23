@@ -1,0 +1,35 @@
+{{- if .Values.agentSandbox.enabled }}
+apiVersion: agent-sandbox.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: {{ include "that-agent.fullname" . }}-ephemeral
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.agentSandbox.runtimeClass }}
+  runtimeClass: {{ .Values.agentSandbox.runtimeClass }}
+  {{- end }}
+  containers:
+  - name: that-agent
+    image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag | default .Chart.AppVersion }}"
+    imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+    envFrom:
+    - secretRef:
+        name: {{ .Values.secrets.existingSecret | default (printf "%s-secrets" (include "that-agent.fullname" .)) }}
+        optional: true
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: {{ .Values.childAgents.cpuLimit | quote }}
+        memory: {{ .Values.childAgents.memoryLimit | quote }}
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+{{- end }}

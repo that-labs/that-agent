@@ -1,0 +1,13 @@
+{{- if .Values.agentSandbox.enabled }}
+apiVersion: agent-sandbox.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: {{ include "that-agent.fullname" . }}-pool
+  labels:
+    {{- include "that-agent.labels" . | nindent 4 }}
+spec:
+  size: {{ .Values.agentSandbox.warmPool.replicas }}
+  idleTimeout: {{ .Values.agentSandbox.warmPool.idleTimeout }}
+  template:
+    name: {{ include "that-agent.fullname" . }}-ephemeral
+{{- end }}

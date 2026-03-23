@@ -57,6 +57,11 @@ data:
   GIT_REPO_URL: {{ .Values.agent.job.gitRepoUrl | quote }}
   GIT_BRANCH: {{ .Values.agent.job.gitBranch | quote }}
   {{- end }}
+  {{- if .Values.agentSandbox.enabled }}
+  THAT_K8S_AGENT_SANDBOX: "true"
+  THAT_K8S_SANDBOX_TEMPLATE: {{ include "that-agent.fullname" . }}-ephemeral
+  THAT_K8S_SANDBOX_RUNTIME_CLASS: {{ .Values.agentSandbox.runtimeClass | quote }}
+  {{- end }}
   RUST_LOG: "info"
   PHOENIX_TRACING: {{ .Values.observability.phoenixTracing | toString | quote }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.observability.otelEndpoint | quote }}
