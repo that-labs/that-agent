@@ -2580,7 +2580,26 @@ async fn run_agent_for_sender(
             }
         }
         Err(e) => {
-            error!(session = %session_id, "Agent run failed: {e:#}");
+            let err_msg = format!("{e:#}");
+            error!(session = %session_id, "Agent run failed: {err_msg}");
+            // Notify the parent via callback so it knows the child stopped.
+            if let Some(url) = callback_url {
+                let t = err_msg.clone();
+                let agent = sender_id.clone();
+                tokio::spawn(async move {
+                    let _ = reqwest::Client::new()
+                        .post(&url)
+                        .json(&serde_json::json!({
+                            "text": t,
+                            "state": "failed",
+                            "message": t,
+                            "agent": agent,
+                        }))
+                        .timeout(std::time::Duration::from_secs(10))
+                        .send()
+                        .await;
+                });
+            }
             let _ = session_mgr.append(
                 &session_id,
                 &TranscriptEntry {
@@ -2588,7 +2607,7 @@ async fn run_agent_for_sender(
                     run_id,
                     event: TranscriptEvent::RunEnd {
                         status: RunStatus::Error,
-                        error: Some(format!("{e:#}")),
+                        error: Some(err_msg),
                     },
                 },
             );
