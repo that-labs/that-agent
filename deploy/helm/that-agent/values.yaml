@@ -84,6 +84,7 @@ registry:
 # -- BuildKit
 buildkit:
   enabled: true
+  externalHost: ""  # set by parent when sharing its BuildKit with children
   storage:
     size: 20Gi
     storageClassName: ""
