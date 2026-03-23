@@ -806,6 +806,14 @@ pub fn is_k8s_mode() -> bool {
     )
 }
 
+/// Returns `true` when running in K8s mode with Agent Sandbox CRD enabled.
+pub fn use_agent_sandbox_crd() -> bool {
+    is_k8s_mode()
+        && std::env::var("THAT_K8S_AGENT_SANDBOX")
+            .unwrap_or_default()
+            .eq_ignore_ascii_case("true")
+}
+
 /// Resolve the container image for child agents.
 /// Get the K8s namespace from env (POD_NAMESPACE) or default.
 fn k8s_namespace() -> String {
@@ -987,6 +995,16 @@ fn child_helm_sets(
         if let Some((repo, tag)) = image.rsplit_once(':') {
             sets.push(format!("agent.image.repository={repo}"));
             sets.push(format!("agent.image.tag={tag}"));
+        }
+    }
+
+    // Forward Agent Sandbox CRD settings to children
+    if use_agent_sandbox_crd() {
+        sets.push("agentSandbox.enabled=true".to_string());
+        if let Ok(rt) = std::env::var("THAT_K8S_SANDBOX_RUNTIME_CLASS") {
+            if !rt.is_empty() {
+                sets.push(format!("agentSandbox.runtimeClass={rt}"));
+            }
         }
     }
 
@@ -1488,6 +1506,767 @@ pub async fn agent_logs_k8s(name: &str, tail: u32) -> Result<serde_json::Value> 
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     anyhow::bail!("cannot get logs for agent '{name}': {stderr}")
+}
+
+// ── Agent Sandbox CRD helpers ────────────────────────────────────────────────
+
+/// Apply a YAML manifest to the agent namespace via `kubectl apply -f -`.
+async fn kubectl_apply_stdin(ns: &str, yaml: &str) -> Result<String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("kubectl")
+        .args(["apply", "-f", "-", "-n", ns])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(yaml.as_bytes()).await?;
+    }
+    let output = child.wait_with_output().await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "kubectl apply failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Build the Sandbox CRD YAML for a persistent child agent.
+fn sandbox_crd_yaml(name: &str, safe_name: &str, ns: &str, parent: &str, role: &str) -> String {
+    let release = format!("that-agent-{safe_name}");
+    let image = resolve_child_image();
+    let runtime_class = std::env::var("THAT_K8S_SANDBOX_RUNTIME_CLASS").unwrap_or_default();
+    let runtime_line = if runtime_class.is_empty() {
+        String::new()
+    } else {
+        format!("  runtimeClass: {runtime_class}\n")
+    };
+
+    format!(
+        r#"apiVersion: agent-sandbox.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: {release}
+  namespace: {ns}
+  labels:
+    that-agent/managed: "true"
+    that-agent/name: "{name}"
+    that-agent/parent: "{parent}"
+    that-agent/type: "persistent"
+    that-agent/role: "{role}"
+spec:
+{runtime_line}  containers:
+  - name: that-agent
+    image: {image}
+    command: ["that", "--agent", "{name}", "run", "listen", "--no-sandbox"]
+    ports:
+    - containerPort: 8080
+      name: gateway
+    envFrom:
+    - configMapRef:
+        name: {release}-config
+    - secretRef:
+        name: that-agent-secrets
+        optional: true
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "256Mi"
+      limits:
+        cpu: "{cpu_limit}"
+        memory: "{mem_limit}"
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+"#,
+        cpu_limit = std::env::var("THAT_AGENT_CHILD_CPU_LIMIT").unwrap_or_else(|_| "1".into()),
+        mem_limit = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT").unwrap_or_else(|_| "2Gi".into()),
+    )
+}
+
+/// Build a Service YAML companion for a Sandbox CR.
+fn sandbox_service_yaml(safe_name: &str, ns: &str) -> String {
+    let release = format!("that-agent-{safe_name}");
+    format!(
+        r#"apiVersion: v1
+kind: Service
+metadata:
+  name: {release}
+  namespace: {ns}
+  labels:
+    that-agent/managed: "true"
+spec:
+  selector:
+    agent-sandbox.io/sandbox-name: {release}
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: gateway
+"#
+    )
+}
+
+/// Resolve the container image for child agents (repo:tag from parent env).
+fn resolve_child_image() -> String {
+    std::env::var("THAT_AGENT_IMAGE").unwrap_or_else(|_| {
+        let repo = "ghcr.io/that-labs/that-agent";
+        let tag = std::env::var("THAT_HELM_CHART_VERSION").unwrap_or_else(|_| "latest".into());
+        format!("{repo}:{tag}")
+    })
+}
+
+/// Spawn a persistent agent via Agent Sandbox CRD.
+#[allow(clippy::too_many_arguments)]
+pub async fn spawn_persistent_agent_sandbox(
+    name: &str,
+    role: Option<&str>,
+    parent: &str,
+    model: Option<&str>,
+    _env_overrides: Option<&std::collections::HashMap<String, String>>,
+    db_path: &std::path::Path,
+    identity_configmap: Option<&str>,
+) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    let safe_name = sanitize_name(name);
+    let release_name = format!("that-agent-{safe_name}");
+
+    let model_str = model
+        .map(crate::model_catalog::normalize_model)
+        .or_else(|| std::env::var("THAT_AGENT_MODEL").ok())
+        .unwrap_or_default();
+
+    // Create ConfigMap for agent config
+    let config_yaml = sandbox_configmap_yaml(
+        name,
+        &safe_name,
+        &ns,
+        parent,
+        &model_str,
+        role,
+        identity_configmap,
+    );
+    kubectl_apply_stdin(&ns, &config_yaml).await?;
+
+    // Apply Sandbox CR + companion Service
+    let sandbox_yaml = sandbox_crd_yaml(name, &safe_name, &ns, parent, role.unwrap_or(""));
+    let service_yaml = sandbox_service_yaml(&safe_name, &ns);
+    let combined = format!("{sandbox_yaml}---\n{service_yaml}");
+    kubectl_apply_stdin(&ns, &combined).await?;
+
+    // Poll until Running (timeout 120s)
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > Duration::from_secs(120) {
+            anyhow::bail!("sandbox '{release_name}' did not reach Running within 120s");
+        }
+        let out = tokio::process::Command::new("kubectl")
+            .args([
+                "get",
+                "sandbox",
+                &release_name,
+                "-n",
+                &ns,
+                "-o",
+                "jsonpath={.status.phase}",
+            ])
+            .output()
+            .await?;
+        let phase = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if phase == "Running" {
+            break;
+        }
+        if phase == "Failed" {
+            anyhow::bail!("sandbox '{release_name}' failed to start");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    let gateway_url = format!("http://{release_name}.{ns}.svc.cluster.local:8080");
+
+    if let Some(cluster_dir) = cluster_dir_from_db(db_path) {
+        let reg = AgentRegistry::new(cluster_dir.join("agents.json"));
+        let _ = reg.register(AgentEntry {
+            name: name.to_string(),
+            role: role.map(str::to_string),
+            parent: Some(parent.to_string()),
+            pid: 0,
+            gateway_url: Some(gateway_url.clone()),
+            started_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+
+    Ok(serde_json::json!({
+        "name": name,
+        "type": "persistent",
+        "backend": "agent-sandbox",
+        "gateway_url": gateway_url,
+    }))
+}
+
+/// Build a minimal ConfigMap YAML for a sandbox-managed child agent.
+fn sandbox_configmap_yaml(
+    name: &str,
+    safe_name: &str,
+    ns: &str,
+    parent: &str,
+    model: &str,
+    role: Option<&str>,
+    identity_cm: Option<&str>,
+) -> String {
+    let release = format!("that-agent-{safe_name}");
+    let parent_gw = crate::orchestration::support::resolve_gateway_url();
+    let gw_token = std::env::var("THAT_GATEWAY_TOKEN").unwrap_or_default();
+    let provider = std::env::var("THAT_AGENT_PROVIDER").unwrap_or_default();
+    let registry = std::env::var("THAT_SANDBOX_K8S_REGISTRY").unwrap_or_default();
+    let buildkit = std::env::var("BUILDKIT_HOST").unwrap_or_default();
+
+    let mut data = vec![
+        format!("  THAT_SANDBOX_MODE: \"kubernetes\""),
+        format!("  THAT_TRUSTED_LOCAL_SANDBOX: \"1\""),
+        format!("  THAT_K8S_AGENT_SANDBOX: \"true\""),
+        format!("  THAT_SANDBOX_K8S_NAMESPACE: \"{ns}\""),
+        format!("  THAT_SANDBOX_K8S_REGISTRY: \"{registry}\""),
+        format!("  THAT_AGENT_NAME: \"{name}\""),
+        format!("  THAT_AGENT_PARENT: \"{parent}\""),
+        format!("  THAT_AGENT_ROLE: \"{}\"", role.unwrap_or("")),
+        format!("  THAT_AGENT_PROVIDER: \"{provider}\""),
+        format!("  THAT_AGENT_MODEL: \"{model}\""),
+        format!("  THAT_PARENT_GATEWAY_URL: \"{parent_gw}\""),
+        format!("  THAT_PARENT_GATEWAY_TOKEN: \"{gw_token}\""),
+    ];
+    if !buildkit.is_empty() {
+        data.push(format!("  BUILDKIT_HOST: \"{buildkit}\""));
+    }
+    if let Some(cm) = identity_cm {
+        data.push(format!("  THAT_IDENTITY_CONFIGMAP: \"{cm}\""));
+    }
+    if let Ok(rt) = std::env::var("THAT_K8S_SANDBOX_RUNTIME_CLASS") {
+        data.push(format!("  THAT_K8S_SANDBOX_RUNTIME_CLASS: \"{rt}\""));
+    }
+    if let Ok(tmpl) = std::env::var("THAT_K8S_SANDBOX_TEMPLATE") {
+        data.push(format!("  THAT_K8S_SANDBOX_TEMPLATE: \"{tmpl}\""));
+    }
+
+    format!(
+        r#"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {release}-config
+  namespace: {ns}
+  labels:
+    that-agent/managed: "true"
+    that-agent/name: "{name}"
+data:
+{data}
+"#,
+        data = data.join("\n"),
+    )
+}
+
+/// Run an ephemeral task agent via SandboxClaim from a warm pool.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_ephemeral_agent_sandbox(
+    name: &str,
+    role: Option<&str>,
+    task: &str,
+    parent: &str,
+    model: Option<&str>,
+    workspace: bool,
+    timeout_secs: u64,
+    _bootstrap: Option<&crate::workspace::GoldBootstrap>,
+    identity_configmap: Option<&str>,
+) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    let safe_name = sanitize_name(name);
+    let release_name = format!("that-agent-{safe_name}");
+    let git_svc = git_server_url(&ns);
+
+    let model_str = model
+        .map(crate::model_catalog::normalize_model)
+        .or_else(|| std::env::var("THAT_AGENT_MODEL").ok())
+        .unwrap_or_default();
+
+    if workspace {
+        let check = reqwest::Client::new()
+            .get(format!("{git_svc}/api/repos/workspace/activity"))
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
+        match check {
+            Ok(resp) if resp.status().is_success() => {}
+            _ => {
+                anyhow::bail!(
+                    "workspace=true but no workspace repo found on the git server. \
+                     Call workspace_share(path) first to push your repo."
+                );
+            }
+        }
+    }
+
+    // Create task ConfigMap
+    let safe_task = task
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(4000)
+        .collect::<String>();
+    let task_cm_yaml = format!(
+        r#"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {release_name}-task
+  namespace: {ns}
+  labels:
+    that-agent/managed: "true"
+    that-agent/name: "{name}"
+    that-agent/type: "ephemeral"
+data:
+  task.txt: |
+    {safe_task}
+"#
+    );
+    kubectl_apply_stdin(&ns, &task_cm_yaml).await?;
+
+    // Create config ConfigMap
+    let config_yaml = sandbox_configmap_yaml(
+        name,
+        &safe_name,
+        &ns,
+        parent,
+        &model_str,
+        role,
+        identity_configmap,
+    );
+    kubectl_apply_stdin(&ns, &config_yaml).await?;
+
+    // Create SandboxClaim referencing the warm pool template
+    let template_name = std::env::var("THAT_K8S_SANDBOX_TEMPLATE")
+        .unwrap_or_else(|_| "that-agent-ephemeral".into());
+    let image = resolve_child_image();
+
+    let mut workspace_env = String::new();
+    if workspace {
+        workspace_env = format!(
+            r#"    - name: GIT_REPO_URL
+      value: "{git_svc}/workspace.git"
+    - name: GIT_BRANCH
+      value: "task/{safe_name}"
+"#
+        );
+    }
+
+    let claim_yaml = format!(
+        r#"apiVersion: agent-sandbox.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: {release_name}
+  namespace: {ns}
+  labels:
+    that-agent/managed: "true"
+    that-agent/name: "{name}"
+    that-agent/parent: "{parent}"
+    that-agent/type: "ephemeral"
+    that-agent/role: "{role}"
+spec:
+  templateRef:
+    name: {template_name}
+  overrides:
+    containers:
+    - name: that-agent
+      image: {image}
+      command: ["that", "--agent", "{name}", "run", "query", "--parent", "{parent}", "--no-sandbox", "--task-file", "/etc/agent-task/task.txt"]
+      envFrom:
+      - configMapRef:
+          name: {release_name}-config
+      - secretRef:
+          name: that-agent-secrets
+          optional: true
+      env:
+{workspace_env}      volumeMounts:
+      - name: task
+        mountPath: /etc/agent-task
+        readOnly: true
+    volumes:
+    - name: task
+      configMap:
+        name: {release_name}-task
+"#,
+        role = role.unwrap_or(""),
+    );
+    kubectl_apply_stdin(&ns, &claim_yaml).await?;
+
+    // Monitor: wait for claim to bind, then watch sandbox phase
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+    let mut last_log_check = std::time::Instant::now() - Duration::from_secs(30);
+    let mut last_log_line = String::new();
+
+    loop {
+        if start.elapsed() > timeout {
+            let final_logs = tail_sandbox_logs(&release_name, &ns, 20).await;
+            let _ = kubectl_delete("sandboxclaim", &release_name, &ns).await;
+            anyhow::bail!("agent_run timed out after {timeout_secs}s. Last output:\n{final_logs}");
+        }
+
+        // Check sandbox phase via the claim's bound sandbox
+        let out = tokio::process::Command::new("kubectl")
+            .args([
+                "get",
+                "sandboxclaim",
+                &release_name,
+                "-n",
+                &ns,
+                "-o",
+                "jsonpath={.status.phase} {.status.sandboxName}",
+            ])
+            .output()
+            .await?;
+        let status_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let parts: Vec<&str> = status_str.split_whitespace().collect();
+        let claim_phase = parts.first().copied().unwrap_or("");
+        let sandbox_name = parts.get(1).copied().unwrap_or(&release_name);
+
+        if claim_phase == "Bound" || claim_phase == "Running" {
+            // Check the actual sandbox status
+            let sb_out = tokio::process::Command::new("kubectl")
+                .args([
+                    "get",
+                    "sandbox",
+                    sandbox_name,
+                    "-n",
+                    &ns,
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ])
+                .output()
+                .await?;
+            let sb_phase = String::from_utf8_lossy(&sb_out.stdout).trim().to_string();
+            if sb_phase == "Succeeded" || sb_phase == "Completed" {
+                break;
+            }
+            if sb_phase == "Failed" {
+                let logs = tail_sandbox_logs(&release_name, &ns, 30).await;
+                anyhow::bail!("sandbox agent failed\nLast output:\n{logs}");
+            }
+        }
+        if claim_phase == "Failed" {
+            anyhow::bail!("sandbox claim '{release_name}' failed to bind");
+        }
+
+        // Progress reporting (same cadence as Helm path)
+        if last_log_check.elapsed() >= Duration::from_secs(30) {
+            last_log_check = std::time::Instant::now();
+            let latest = tail_sandbox_logs(&release_name, &ns, 3).await;
+            if !latest.is_empty() && latest != last_log_line {
+                last_log_line = latest.clone();
+                let elapsed = start.elapsed().as_secs();
+                let turn_info = latest
+                    .lines()
+                    .rev()
+                    .find_map(|l| {
+                        l.find("turn=").and_then(|i| {
+                            let rest = &l[i..];
+                            let turn = rest.strip_prefix("turn=")?.split_whitespace().next()?;
+                            let max = rest.find("max_turns=").and_then(|j| {
+                                rest[j..]
+                                    .strip_prefix("max_turns=")?
+                                    .split_whitespace()
+                                    .next()
+                            })?;
+                            Some(format!("turn {turn}/{max}"))
+                        })
+                    })
+                    .unwrap_or_else(|| "working...".to_string());
+                let msg = format!("[{name}] {turn_info} ({elapsed}s)");
+                tracing::info!(agent = %name, "{msg}");
+                let gw = crate::orchestration::support::resolve_gateway_url();
+                let _ = reqwest::Client::new()
+                    .post(format!("{gw}/v1/notify"))
+                    .json(&serde_json::json!({
+                        "message": msg,
+                        "agent": name,
+                    }))
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    let output_text = tail_sandbox_logs(&release_name, &ns, 200).await;
+    let elapsed = start.elapsed().as_secs();
+
+    // Cleanup claim + task ConfigMap
+    let _ = kubectl_delete("sandboxclaim", &release_name, &ns).await;
+    let _ = kubectl_delete("configmap", &format!("{release_name}-task"), &ns).await;
+    let _ = kubectl_delete("configmap", &format!("{release_name}-config"), &ns).await;
+
+    Ok(serde_json::json!({
+        "name": name,
+        "status": "succeeded",
+        "backend": "agent-sandbox",
+        "output": output_text,
+        "elapsed_secs": elapsed,
+    }))
+}
+
+/// List all managed agents including Sandbox CRs.
+pub async fn list_agents_sandbox() -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+
+    // Get Sandbox CRs
+    let sb_out = tokio::process::Command::new("kubectl")
+        .args([
+            "get",
+            "sandboxes.agent-sandbox.io",
+            "-n",
+            &ns,
+            "-l",
+            "that-agent/managed=true",
+            "-o",
+            "json",
+        ])
+        .output()
+        .await?;
+
+    let mut agents: Vec<serde_json::Value> = Vec::new();
+
+    if sb_out.status.success() {
+        let parsed: serde_json::Value = serde_json::from_slice(&sb_out.stdout).unwrap_or_default();
+        for item in parsed["items"].as_array().cloned().unwrap_or_default() {
+            let labels = match item["metadata"]["labels"].as_object() {
+                Some(l) => l,
+                None => continue,
+            };
+            let name = labels
+                .get("that-agent/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let parent = labels
+                .get("that-agent/parent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let role = labels
+                .get("that-agent/role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let agent_type = labels
+                .get("that-agent/type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let phase = item["status"]["phase"].as_str().unwrap_or("Pending");
+            let safe = sanitize_name(name);
+            let gw = format!("http://that-agent-{safe}.{ns}.svc.cluster.local:8080");
+            agents.push(serde_json::json!({
+                "name": name,
+                "parent": parent,
+                "role": role,
+                "type": agent_type,
+                "kind": "Sandbox",
+                "alive": phase == "Running",
+                "status": phase.to_ascii_lowercase(),
+                "gateway_url": gw,
+                "backend": "agent-sandbox",
+            }));
+        }
+    }
+
+    // Also get SandboxClaims (ephemeral)
+    let sc_out = tokio::process::Command::new("kubectl")
+        .args([
+            "get",
+            "sandboxclaims.agent-sandbox.io",
+            "-n",
+            &ns,
+            "-l",
+            "that-agent/managed=true",
+            "-o",
+            "json",
+        ])
+        .output()
+        .await?;
+
+    if sc_out.status.success() {
+        let parsed: serde_json::Value = serde_json::from_slice(&sc_out.stdout).unwrap_or_default();
+        for item in parsed["items"].as_array().cloned().unwrap_or_default() {
+            let labels = match item["metadata"]["labels"].as_object() {
+                Some(l) => l,
+                None => continue,
+            };
+            let name = labels
+                .get("that-agent/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let parent = labels
+                .get("that-agent/parent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let role = labels
+                .get("that-agent/role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let phase = item["status"]["phase"].as_str().unwrap_or("Pending");
+            agents.push(serde_json::json!({
+                "name": name,
+                "parent": parent,
+                "role": role,
+                "type": "ephemeral",
+                "kind": "SandboxClaim",
+                "alive": false,
+                "status": phase.to_ascii_lowercase(),
+                "backend": "agent-sandbox",
+            }));
+        }
+    }
+
+    // Also include any legacy Helm-managed agents
+    let helm_result = list_agents_k8s().await;
+    if let Ok(helm_json) = helm_result {
+        if let Some(helm_agents) = helm_json["agents"].as_array() {
+            agents.extend(helm_agents.iter().cloned());
+        }
+    }
+
+    Ok(serde_json::json!({ "agents": agents }))
+}
+
+/// Stop/suspend an agent managed by Sandbox CRD.
+pub async fn agent_stop_sandbox(name: &str) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    let safe_name = sanitize_name(name);
+    let release_name = format!("that-agent-{safe_name}");
+
+    // Try suspending the Sandbox first
+    let suspend = tokio::process::Command::new("kubectl")
+        .args([
+            "patch",
+            "sandbox",
+            &release_name,
+            "-n",
+            &ns,
+            "--type=merge",
+            "-p",
+            r#"{"spec":{"suspend":true}}"#,
+        ])
+        .output()
+        .await;
+
+    if let Ok(out) = suspend {
+        if out.status.success() {
+            return Ok(serde_json::json!({
+                "name": name,
+                "status": "suspended",
+                "backend": "agent-sandbox",
+            }));
+        }
+    }
+
+    // Fallback: try deleting sandbox + claim
+    let _ = kubectl_delete("sandbox", &release_name, &ns).await;
+    let _ = kubectl_delete("sandboxclaim", &release_name, &ns).await;
+    // Clean up config resources
+    let _ = kubectl_delete("configmap", &format!("{release_name}-config"), &ns).await;
+    let _ = kubectl_delete("configmap", &format!("{release_name}-task"), &ns).await;
+    let _ = kubectl_delete("service", &release_name, &ns).await;
+
+    Ok(serde_json::json!({
+        "name": name,
+        "status": "stopped",
+        "backend": "agent-sandbox",
+    }))
+}
+
+/// Get status of an agent managed by Sandbox CRD.
+pub async fn agent_status_sandbox(name: &str) -> Result<serde_json::Value> {
+    let ns = k8s_namespace();
+    let safe_name = sanitize_name(name);
+    let release_name = format!("that-agent-{safe_name}");
+
+    // Try Sandbox CR first
+    let out = tokio::process::Command::new("kubectl")
+        .args([
+            "get",
+            "sandbox",
+            &release_name,
+            "-n",
+            &ns,
+            "-o",
+            "jsonpath={.status.phase},{.metadata.creationTimestamp},{.spec.suspend}",
+        ])
+        .output()
+        .await?;
+
+    if out.status.success() {
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<&str> = raw.split(',').collect();
+        return Ok(serde_json::json!({
+            "name": name,
+            "kind": "Sandbox",
+            "phase": parts.first().unwrap_or(&""),
+            "created": parts.get(1).unwrap_or(&""),
+            "suspended": parts.get(2).unwrap_or(&"false"),
+            "backend": "agent-sandbox",
+        }));
+    }
+
+    // Try SandboxClaim
+    let out = tokio::process::Command::new("kubectl")
+        .args([
+            "get",
+            "sandboxclaim",
+            &release_name,
+            "-n",
+            &ns,
+            "-o",
+            "jsonpath={.status.phase},{.metadata.creationTimestamp},{.status.sandboxName}",
+        ])
+        .output()
+        .await?;
+
+    if out.status.success() {
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let parts: Vec<&str> = raw.split(',').collect();
+        return Ok(serde_json::json!({
+            "name": name,
+            "kind": "SandboxClaim",
+            "phase": parts.first().unwrap_or(&""),
+            "created": parts.get(1).unwrap_or(&""),
+            "sandbox": parts.get(2).unwrap_or(&""),
+            "backend": "agent-sandbox",
+        }));
+    }
+
+    // Fall back to Helm-based status
+    agent_status_k8s(name).await
+}
+
+/// Tail logs from a Sandbox-managed pod by label selector.
+async fn tail_sandbox_logs(release_name: &str, ns: &str, tail: u32) -> String {
+    tokio::process::Command::new("kubectl")
+        .args([
+            "logs",
+            "-l",
+            &format!("agent-sandbox.io/sandbox-name={release_name}"),
+            "-n",
+            ns,
+            &format!("--tail={tail}"),
+            "-c",
+            "that-agent",
+        ])
+        .output()
+        .await
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Delete a K8s resource by kind/name, ignoring not-found errors.
+async fn kubectl_delete(kind: &str, name: &str, ns: &str) -> Result<()> {
+    let _ = tokio::process::Command::new("kubectl")
+        .args(["delete", kind, name, "-n", ns, "--ignore-not-found"])
+        .output()
+        .await;
+    Ok(())
 }
 
 /// Delete all ephemeral child Jobs for the current agent.

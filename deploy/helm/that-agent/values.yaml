@@ -135,6 +135,16 @@ gateway:
 # Override to use a local chart path or private registry
 helmChart: ""
 
+# -- Agent Sandbox CRD (agent-sandbox.io/v1alpha1)
+# Requires the Agent Sandbox controller to be installed in the cluster.
+# When enabled, child agents use Sandbox CRDs instead of raw Deployments/Jobs.
+agentSandbox:
+  enabled: false
+  runtimeClass: ""        # gvisor, kata, or empty for default containerd
+  warmPool:
+    replicas: 2           # number of pre-warmed sandbox pods
+    idleTimeout: 600      # seconds before draining idle sandboxes
+
 # -- Observability
 observability:
   phoenixTracing: false

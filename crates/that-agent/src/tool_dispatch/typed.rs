@@ -2620,7 +2620,19 @@ async fn dispatch_inner(
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             let parent = resolve_agent_name(config, skill_roots, None);
-            if crate::agents::is_k8s_mode() {
+            if crate::agents::use_agent_sandbox_crd() {
+                crate::agents::spawn_persistent_agent_sandbox(
+                    &args.name,
+                    args.role.as_deref(),
+                    parent.as_deref().unwrap_or("root"),
+                    args.model.as_deref(),
+                    args.env.as_ref(),
+                    Path::new(&config.memory.db_path),
+                    args.identity_configmap.as_deref(),
+                )
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+            } else if crate::agents::is_k8s_mode() {
                 crate::agents::spawn_persistent_agent_k8s(
                     &args.name,
                     args.role.as_deref(),
@@ -2673,7 +2685,21 @@ async fn dispatch_inner(
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             let parent =
                 resolve_agent_name(config, skill_roots, None).unwrap_or_else(|| "root".to_string());
-            if crate::agents::is_k8s_mode() {
+            if crate::agents::use_agent_sandbox_crd() {
+                crate::agents::run_ephemeral_agent_sandbox(
+                    &args.name,
+                    args.role.as_deref(),
+                    &args.task,
+                    &parent,
+                    args.model.as_deref(),
+                    args.workspace.unwrap_or(false),
+                    args.timeout_secs.unwrap_or(1800),
+                    args.bootstrap.as_ref(),
+                    args.identity_configmap.as_deref(),
+                )
+                .await
+                .map_err(|e| ToolError(e.to_string()))
+            } else if crate::agents::is_k8s_mode() {
                 crate::agents::run_ephemeral_agent_k8s(
                     &args.name,
                     args.role.as_deref(),
@@ -2775,7 +2801,11 @@ async fn dispatch_inner(
             }))
         }
         "agent_list" => {
-            if crate::agents::is_k8s_mode() {
+            if crate::agents::use_agent_sandbox_crd() {
+                crate::agents::list_agents_sandbox()
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))
+            } else if crate::agents::is_k8s_mode() {
                 crate::agents::list_agents_k8s()
                     .await
                     .map_err(|e| ToolError(e.to_string()))
@@ -3335,9 +3365,15 @@ async fn dispatch_inner(
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            crate::agents::agent_stop_k8s(&args.name)
-                .await
-                .map_err(|e| ToolError(e.to_string()))
+            if crate::agents::use_agent_sandbox_crd() {
+                crate::agents::agent_stop_sandbox(&args.name)
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))
+            } else {
+                crate::agents::agent_stop_k8s(&args.name)
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))
+            }
         }
         "agent_status" => {
             #[derive(Deserialize)]
@@ -3346,9 +3382,15 @@ async fn dispatch_inner(
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            crate::agents::agent_status_k8s(&args.name)
-                .await
-                .map_err(|e| ToolError(e.to_string()))
+            if crate::agents::use_agent_sandbox_crd() {
+                crate::agents::agent_status_sandbox(&args.name)
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))
+            } else {
+                crate::agents::agent_status_k8s(&args.name)
+                    .await
+                    .map_err(|e| ToolError(e.to_string()))
+            }
         }
         "agent_logs" => {
             #[derive(Deserialize)]
