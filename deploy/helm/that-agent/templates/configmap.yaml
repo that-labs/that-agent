@@ -10,6 +10,9 @@ data:
   THAT_SANDBOX_K8S_NAMESPACE: {{ .Release.Namespace | quote }}
   THAT_SANDBOX_K8S_REGISTRY: {{ .Values.registry.host | quote }}
   THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT: {{ .Values.registry.pushEndpoint | default .Values.registry.host | quote }}
+  THAT_K8S_REGISTRY_INSECURE: {{ .Values.registry.insecure | toString | quote }}
+  THAT_K8S_REGISTRY_AUTH: {{ if .Values.registry.credentialSecret }}"true"{{ else }}"false"{{ end }}
+  THAT_K8S_REGISTRY_CREDENTIAL_SECRET: {{ .Values.registry.credentialSecret | quote }}
   THAT_K8S_REGISTRY_AUTOFIX_LOCALHOST_PORT: "1"
   THAT_AGENT_NAME: {{ .Values.agent.name | quote }}
   THAT_AGENT_BOOTSTRAP_PROMPT: {{ .Values.agent.bootstrapPrompt | quote }}
@@ -37,6 +40,8 @@ data:
   {{- end }}
   {{- if .Values.buildkit.enabled }}
   BUILDKIT_HOST: {{ include "that-agent.buildkitHost" . | quote }}
+  {{- else if .Values.buildkit.externalHost }}
+  BUILDKIT_HOST: {{ .Values.buildkit.externalHost | quote }}
   {{- end }}
   THAT_HELM_CHART: {{ .Values.helmChart | default "oci://ghcr.io/that-labs/helm/that-agent" | quote }}
   THAT_HELM_CHART_VERSION: {{ .Chart.Version | quote }}

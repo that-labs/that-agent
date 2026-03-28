@@ -934,6 +934,8 @@ fn child_helm_sets(
         "secrets.existingSecret=that-agent-secrets".to_string(),
         "accessLevel=namespace-admin".to_string(),
         "gitServer.enabled=false".to_string(),
+        // Children share the parent's BuildKit sidecar via BUILDKIT_HOST env var
+        // (forwarded below) — no need for their own BuildKit deployment.
         "buildkit.enabled=false".to_string(),
         "cacheProxy.enabled=false".to_string(),
         "pdb.enabled=false".to_string(),
@@ -949,6 +951,35 @@ fn child_helm_sets(
             "agent.bootstrapPrompt={}",
             agent_role.replace(',', "\\,")
         ));
+    }
+
+    // Forward registry insecure mode so children match the parent's TLS config.
+    if let Ok(insecure) = std::env::var("THAT_K8S_REGISTRY_INSECURE") {
+        sets.push(format!("registry.insecure={insecure}"));
+    }
+
+    // Forward parent's BuildKit service so children can build/push images
+    // without deploying their own BuildKit sidecar.
+    if let Ok(bk) = std::env::var("BUILDKIT_HOST") {
+        if !bk.is_empty() {
+            sets.push(format!("buildkit.externalHost={bk}"));
+        }
+    }
+
+    // Forward registry push endpoint so children know where to push images.
+    if let Ok(push_ep) = std::env::var("THAT_K8S_REGISTRY_PUSH_ENDPOINT")
+        .or(std::env::var("THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT"))
+    {
+        if !push_ep.is_empty() {
+            sets.push(format!("registry.pushEndpoint={push_ep}"));
+        }
+    }
+
+    // Forward registry credential secret so children can push to authenticated registries.
+    if let Ok(cred_secret) = std::env::var("THAT_K8S_REGISTRY_CREDENTIAL_SECRET") {
+        if !cred_secret.is_empty() {
+            sets.push(format!("registry.credentialSecret={cred_secret}"));
+        }
     }
 
     // Forward the image so children use the same version as parent

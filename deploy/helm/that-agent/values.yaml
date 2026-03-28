@@ -78,12 +78,18 @@ gitServer:
 # -- Container registry for agent-built images
 registry:
   host: "registry.local:5000"
-  pushEndpoint: ""  # override if push address differs from pull
-  insecure: true    # use HTTP instead of HTTPS
+  pushEndpoint: ""        # override if push address differs from pull
+  insecure: true          # use HTTP instead of HTTPS
+  credentialSecret: ""    # kubernetes.io/dockerconfigjson Secret for authenticated push/pull
+
+# -- Image pull secrets (for pulling agent images from private registries)
+imagePullSecrets: []
+# - name: my-registry-creds
 
 # -- BuildKit
 buildkit:
   enabled: true
+  externalHost: ""  # set by parent when sharing its BuildKit with children
   storage:
     size: 20Gi
     storageClassName: ""

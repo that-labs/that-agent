@@ -720,6 +720,10 @@ pub async fn run_listen(
     let session_mgr = Arc::new(SessionManager::new(&state_dir)?);
     let agent_workspace = resolve_agent_workspace(ws, agent)?;
     let container = prepare_container(agent, &agent_workspace, sandbox).await?;
+    crate::workspace::seed_from_identity_mount(&agent.name);
+    if let Some(bootstrap) = crate::workspace::GoldBootstrap::from_env() {
+        bootstrap.apply_local(&agent.name);
+    }
     let ws_files = load_workspace_files(agent, sandbox);
 
     // Initial skill discovery + preamble — load plugin registry once.
@@ -2576,7 +2580,26 @@ async fn run_agent_for_sender(
             }
         }
         Err(e) => {
-            error!(session = %session_id, "Agent run failed: {e:#}");
+            let err_msg = format!("{e:#}");
+            error!(session = %session_id, "Agent run failed: {err_msg}");
+            // Notify the parent via callback so it knows the child stopped.
+            if let Some(url) = callback_url {
+                let t = err_msg.clone();
+                let agent = sender_id.clone();
+                tokio::spawn(async move {
+                    let _ = reqwest::Client::new()
+                        .post(&url)
+                        .json(&serde_json::json!({
+                            "text": t,
+                            "state": "failed",
+                            "message": t,
+                            "agent": agent,
+                        }))
+                        .timeout(std::time::Duration::from_secs(10))
+                        .send()
+                        .await;
+                });
+            }
             let _ = session_mgr.append(
                 &session_id,
                 &TranscriptEntry {
@@ -2584,7 +2607,7 @@ async fn run_agent_for_sender(
                     run_id,
                     event: TranscriptEvent::RunEnd {
                         status: RunStatus::Error,
-                        error: Some(format!("{e:#}")),
+                        error: Some(err_msg),
                     },
                 },
             );

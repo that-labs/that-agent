@@ -437,12 +437,20 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
     out.push_str("## Skills\n\n");
     out.push_str(&format!(
         "Your skills directory: `{skills_path}`  \n\
-         When creating, editing, or installing skills, write to this path.  \n\
          New or updated skill files are hot-reloaded automatically — no restart needed.  \n\
          Skill naming must be deterministic and kebab-case. If the user does not provide a name, \
          derive it from the core capability phrase and keep role nouns stable \
          (e.g. `JSON formatter` -> `json-formatter`, `task manager` -> `task-manager`).  \n\
-         Do not substitute role nouns with alternates like `formatting` when `formatter` is implied.\n\n"
+         Do not substitute role nouns with alternates like `formatting` when `formatter` is implied.\n\n\
+         ### Installing skills\n\n\
+         When the user provides a repository URL or download link for a skill, \
+         **clone or download it** into the skills directory — never manually recreate the content with `fs_write`. \
+         Use `shell_exec` to run the appropriate command (e.g. clone the repository directly into the skills path). \
+         Only use `fs_write` for skills you are authoring from scratch.\n\n\
+         ### Reading skills\n\n\
+         **Always use `read_skill(name)` to read skill content** — never use `fs_cat` or other file-reading tools \
+         on skill files. `read_skill` returns the skill body along with available reference files for progressive \
+         disclosure, which raw file reads cannot provide.\n\n"
     ));
 
     if skills.is_empty() {
