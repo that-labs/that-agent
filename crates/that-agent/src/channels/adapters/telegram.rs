@@ -890,49 +890,52 @@ impl Channel for TelegramAdapter {
                 MessageHandle::default()
             }
             ChannelEvent::Notify(msg) => {
-                // Extract "[agent-name] rest" prefix if present.
-                let (agent_key, status_text) = if msg.starts_with('[') {
-                    if let Some(close) = msg.find(']') {
+                // Messages with "[agent-name] ..." prefix are status updates — merge
+                // into the persistent cluster-status board (editable message).
+                // Plain messages (from channel_notify tool) are standalone notifications
+                // that must be sent as new messages so the user gets a push notification.
+                if msg.starts_with('[') {
+                    let (agent_key, status_text) = if let Some(close) = msg.find(']') {
                         let key = msg[1..close].to_string();
                         let text = msg[close + 1..].trim().to_string();
                         (key, text)
                     } else {
                         ("system".to_string(), msg.clone())
+                    };
+
+                    let (rendered, existing_id, ready) = {
+                        let mut state = self.state.lock().await;
+                        let tracker = state
+                            .notify_status
+                            .entry(chat_id.clone())
+                            .or_insert_with(NotifyStatusTracker::new);
+                        tracker.upsert(agent_key, status_text);
+                        let ready = tracker.ready_to_edit();
+                        if ready {
+                            tracker.last_edit = Some(std::time::Instant::now());
+                        }
+                        (tracker.render(), tracker.message_id, ready)
+                    };
+
+                    if !ready {
+                        // Throttled — state updated, no API call.
+                    } else if existing_id == 0 {
+                        if let Ok(Some(mid)) = self.send_plain_get_id(&chat_id, &rendered).await {
+                            let mut state = self.state.lock().await;
+                            if let Some(t) = state.notify_status.get_mut(&chat_id) {
+                                t.message_id = mid;
+                            }
+                        }
+                    } else if let Err(e) = self
+                        .edit_message_text(&chat_id, existing_id, &rendered)
+                        .await
+                    {
+                        debug!(channel = %self.id, "Notify status edit failed: {e:#}");
+                        self.state.lock().await.notify_status.remove(&chat_id);
                     }
                 } else {
-                    ("system".to_string(), msg.clone())
-                };
-
-                let (rendered, existing_id, ready) = {
-                    let mut state = self.state.lock().await;
-                    let tracker = state
-                        .notify_status
-                        .entry(chat_id.clone())
-                        .or_insert_with(NotifyStatusTracker::new);
-                    tracker.upsert(agent_key, status_text);
-                    let ready = tracker.ready_to_edit();
-                    if ready {
-                        tracker.last_edit = Some(std::time::Instant::now());
-                    }
-                    (tracker.render(), tracker.message_id, ready)
-                };
-
-                if !ready {
-                    // Throttled — state updated, no API call.
-                } else if existing_id == 0 {
-                    if let Ok(Some(mid)) = self.send_plain_get_id(&chat_id, &rendered).await {
-                        let mut state = self.state.lock().await;
-                        if let Some(t) = state.notify_status.get_mut(&chat_id) {
-                            t.message_id = mid;
-                        }
-                    }
-                } else if let Err(e) = self
-                    .edit_message_text(&chat_id, existing_id, &rendered)
-                    .await
-                {
-                    debug!(channel = %self.id, "Notify status edit failed: {e:#}");
-                    // Message was deleted or too old — reset so next notify starts fresh.
-                    self.state.lock().await.notify_status.remove(&chat_id);
+                    // Direct notification — send as a new message.
+                    self.send_text(&chat_id, msg).await?;
                 }
                 MessageHandle::default()
             }

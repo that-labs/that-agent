@@ -84,7 +84,7 @@ Session restoration happens lazily on the first inbound message per sender (not 
 
 `load_agent_config(container)` **must** be called in every execution path (streaming, TUI, eval, channel). Missing it silently uses restrictive defaults even in sandbox mode — symptom: `policy denied` on tools that should be allowed.
 
-Destructive tools (`fs_delete`, `shell_exec`, `fs_write`, `code_edit`, `git_commit`, `git_push`) default to Deny on host, Allow in sandbox.
+Destructive tools (`fs_rm`, `shell_exec`, `fs_write`, `code_edit`, `git_commit`, `git_push`) default to Deny on host, Allow in sandbox. Note: the tool name is `fs_rm` but the policy config field is `fs_delete`.
 
 ### Preamble ↔ Struct Sync
 
@@ -92,9 +92,9 @@ Adding a field to any agent-facing struct (Heartbeat, channel config, etc.) with
 
 ### ChannelHook Interceptions
 
-`ChannelHook` in `hooks.rs` intercepts tool calls before dispatch. Tools handled entirely by the hook (return `HookAction::Skip`): `human_ask`, `answer`, `channel_notify`, `channel_send_file`, `channel_send_message`, `channel_send_raw`, `channel_settings`, `agent_query`. Adding a new channel-aware tool? Add its interception arm here — dispatch() will never see it.
+`ChannelHook` in `hooks.rs` intercepts tool calls before dispatch. Tools handled entirely by the hook (return `HookAction::Skip`): `human_ask`, `answer`, `channel_notify`, `channel_send_file`, `channel_send_message`, `channel_send_raw`, `channel_settings`. Adding a new channel-aware tool? Add its interception arm here — dispatch() will never see it.
 
-`agent_query` is intercepted to spawn a **background task** — never blocks the agent loop. The result is delivered as a channel notification.
+`agent_query` is conditionally intercepted: only when `stream=true` in the args (spawns a background streaming relay). Non-streaming `agent_query` falls through to normal dispatch via `HookAction::Continue`.
 
 ### Channel Router
 
