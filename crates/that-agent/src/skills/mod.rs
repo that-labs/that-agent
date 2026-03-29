@@ -446,11 +446,7 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
          When the user provides a repository URL or download link for a skill, \
          **clone or download it** into the skills directory — never manually recreate the content with `fs_write`. \
          Use `shell_exec` to run the appropriate command (e.g. clone the repository directly into the skills path). \
-         Only use `fs_write` for skills you are authoring from scratch.\n\n\
-         ### Reading skills\n\n\
-         **Always use `read_skill(name)` to read skill content** — never use `fs_cat` or other file-reading tools \
-         on skill files. `read_skill` returns the skill body along with available reference files for progressive \
-         disclosure, which raw file reads cannot provide.\n\n"
+         Only use `fs_write` for skills you are authoring from scratch.\n\n"
     ));
 
     if skills.is_empty() {
@@ -476,7 +472,11 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
     // Catalog skills with progressive-disclosure instructions.
     if !catalog_skills.is_empty() {
         out.push_str(
-            "Use `list_skills()` to discover all available skills at any time. \
+            "### Reading skills\n\n\
+             **Always use `read_skill(name)` to read skill content** — never use `fs_cat` or other file-reading tools \
+             on skill files. `read_skill` returns the skill body along with available reference files for progressive \
+             disclosure, which raw file reads cannot provide.\n\n\
+             Use `list_skills()` to discover all available skills at any time. \
              **Before starting a task, scan this list and `read_skill(name)` any skill \
              whose description matches what you are about to do.** \
              If an installed skill appears relevant to the problem domain, framework, or implementation \
