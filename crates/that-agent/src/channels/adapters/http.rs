@@ -1021,6 +1021,37 @@ async fn handle_task_update(
         .unwrap_or("");
     let preview: String = message_text.chars().take(300).collect();
 
+    // Update the task registry so agent_task(action=status) reflects the
+    // terminal state immediately, without requiring the parent to poll.
+    if !task_id.is_empty() {
+        if let Some(cluster_dir) = state.cluster_dir.clone() {
+            let task_reg =
+                crate::agents::AgentTaskRegistry::new(cluster_dir.join("agent_tasks.json"));
+            let new_state = match task_state {
+                "completed" => Some(crate::agents::AgentTaskState::Completed),
+                "failed" => Some(crate::agents::AgentTaskState::Failed),
+                "working" => Some(crate::agents::AgentTaskState::Working),
+                "input_required" => Some(crate::agents::AgentTaskState::InputRequired),
+                "canceled" => Some(crate::agents::AgentTaskState::Canceled),
+                _ => None,
+            };
+            if let Some(st) = new_state {
+                if let Err(e) = task_reg.update_state(
+                    &task_id,
+                    st,
+                    Some(agent),
+                    if message_text.is_empty() {
+                        None
+                    } else {
+                        Some(message_text)
+                    },
+                ) {
+                    tracing::warn!(task_id = %task_id, error = %e, "Failed to update task registry on callback");
+                }
+            }
+        }
+    }
+
     let notification = format!("[task:{task_id}/{agent}] {task_state}: {preview}");
 
     let msg = InboundMessage {

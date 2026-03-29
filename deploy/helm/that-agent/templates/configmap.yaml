@@ -16,6 +16,9 @@ data:
   THAT_K8S_REGISTRY_AUTOFIX_LOCALHOST_PORT: "1"
   THAT_AGENT_NAME: {{ .Values.agent.name | quote }}
   THAT_AGENT_BOOTSTRAP_PROMPT: {{ .Values.agent.bootstrapPrompt | quote }}
+  {{- if .Values.agent.goldBootstrap }}
+  THAT_GOLD_BOOTSTRAP: {{ .Values.agent.goldBootstrap | quote }}
+  {{- end }}
   THAT_AGENT_PROVIDER: {{ .Values.agent.provider | quote }}
   THAT_AGENT_MODEL: {{ .Values.agent.model | quote }}
   THAT_AGENT_MAX_TURNS: {{ .Values.agent.maxTurns | toString | quote }}

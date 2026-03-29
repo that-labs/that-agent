@@ -19,6 +19,9 @@ agent:
   model: claude-sonnet-4-6
   maxTurns: 75
   bootstrapPrompt: ""
+  # JSON-encoded GoldBootstrap payload (identity, soul, agents, context)
+  # Set automatically when parent passes bootstrap to spawn_agent in K8s mode.
+  goldBootstrap: ""
   # Identity ConfigMap name — holds config.toml + identity files (Soul.md, Agents.md, etc.)
   # Created by parent agent before spawning; mounted at /etc/agent-identity
   identityConfigMap: ""

@@ -18,9 +18,9 @@ when to use it, how to set it up, and what to watch out for.
 **Best practices**:
 - Keep subtasks genuinely independent unless they explicitly need a shared scratchpad
 - Put stable goal/workspace/participant policy in the scratchpad header, and live coordination in the activity tail
-- For coding tasks, use `workspace_share` + `workspace=true` so each worker gets its own branch
-- Monitor with `workspace_activity()` to see who's pushed and how far along
-- Merge results sequentially with `workspace_collect` — simplest changes first
+- For coding tasks, use `workspace_admin(action=share, ...)` + `workspace=true` so each worker gets its own branch
+- Monitor with `workspace_admin(action=activity)` to see who's pushed and how far along
+- Merge results sequentially with `workspace_admin(action=collect, ...)` — simplest changes first
 
 ## Pipeline (Sequential Delegation)
 
@@ -35,7 +35,7 @@ when to use it, how to set it up, and what to watch out for.
 
 **Best practices**:
 - Each stage should produce clear, well-defined artifacts
-- Review between stages with the scratchpad plus `workspace_diff` to catch issues early
+- Review between stages with the scratchpad plus `workspace_admin(action=diff, ...)` to catch issues early
 - Re-share the workspace between stages so each agent builds on the last
 - Keep pipeline stages focused — if a stage is too large, decompose it
 
@@ -46,9 +46,9 @@ when to use it, how to set it up, and what to watch out for.
 **Structure**:
 1. `agent_task(action=send, name=explorer, ...)` — explores the problem space
 2. Parent reviews the explorer's scratchpad header/activity and formulates a plan
-3. `workspace_share(path)` then `agent_task(action=send, name=developer, ...)` or `agent_run(..., workspace=true)` depending on whether mid-flight supervision is needed
+3. `workspace_admin(action=share, path)` then `agent_task(action=send, name=developer, ...)` or `agent_run(..., workspace=true)` depending on whether mid-flight supervision is needed
 4. Developer implements the solution on its task branch
-5. Parent reviews with the scratchpad, `workspace_diff`, and `workspace_collect`
+5. Parent reviews with the scratchpad, `workspace_admin(action=diff, ...)`, and `workspace_admin(action=collect, ...)`
 
 **Best practices**:
 - Give the explorer a clear research question, not a vague directive
@@ -62,28 +62,28 @@ when to use it, how to set it up, and what to watch out for.
 
 **Structure**:
 1. Developer agent pushes changes to its task branch
-2. Parent uses `workspace_diff(branch)` to get the diff
+2. Parent uses `workspace_admin(action=diff, branch)` to get the diff
 3. Parent creates or steers a reviewer task and writes review criteria into the scratchpad header/activity
-4. If changes pass review, parent merges with `workspace_collect`
+4. If changes pass review, parent merges with `workspace_admin(action=collect, ...)`
 5. If changes need revision, parent sends feedback to the developer via `agent_task(action=send, task_id, ...)`
 
 **Best practices**:
 - Pass the actual diff content to the reviewer, not just "review the code"
 - Define clear review criteria (tests pass, no security issues, style compliance)
 - Keep review cycles bounded — set a max number of revision rounds
-- Use `workspace_conflicts(branch)` if the reviewer's feedback leads to rebases
+- Use `workspace_admin(action=conflicts, branch)` if the reviewer's feedback leads to rebases
 
 ## Specialist Team
 
 **When**: A complex project requires diverse expertise.
 
 **Structure**:
-1. Parent shares workspace: `workspace_share(path)`
+1. Parent shares workspace: `workspace_admin(action=share, path)`
 2. Spawn specialists in parallel, each with a focused role and a tracked task when supervision is needed
 3. If specialists must coordinate, attach them to the same task or cross-reference task IDs in scratchpad notes
-4. Monitor with `agent_task(action=status)`, scratchpad reads, and `workspace_activity()` to track all branches
-5. Review each specialist's work with `workspace_diff(branch)`
-6. Merge branches in dependency order with `workspace_collect`
+4. Monitor with `agent_task(action=status)`, scratchpad reads, and `workspace_admin(action=activity)` to track all branches
+5. Review each specialist's work with `workspace_admin(action=diff, branch)`
+6. Merge branches in dependency order with `workspace_admin(action=collect, ...)`
 7. Resolve conflicts using the `git-workspace` skill protocol
 
 **Best practices**:

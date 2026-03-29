@@ -179,7 +179,9 @@ impl GoldBootstrap {
     }
 
     /// Write all present fields to the agent's local workspace directory.
-    /// Only overwrites files that are `Some`. Called before workspace load.
+    /// Only writes files that are `Some` AND do not already exist on disk —
+    /// a persistent agent may have refined its identity files over sessions,
+    /// and a second `spawn_agent` must not obliterate them.
     pub fn apply_local(&self, agent_name: &str) {
         let Some(dir) = agent_dir_local(agent_name) else {
             return;
@@ -195,7 +197,12 @@ impl GoldBootstrap {
             ("Context.md", &self.context),
         ] {
             if let Some(text) = content {
-                if let Err(e) = std::fs::write(dir.join(filename), text.as_bytes()) {
+                let path = dir.join(filename);
+                if path.exists() {
+                    tracing::debug!(file = filename, "GoldBootstrap: skipping existing file");
+                    continue;
+                }
+                if let Err(e) = std::fs::write(&path, text.as_bytes()) {
                     warn!(file = filename, error = %e, "GoldBootstrap: failed to write file");
                 }
             }

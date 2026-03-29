@@ -1272,6 +1272,16 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                     "gateway_port": { "type": "integer", "description": "Port for the child agent's HTTP gateway (local mode only)" },
                     "model": { "type": "string", "description": "Optional model override. Use full IDs: claude-sonnet-4-6, claude-opus-4-6, claude-haiku-4-5, gpt-5.2-codex. Shorthands like sonnet-4-6 or opus are auto-normalized." },
                     "env": { "type": "object", "description": "Optional env var overrides for the child (e.g. {\"TELEGRAM_BOT_TOKEN\": \"bot123:...\"} to give it its own channel)" },
+                    "bootstrap": {
+                        "type": "object",
+                        "description": "Warm-start the agent with a task-specific identity and domain context. Written to the agent's workspace before it starts so the agent sees it in its preamble from turn 1.",
+                        "properties": {
+                            "identity": { "type": "string", "description": "Identity.md content — agent name, vibe, emoji" },
+                            "soul": { "type": "string", "description": "Soul.md content — character, values, philosophy" },
+                            "agents": { "type": "string", "description": "Agents.md content — operating instructions, tool discipline" },
+                            "context": { "type": "string", "description": "Domain context for the agent: links, citations, background research" }
+                        }
+                    },
                     "identity_configmap": { "type": "string", "description": "K8s ConfigMap name containing config.toml + identity files (Soul.md, Agents.md, etc.) to seed into the child agent" }
                 },
                 "required": ["name"]
@@ -1337,6 +1347,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                 "properties": {
                     "action": { "type": "string", "enum": ["send", "share", "status", "scratchpad_read", "scratchpad_write", "cancel", "resume", "query_async"], "description": "Agent task action to perform" },
                     "name": { "type": "string", "description": "Target agent name for send/share/query_async" },
+                    "targets": { "type": "array", "items": { "type": "string" }, "description": "Send the same message to multiple agents (action=send only). Each gets its own tracked task. Returns array of task_ids. Use instead of calling send multiple times." },
                     "message": { "type": "string", "description": "Task description, follow-up message, or async query message" },
                     "task_id": { "type": "string", "description": "Existing task ID for send/status/scratchpad/cancel/resume" },
                     "note": { "type": "string", "description": "Scratchpad note for scratchpad_write" },
@@ -1523,6 +1534,7 @@ fn remap_grouped_tool_call(
             struct Args {
                 action: String,
                 name: Option<String>,
+                targets: Option<Vec<String>>,
                 message: Option<String>,
                 task_id: Option<String>,
                 note: Option<String>,
@@ -1534,6 +1546,7 @@ fn remap_grouped_tool_call(
                     "agent_task_send",
                     serde_json::json!({
                         "name": args.name,
+                        "targets": args.targets,
                         "message": args.message,
                         "task_id": args.task_id,
                     }),
@@ -2615,6 +2628,7 @@ async fn dispatch_inner(
                 gateway_port: Option<u16>,
                 model: Option<String>,
                 env: Option<std::collections::HashMap<String, String>>,
+                bootstrap: Option<crate::workspace::GoldBootstrap>,
                 identity_configmap: Option<String>,
             }
             let args: Args = serde_json::from_str(args_json)
@@ -2629,6 +2643,7 @@ async fn dispatch_inner(
                     args.env.as_ref(),
                     Path::new(&config.memory.db_path),
                     args.identity_configmap.as_deref(),
+                    args.bootstrap.as_ref(),
                 )
                 .await
                 .map_err(|e| ToolError(e.to_string()))
@@ -2645,6 +2660,7 @@ async fn dispatch_inner(
                     parent.as_deref(),
                     args.gateway_port,
                     args.model.as_deref(),
+                    args.bootstrap.as_ref(),
                     &reg,
                 )
                 .await
@@ -2866,11 +2882,113 @@ async fn dispatch_inner(
             #[derive(Deserialize)]
             struct Args {
                 name: Option<String>,
+                targets: Option<Vec<String>>,
                 message: String,
                 task_id: Option<String>,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
+
+            // Broadcast: when targets is present and no task_id, create one
+            // task per target and return all task_ids.
+            if args.task_id.is_none() {
+                if let Some(targets) = &args.targets {
+                    if targets.is_empty() {
+                        return Err(ToolError("targets array must not be empty".into()));
+                    }
+                    let mut seen = std::collections::HashSet::new();
+                    let targets: Vec<&String> =
+                        targets.iter().filter(|t| seen.insert(t.as_str())).collect();
+                    let cluster_dir =
+                        crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
+                            .ok_or_else(|| {
+                                ToolError("Cannot derive cluster dir from memory path".into())
+                            })?;
+                    let task_reg =
+                        crate::agents::AgentTaskRegistry::new(cluster_dir.join("agent_tasks.json"));
+                    let parent_gw = crate::orchestration::support::resolve_gateway_url();
+                    let sender = ctx.sender_name();
+                    let workspace_note = build_task_context_note(sender, &parent_gw);
+                    let broadcast_id = uuid::Uuid::new_v4().to_string();
+                    let mut tasks = Vec::new();
+                    let mut errors = Vec::new();
+                    for target in targets {
+                        let task = task_reg
+                            .create(target, &args.message, sender)
+                            .map_err(|e| ToolError(e.to_string()))?;
+                        let task_id = task.id.clone();
+                        let resolve = crate::agents::resolve_agent_gateway(
+                            Path::new(&config.memory.db_path),
+                            target,
+                        )
+                        .map_err(|e| e.to_string());
+                        let dispatch_result: Result<(), String> = match resolve {
+                            Ok((_, gw)) => {
+                                let callback =
+                                    format!("{parent_gw}/v1/task_update?task_id={task_id}");
+                                crate::agents::post_to_agent_inbound(
+                                    &gw,
+                                    &args.message,
+                                    sender,
+                                    Some(&callback),
+                                )
+                                .await
+                                .map_err(|e| e.to_string())
+                            }
+                            Err(e) => Err(e),
+                        };
+                        match dispatch_result {
+                            Ok(()) => {
+                                let _ = task_reg.add_participant(&task_id, sender);
+                                sync_task_scratchpad_header(
+                                    &task_reg,
+                                    &task,
+                                    sender,
+                                    &workspace_note,
+                                    Some(args.message.as_str()),
+                                );
+                                let _ = task_reg.scratchpad_append_kind(
+                                    &task_id,
+                                    sender,
+                                    &format!("broadcast:{broadcast_id}"),
+                                    Some("broadcast"),
+                                );
+                                tasks.push(serde_json::json!({
+                                    "task_id": task_id,
+                                    "agent": target,
+                                    "state": "submitted",
+                                    "broadcast_id": broadcast_id,
+                                }));
+                            }
+                            Err(err) => {
+                                let _ = task_reg.update_state(
+                                    &task_id,
+                                    crate::agents::AgentTaskState::Failed,
+                                    Some(sender),
+                                    Some(&err),
+                                );
+                                errors.push(serde_json::json!({
+                                    "task_id": task_id,
+                                    "agent": target,
+                                    "error": err,
+                                }));
+                            }
+                        }
+                    }
+                    if tasks.is_empty() && !errors.is_empty() {
+                        return Err(ToolError(format!(
+                            "all broadcast targets failed: {}",
+                            serde_json::to_string(&errors).unwrap_or_default()
+                        )));
+                    }
+                    return Ok(serde_json::json!({
+                        "broadcast_id": broadcast_id,
+                        "tasks": tasks,
+                        "errors": errors,
+                    }));
+                }
+            }
+
             let cluster_dir = crate::agents::cluster_dir_from_db(Path::new(&config.memory.db_path))
                 .ok_or_else(|| ToolError("Cannot derive cluster dir from memory path".into()))?;
             let task_reg =
