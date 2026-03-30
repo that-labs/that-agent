@@ -4,7 +4,6 @@ description: Guide for building a new channel bridge plugin that connects an ext
 metadata:
   bootstrap: false
   always: false
-  os: [darwin, linux]
 ---
 
 # Channel Adapter — Building a Bridge Plugin

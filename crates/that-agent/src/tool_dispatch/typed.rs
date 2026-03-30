@@ -1077,15 +1077,12 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "plugin_install".into(),
-            description: "Install a plugin from a manifest file into the cluster registry. \
-                Deploys the plugin if it declares a deploy target. \
-                Use skip_deploy=true to register without deploying.".into(),
+            description: "Register a plugin from a manifest file into the cluster registry.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "manifest_path": { "type": "string", "description": "Path to the plugin manifest TOML file" },
-                    "owner_agent": { "type": "string", "description": "Name of the agent that owns this plugin" },
-                    "skip_deploy": { "type": "boolean", "description": "Register plugin without deploying (default: false)", "default": false }
+                    "owner_agent": { "type": "string", "description": "Name of the agent that owns this plugin" }
                 },
                 "required": ["manifest_path", "owner_agent"]
             }),
@@ -1093,27 +1090,14 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "plugin_uninstall".into(),
             description: "Remove a plugin from the cluster registry. \
-                When undeploy is true (default), also tears down the running deployment. \
                 Only the owner agent or the main agent can uninstall.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "plugin_id": { "type": "string", "description": "ID of the plugin to uninstall" },
-                    "requestor_agent": { "type": "string", "description": "Name of the agent requesting uninstall" },
-                    "undeploy": { "type": "boolean", "description": "Also tear down the running deployment (default: true)", "default": true }
+                    "requestor_agent": { "type": "string", "description": "Name of the agent requesting uninstall" }
                 },
                 "required": ["plugin_id", "requestor_agent"]
-            }),
-        },
-        ToolDef {
-            name: "plugin_status".into(),
-            description: "Check the deploy status of a plugin (running, stopped, failed, etc.).".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "plugin_id": { "type": "string", "description": "ID of the plugin to check" }
-                },
-                "required": ["plugin_id"]
             }),
         },
         ToolDef {
@@ -2243,8 +2227,6 @@ async fn dispatch_inner(
             struct Args {
                 manifest_path: String,
                 owner_agent: String,
-                #[serde(default)]
-                skip_deploy: bool,
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
@@ -2256,23 +2238,6 @@ async fn dispatch_inner(
             let manifest = manifest
                 .validate(&args.manifest_path)
                 .map_err(|e| ToolError(e.to_string()))?;
-            let plugin_dir = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join(".that-agent")
-                .join("plugins");
-            let deployed = if !args.skip_deploy {
-                if let Some(deploy) = &manifest.deploy {
-                    let backend = crate::plugins::deploy::backend_for(deploy, &plugin_dir);
-                    backend
-                        .deploy(&manifest)
-                        .await
-                        .map_err(|e| ToolError(e.to_string()))?;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
             let reg =
                 cluster_registry.ok_or_else(|| ToolError("cluster registry unavailable".into()))?;
             let plugin = reg
@@ -2282,7 +2247,6 @@ async fn dispatch_inner(
                 "id": plugin.id,
                 "version": plugin.version,
                 "owner_agent": plugin.owner_agent,
-                "deployed": deployed,
             }))
         }
         "plugin_uninstall" => {
@@ -2290,74 +2254,14 @@ async fn dispatch_inner(
             struct Args {
                 plugin_id: String,
                 requestor_agent: String,
-                #[serde(default = "default_true")]
-                undeploy: bool,
-            }
-            fn default_true() -> bool {
-                true
             }
             let args: Args = serde_json::from_str(args_json)
                 .map_err(|e| ToolError(format!("invalid args: {e}")))?;
             let reg =
                 cluster_registry.ok_or_else(|| ToolError("cluster registry unavailable".into()))?;
-            let mut undeployed = false;
-            if args.undeploy {
-                if let Some(plugin) = reg
-                    .find(&args.plugin_id)
-                    .map_err(|e| ToolError(e.to_string()))?
-                {
-                    if let Some(deploy) = &plugin.manifest.deploy {
-                        let plugin_dir = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                            .join(".that-agent")
-                            .join("plugins");
-                        let backend = crate::plugins::deploy::backend_for(deploy, &plugin_dir);
-                        backend
-                            .undeploy(&args.plugin_id)
-                            .await
-                            .map_err(|e| ToolError(format!("undeploy failed: {e}")))?;
-                        undeployed = true;
-                    }
-                }
-            }
             reg.uninstall(&args.plugin_id, &args.requestor_agent)
                 .map_err(|e| ToolError(e.to_string()))?;
-            Ok(serde_json::json!({ "status": "ok", "undeployed": undeployed }))
-        }
-        "plugin_status" => {
-            #[derive(Deserialize)]
-            struct Args {
-                plugin_id: String,
-            }
-            let args: Args = serde_json::from_str(args_json)
-                .map_err(|e| ToolError(format!("invalid args: {e}")))?;
-            let reg =
-                cluster_registry.ok_or_else(|| ToolError("cluster registry unavailable".into()))?;
-            let plugins = reg.list().map_err(|e| ToolError(e.to_string()))?;
-            let plugin = plugins
-                .iter()
-                .find(|p| p.id == args.plugin_id)
-                .ok_or_else(|| ToolError(format!("plugin '{}' not found", args.plugin_id)))?;
-            let plugin_dir = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                .join(".that-agent")
-                .join("plugins");
-            if let Some(deploy) = &plugin.manifest.deploy {
-                let backend = crate::plugins::deploy::backend_for(deploy, &plugin_dir);
-                let status = backend
-                    .status(&args.plugin_id)
-                    .await
-                    .map_err(|e| ToolError(e.to_string()))?;
-                let (s, msg) = match status {
-                    crate::plugins::deploy::DeployStatus::Running => ("running", None),
-                    crate::plugins::deploy::DeployStatus::Stopped => ("stopped", None),
-                    crate::plugins::deploy::DeployStatus::Failed(m) => ("failed", Some(m)),
-                    crate::plugins::deploy::DeployStatus::Pending => ("pending", None),
-                    crate::plugins::deploy::DeployStatus::Deploying => ("deploying", None),
-                    crate::plugins::deploy::DeployStatus::Degraded => ("degraded", None),
-                };
-                Ok(serde_json::json!({ "id": args.plugin_id, "status": s, "message": msg }))
-            } else {
-                Ok(serde_json::json!({ "id": args.plugin_id, "status": "unknown" }))
-            }
+            Ok(serde_json::json!({ "status": "ok" }))
         }
         "plugin_set_policy" => {
             #[derive(Deserialize)]
@@ -3030,9 +2934,20 @@ async fn dispatch_inner(
             .map_err(|e| ToolError(e.to_string()))?;
 
             let callback = format!("{parent_gw}/v1/task_update?task_id={task_id}");
-            crate::agents::post_to_agent_inbound(&gw, &args.message, sender, Some(&callback))
-                .await
-                .map_err(|e| ToolError(e.to_string()))?;
+            if let Err(e) =
+                crate::agents::post_to_agent_inbound(&gw, &args.message, sender, Some(&callback))
+                    .await
+            {
+                if created {
+                    let _ = task_reg.update_state(
+                        &task_id,
+                        crate::agents::AgentTaskState::Failed,
+                        Some(sender),
+                        Some(&format!("dispatch failed: {e}")),
+                    );
+                }
+                return Err(ToolError(e.to_string()));
+            }
 
             let _ = task_reg.add_participant(&task_id, sender);
             let task = task_reg

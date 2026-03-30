@@ -34,9 +34,8 @@ pub use discovery::{
     discover_plugin_activations, discover_plugin_commands, discover_skills,
     discover_skills_with_registry, file_mtime_hash, find_plugin_command, find_skill_by_command,
     format_plugin_preamble, format_plugin_preamble_full, format_plugin_preamble_with_registry,
-    parse_slash_command, render_activation_task, render_plugin_command_task, resolved_skill_roots,
-    resolved_skill_roots_with_registry, skill_roots_for_agent, skill_to_command,
-    skills_fingerprint, skills_fingerprint_with_registry,
+    parse_slash_command, render_activation_task, render_plugin_command_task, skill_roots_for_agent,
+    skill_to_command, skills_fingerprint_with_registry,
 };
 pub use execution::{
     api_key_for_provider, execute_agent_run_channel, execute_agent_run_eval,
@@ -46,7 +45,7 @@ pub use generation::{generate_soul_md, init_workspace};
 pub use handlers::{handle_agent_command, handle_session_command, handle_skill_command};
 pub use hooks::{AgentHook, EvalHook};
 pub use preamble::build_preamble;
-pub use setup::{install_that_tools_skills_local, prepare_container, resolve_agent_workspace};
+pub use setup::{prepare_container, resolve_agent_workspace};
 #[cfg(feature = "tui")]
 pub use support::build_palette_commands;
 pub use support::{build_compact_summary, compact_session, load_workspace_files, show_status};
@@ -113,7 +112,7 @@ pub async fn run_task(
     config::set_working_notes(&session_id, ws.working_notes.clone());
     let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
 
-    let skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
+    let skill_roots = skill_roots_for_agent(agent, &plugin_registry);
 
     let preamble = build_preamble(
         &agent_workspace,
@@ -250,7 +249,7 @@ pub async fn run_chat(
     config::set_working_notes(&session_id, ws.working_notes.clone());
     let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
 
-    let skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
+    let skill_roots = skill_roots_for_agent(agent, &plugin_registry);
 
     let preamble = build_preamble(
         &agent_workspace,

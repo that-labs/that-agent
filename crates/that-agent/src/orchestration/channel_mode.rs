@@ -745,7 +745,7 @@ pub async fn run_listen(
         Some(&plugin_registry),
         None,
     );
-    let skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
+    let skill_roots = skill_roots_for_agent(agent, &plugin_registry);
     let skills_fp = skills_fingerprint_with_registry(agent, &plugin_registry);
 
     // Compute initial fingerprint for the agent config file.
@@ -850,8 +850,13 @@ pub async fn run_listen(
             }
         }
 
-        // Active task summary from task registry.
-        let task_reg = crate::agents::AgentTaskRegistry::new(state_dir.join("agent_tasks.json"));
+        // Active task summary from task registry (use cluster dir, not state dir).
+        let cluster_dir_restart = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".that-agent")
+            .join("cluster");
+        let task_reg =
+            crate::agents::AgentTaskRegistry::new(cluster_dir_restart.join("agent_tasks.json"));
         if let Ok(tasks) = task_reg.list_active() {
             if !tasks.is_empty() {
                 summary.push_str(&format!("\nActive tasks: {}", tasks.len()));
@@ -969,8 +974,7 @@ pub async fn run_listen(
                     if skills_changed {
                         info!(count = new_skills.len(), "Hot-reloading skills");
                     }
-                    let new_skill_roots =
-                        resolved_skill_roots_with_registry(&agent_hot, &reload_registry);
+                    let new_skill_roots = skill_roots_for_agent(&agent_hot, &reload_registry);
                     router.register_commands(&new_commands).await;
                     let mut state = hot.write().await;
                     state.found_skills = new_skills;
@@ -1012,9 +1016,6 @@ pub async fn run_listen(
         let sender_run_seq_hb = Arc::clone(&sender_run_seq);
         let interval_secs = agent.heartbeat_interval.unwrap_or(10).max(1);
 
-        let plugin_dir_hb = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join(".that-agent")
-            .join("plugins");
         // Dedicated liveness ticker — independent of heartbeat work so long-running
         // agent runs don't starve the K8s liveness probe.
         tokio::spawn(async {
@@ -1029,19 +1030,8 @@ pub async fn run_listen(
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut last_reconcile = std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_secs(120))
-                .unwrap_or_else(std::time::Instant::now);
             loop {
                 ticker.tick().await;
-
-                // Reconcile plugin deploy status every 60s.
-                if last_reconcile.elapsed() >= std::time::Duration::from_secs(60) {
-                    if let Err(e) = cluster_registry_hb.reconcile_status(&plugin_dir_hb).await {
-                        tracing::warn!(error = %e, "Plugin status reconciliation failed");
-                    }
-                    last_reconcile = std::time::Instant::now();
-                }
 
                 // Snapshot current preamble, agent, and skill roots from hot state.
                 let (preamble_hb, current_agent, skill_roots_hb) = {

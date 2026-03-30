@@ -54,14 +54,6 @@ metadata:
   bootstrap: true        # only for skills bundled with that-agent itself
   always: false          # inject full body into preamble without requiring read_skill
   version: 1.0.0         # informational semver string; no validation performed
-  os:                    # allowed platforms; omit to allow any OS
-    - darwin
-    - linux
-  binaries:              # all of these must be on PATH or the skill is skipped
-    - some-tool
-  any_bins:              # at least one of these must be on PATH
-    - bun
-    - node
   envvars:               # environment variables the skill requires; all must be set
     - ${API_KEY}         # resolved from the environment at load time
     - ALIAS: ${VAR}      # exposed as ALIAS, resolved from VAR
@@ -74,9 +66,6 @@ the skill is invoked. All optional fields live under `metadata:` (2-space indent
 - `bootstrap: true` — marks skills auto-installed on agent startup; reserved for skills shipped with that-agent
 - `always: true` — injects the full skill body into the system prompt on every turn without requiring `read_skill`; the skill is excluded from the catalog list since its content is already present; only use for compact (under ~100 lines), universally-relevant skills that apply to nearly every task
 - `version` — informational semver string; stored but not validated
-- `os` — list of allowed OS names (`darwin`, `linux`, `win32`); skill is skipped on non-matching platforms; omit to allow any OS
-- `binaries` — list of binary names that must all be executable on PATH; skill is skipped if any are missing
-- `any_bins` — list of binary names where at least one must be on PATH; useful for interchangeable runtimes
 - `envvars` — environment variable specs resolved from the process environment at load time; use `${VAR}` or `ALIAS: ${VAR}` per entry; skill is skipped if any are unset
 
 **Body (Markdown):**
@@ -156,9 +145,6 @@ Decide on loading mode:
   to nearly every task; anything larger burns context on irrelevant turns
 
 Set eligibility constraints if the skill is environment-specific:
-- `binaries:` — any binary the skill actively uses (e.g. `forge`, `cast`)
-- `any_bins:` — when the skill supports interchangeable tools (e.g. `bun` or `node`)
-- `os:` — only if behavior or paths differ across platforms and the skill can't handle both
 - `envvars:` — only if the skill cannot function at all without the variable
 
 Write the body as instructions to a capable agent, not a tutorial for a beginner.

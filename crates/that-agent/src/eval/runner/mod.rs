@@ -9,7 +9,7 @@ use crate::agent_loop::Message;
 use crate::config::AgentDef;
 use crate::orchestration::{
     build_preamble, discover_skills, execute_agent_run_eval, load_workspace_files,
-    prepare_container, resolve_agent_workspace, resolved_skill_roots,
+    prepare_container, resolve_agent_workspace, skill_roots_for_agent,
 };
 use crate::session::{new_run_id, RunStatus, SessionManager, TranscriptEntry, TranscriptEvent};
 use crate::skills::{self, parse_frontmatter};
@@ -275,7 +275,8 @@ impl ScenarioRunner {
                 let found_skills = discover_skills(agent, scenario.sandbox);
                 let ws = load_workspace_files(agent, scenario.sandbox);
                 let session_summaries = self.session_mgr.session_summaries(5).unwrap_or_default();
-                let skill_roots = resolved_skill_roots(agent);
+                let plugin_registry = crate::plugins::PluginRegistry::load(&agent.name);
+                let skill_roots = skill_roots_for_agent(agent, &plugin_registry);
                 let preamble = build_preamble(
                     workspace,
                     agent,
