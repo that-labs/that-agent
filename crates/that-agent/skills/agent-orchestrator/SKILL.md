@@ -47,7 +47,7 @@ Communicate via `agent_task(action=send, name, message)` for tracked work and
 - Agents you need to query multiple times across different tasks
 - Services that maintain state between interactions
 
-Clean up with `agent_unregister(name)` when no longer needed.
+Clean up with `agent_admin(action=unregister, name)` when no longer needed.
 
 ## Tracked Task Workflow
 
@@ -69,11 +69,11 @@ with workers and collect their results.
 
 ### Workflow
 
-1. `workspace_share(path)` — push your local repo to the shared git server
+1. `workspace_admin(action=share, path)` — push your local repo to the shared git server
 2. `agent_run(name, task, workspace=true)` — worker clones the repo automatically
-3. `workspace_activity()` — monitor which workers have pushed and how far along they are
-4. `workspace_diff(branch)` — review a worker's changes without cloning
-5. `workspace_collect(path, worker)` — merge the worker's branch into your workspace
+3. `workspace_admin(action=activity)` — monitor which workers have pushed and how far along they are
+4. `workspace_admin(action=diff, branch)` — review a worker's changes without cloning
+5. `workspace_admin(action=collect, path, worker)` — merge the worker's branch into your workspace
 
 Each worker pushes to its own isolated branch. Workers cannot interfere with each
 other or with main. Git push, auto-merge, and merge-conflict events should be treated
@@ -107,9 +107,9 @@ While workers are running:
 
 - `agent_task(action=status)` — see tracked tasks with owners, participants, and scratchpad revision
 - `agent_task(action=scratchpad_read, task_id)` — inspect the shared header and recent coordination activity
-- `agent_list()` — see all children with their role, status, and type
-- `workspace_activity()` — branch list with ahead/behind counts and last commit
-- `workspace_diff(branch)` — read a worker's changes to decide if guidance is needed
+- `agent_admin(action=list)` — see all children with their role, status, and type
+- `workspace_admin(action=activity)` — branch list with ahead/behind counts and last commit
+- `workspace_admin(action=diff, branch)` — read a worker's changes to decide if guidance is needed
 
 Use these to decide whether to wait, steer via `agent_task(action=send, task_id, ...)`,
 cancel the task, or collect results.
@@ -125,9 +125,9 @@ cancel the task, or collect results.
 
 After a child completes work:
 
-1. Review changes with `workspace_diff(branch)` or `workspace_collect(path, worker, strategy="review")`
-2. Merge with `workspace_collect(path, worker)` — cleans up the task branch on success
-3. If merge fails, use `workspace_conflicts(branch)` to inspect and resolve
+1. Review changes with `workspace_admin(action=diff, branch)` or `workspace_admin(action=collect, path, worker, strategy="review")`
+2. Merge with `workspace_admin(action=collect, path, worker)` — cleans up the task branch on success
+3. If merge fails, use `workspace_admin(action=conflicts, branch)` to inspect and resolve
 
 When collecting from multiple workers, merge sequentially — simplest changes first —
 to keep conflicts manageable. Re-share the workspace after merging if remaining workers
@@ -136,7 +136,7 @@ need the updated main.
 ## Error Handling
 
 - If a child agent times out, inspect its partial output and consider retrying with a narrower scope
-- If `workspace_collect` reports a merge conflict, load `read_skill git-workspace` for the resolution protocol
+- If `workspace_admin(action=collect, ...)` reports a merge conflict, load `read_skill git-workspace` for the resolution protocol
 - Consider splitting failed tasks into smaller, more focused subtasks
 - Store failure patterns in memory to avoid repeating them
 
@@ -147,8 +147,23 @@ via the same Helm chart. This ensures every agent gets identical security
 contexts, probes, labels, and network policy regardless of when it was created.
 
 - `spawn_agent` and `agent_run` deploy children as Helm releases
-- `agent_unregister` removes a child by uninstalling its Helm release
-- `agent_list` discovers all managed agents via their labels
+- `agent_admin(action=unregister, ...)` removes a child by uninstalling its Helm release
+- `agent_admin(action=list)` discovers all managed agents via their labels
+
+### Infrastructure Inheritance
+
+Children automatically inherit the parent's infrastructure context at deploy time.
+You do not need to pass these manually — the harness forwards them:
+
+- **Registry**: push endpoint, TLS mode, and credential secret
+- **BuildKit**: children reuse the parent's BuildKit service (no dedicated sidecar)
+- **Image version**: children run the same agent image as the parent
+- **API credentials**: children share the parent's secret for LLM provider keys
+
+The child's `<system-reminder>` reflects the same registry and build backend
+values the parent sees. If a child reports infrastructure issues (registry
+unreachable, build failures), check your own `<system-reminder>` for the
+authoritative values and relay them — the child should have the same context.
 
 ### Upgrading Children
 

@@ -65,7 +65,7 @@ pub async fn run_chat_tui(
     let plugin_registry = crate::plugins::PluginRegistry::load(&agent.name);
     let mut found_skills = discover_skills_with_registry(agent, &plugin_registry);
     let mut plugin_commands = plugin_registry.enabled_commands();
-    let mut skill_roots = resolved_skill_roots_with_registry(agent, &plugin_registry);
+    let mut skill_roots = skill_roots_for_agent(agent, &plugin_registry);
     let mut ws = load_workspace_files(agent, sandbox);
     set_working_notes(&session_id, ws.working_notes.clone());
     let needs_onboarding = ws.needs_bootstrap();
@@ -1043,7 +1043,7 @@ pub async fn run_chat_tui(
                         let reg = crate::plugins::PluginRegistry::load(&agent.name);
                         found_skills = discover_skills_with_registry(&agent, &reg);
                         plugin_commands = reg.enabled_commands();
-                        skill_roots = resolved_skill_roots_with_registry(&agent, &reg);
+                        skill_roots = skill_roots_for_agent(&agent, &reg);
                         app.set_available_commands(build_palette_commands(&found_skills, &plugin_commands));
                         if found_skills.len() != prev_skill_count {
                             let names: Vec<&str> = found_skills.iter().map(|s| s.name.as_str()).collect();

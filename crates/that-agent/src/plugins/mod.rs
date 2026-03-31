@@ -1,7 +1,6 @@
 //! that-plugins — Agent-scoped plugin registry with commands, activations, and routines.
 
 pub mod cluster;
-pub mod deploy;
 
 use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -17,7 +16,6 @@ pub const PLUGIN_MANIFEST_FILE: &str = "plugin.toml";
 pub const PLUGIN_STATE_FILE: &str = ".plugin-state.toml";
 pub const PLUGIN_RUNTIME_FILE: &str = ".plugin-runtime.toml";
 const DEFAULT_PLUGIN_SKILLS_DIR: &str = "skills";
-const DEFAULT_PLUGIN_DEPLOY_DIR: &str = "deploy";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginManifest {
@@ -45,8 +43,6 @@ pub struct PluginManifest {
     pub activations: Vec<PluginActivation>,
     #[serde(default)]
     pub runtime: Option<PluginRuntime>,
-    #[serde(default)]
-    pub deploy: Option<PluginDeploy>,
 }
 
 impl PluginManifest {
@@ -98,32 +94,6 @@ impl Default for PluginRuntime {
             context: Some(".".to_string()),
             dockerfile: Some("Dockerfile".to_string()),
             command: vec!["/bin/sh".to_string(), "scripts/run.sh".to_string()],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginDeploy {
-    #[serde(default = "default_deploy_target")]
-    pub target: String,
-    #[serde(default = "default_deploy_kind")]
-    pub kind: String,
-    #[serde(default)]
-    pub compose_file: Option<String>,
-    #[serde(default)]
-    pub kustomize_dir: Option<String>,
-    #[serde(default)]
-    pub replicas: Option<u32>,
-}
-
-impl Default for PluginDeploy {
-    fn default() -> Self {
-        Self {
-            target: default_deploy_target(),
-            kind: default_deploy_kind(),
-            compose_file: Some(format!("{DEFAULT_PLUGIN_DEPLOY_DIR}/docker-compose.yml")),
-            kustomize_dir: Some(format!("{DEFAULT_PLUGIN_DEPLOY_DIR}/k8s")),
-            replicas: Some(1),
         }
     }
 }
@@ -575,12 +545,6 @@ pub fn create_plugin_scaffold(agent_name: &str, plugin_id: &str, force: bool) ->
             plugin_id: normalized_id.clone(),
         },
     )?;
-    let deploy_dir = scope::ensure_scope_path(
-        agent_name,
-        &ScopeTarget::PluginDeploy {
-            plugin_id: normalized_id.clone(),
-        },
-    )?;
     let _state_dir = scope::ensure_scope_path(
         agent_name,
         &ScopeTarget::PluginState {
@@ -608,7 +572,6 @@ pub fn create_plugin_scaffold(agent_name: &str, plugin_id: &str, force: bool) ->
         routines: vec![],
         activations: vec![],
         runtime: Some(PluginRuntime::default()),
-        deploy: Some(PluginDeploy::default()),
     };
 
     let manifest_path = plugin_dir.join(PLUGIN_MANIFEST_FILE);
@@ -627,34 +590,6 @@ pub fn create_plugin_scaffold(agent_name: &str, plugin_id: &str, force: bool) ->
         std::fs::write(
             &run_script_path,
             "#!/bin/sh\nset -eu\n\nARGS=\"${*:-}\"\necho \"plugin=$THAT_PLUGIN_ID agent=$THAT_AGENT_NAME args=$ARGS\"\n",
-        )?;
-    }
-
-    let dockerfile_path = plugin_dir.join("Dockerfile");
-    if force || !dockerfile_path.exists() {
-        std::fs::write(
-            &dockerfile_path,
-            "FROM alpine:3.20\nWORKDIR /app\nCOPY . /app\nRUN chmod +x scripts/run.sh\nENTRYPOINT [\"/bin/sh\", \"/app/scripts/run.sh\"]\n",
-        )?;
-    }
-
-    let compose_path = deploy_dir.join("docker-compose.yml");
-    if force || !compose_path.exists() {
-        std::fs::write(
-            &compose_path,
-            format!(
-                "services:\n  {normalized_id}:\n    image: registry.local:5000/{normalized_id}:latest\n    container_name: {normalized_id}\n    restart: unless-stopped\n    command: [\"/bin/sh\", \"/app/scripts/run.sh\"]\n"
-            ),
-        )?;
-    }
-
-    let k8s_dir = deploy_dir.join("k8s");
-    std::fs::create_dir_all(&k8s_dir)?;
-    let kustomize_path = k8s_dir.join("kustomization.yaml");
-    if force || !kustomize_path.exists() {
-        std::fs::write(
-            &kustomize_path,
-            "apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources: []\n",
         )?;
     }
 
@@ -1446,14 +1381,6 @@ fn default_true() -> bool {
 }
 
 fn default_runtime_kind() -> String {
-    "docker".to_string()
-}
-
-fn default_deploy_kind() -> String {
-    "service".to_string()
-}
-
-fn default_deploy_target() -> String {
     "docker".to_string()
 }
 

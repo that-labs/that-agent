@@ -422,6 +422,9 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
                     {
                         lines.push(format!("k8s_registry_push: {push_registry}"));
                     }
+                    if parse_env_bool("THAT_K8S_REGISTRY_AUTH").unwrap_or(false) {
+                        lines.push("k8s_registry_auth: true".to_string());
+                    }
                     if let Some(buildkit_available) = parse_env_bool("THAT_BUILDKIT_AVAILABLE") {
                         lines.push(format!("buildkit_available: {}", buildkit_available));
                         if buildkit_available {
@@ -496,6 +499,9 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
                 .or_else(|| parse_env_nonempty("THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT"))
             {
                 lines.push(format!("k8s_registry_push: {push_registry}"));
+            }
+            if parse_env_bool("THAT_K8S_REGISTRY_AUTH").unwrap_or(false) {
+                lines.push("k8s_registry_auth: true".to_string());
             }
             if let Some(buildkit_available) = parse_env_bool("THAT_BUILDKIT_AVAILABLE") {
                 lines.push(format!("buildkit_available: {}", buildkit_available));

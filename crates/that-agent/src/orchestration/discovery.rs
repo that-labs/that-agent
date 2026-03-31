@@ -232,12 +232,6 @@ pub fn build_bot_commands_list(
 
 /// Compute a fingerprint over all effective skill/plugin assets for an agent.
 /// Used to detect when skills/plugins are added, removed, enabled, disabled, or modified.
-pub fn skills_fingerprint(agent: &AgentDef) -> u64 {
-    let plugin_registry = crate::plugins::PluginRegistry::load(&agent.name);
-    skills_fingerprint_with_registry(agent, &plugin_registry)
-}
-
-/// Compute a fingerprint using a pre-loaded plugin registry.
 pub fn skills_fingerprint_with_registry(
     agent: &AgentDef,
     plugin_registry: &crate::plugins::PluginRegistry,
@@ -303,23 +297,10 @@ pub fn skill_roots_for_agent(
             deduped.push(root);
         }
     }
-    deduped
-}
-
-pub fn resolved_skill_roots(agent: &AgentDef) -> Vec<std::path::PathBuf> {
-    let plugin_registry = crate::plugins::PluginRegistry::load(&agent.name);
-    resolved_skill_roots_with_registry(agent, &plugin_registry)
-}
-
-pub fn resolved_skill_roots_with_registry(
-    agent: &AgentDef,
-    registry: &crate::plugins::PluginRegistry,
-) -> Vec<std::path::PathBuf> {
-    let mut roots = skill_roots_for_agent(agent, registry);
-    if roots.is_empty() {
-        roots.push(std::path::PathBuf::from(".that-agent/skills"));
+    if deduped.is_empty() {
+        deduped.push(std::path::PathBuf::from(".that-agent/skills"));
     }
-    roots
+    deduped
 }
 
 pub fn discover_plugin_commands(agent: &AgentDef) -> Vec<crate::plugins::ResolvedPluginCommand> {

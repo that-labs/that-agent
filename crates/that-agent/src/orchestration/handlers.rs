@@ -7,7 +7,6 @@ use crate::sandbox::SandboxClient;
 use crate::session::{SessionManager, TranscriptEvent};
 
 use super::discovery::discover_skills;
-use super::setup::install_that_tools_skills_local;
 
 /// Handle session management commands.
 pub fn handle_session_command(ws: &WorkspaceConfig, command: SessionCommands) -> Result<()> {
@@ -189,7 +188,6 @@ pub fn handle_skill_command(agent: &AgentDef, sandbox: bool, command: SkillComma
     // Keep bundled bootstrap skills (including that-plugins) in sync for
     // direct skill CLI calls such as `skill show`.
     default_skills::install_default_skills(&agent.name);
-    install_that_tools_skills_local(&agent.name);
     let found = discover_skills(agent, sandbox);
 
     match command {

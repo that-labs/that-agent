@@ -167,11 +167,15 @@ fn redact_secrets(s: &str) -> String {
                     .map(|i| val_begin + i)
                     .unwrap_or(out.len())
             };
-            let keep = (val_begin + 4).min(val_end);
+            let keep = out[val_begin..val_end]
+                .char_indices()
+                .nth(4)
+                .map(|(i, _)| val_begin + i)
+                .unwrap_or(val_end);
             if val_end > keep {
                 out.replace_range(keep..val_end, "***");
             }
-            search_from = keep + 3;
+            search_from = (keep + 3).min(out.len());
         }
     }
     out
@@ -236,6 +240,14 @@ mod redact_tests {
             r#"echo "-----BEGIN EC PRIVATE KEY-----\nMHQCAQ...stuff-----END EC PRIVATE KEY-----""#;
         let r = redact_secrets(s);
         assert!(!r.contains("MHQCAQ"), "key material leaked: {r}");
+    }
+
+    #[test]
+    fn env_var_value_ends_with_ellipsis() {
+        // Reproduces panic: ellipsis (3-byte char) at end of short value after KEY=
+        let s = "command=kubectl create secret generic creds --from-literal=MUAPI_API_KEY=\u{2026}";
+        let r = redact_secrets(s);
+        assert!(r.contains("MUAPI_API_KEY="), "var name lost: {r}");
     }
 }
 

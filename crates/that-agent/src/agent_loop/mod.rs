@@ -743,24 +743,43 @@ async fn run_from_checkpoint(
                 streak = exploration_streak,
                 "Anti-loop hard limit reached — forcing input_required"
             );
-            messages.push(Message::user(
+            let has_parent = std::env::var("THAT_PARENT_GATEWAY_URL")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            let escalation = if has_parent {
+                " If you need information you cannot find locally (environment details, \
+                 registry endpoints, credentials, infrastructure context), ask your parent \
+                 agent via POST to $THAT_PARENT_GATEWAY_URL/v1/notify — they have the \
+                 broader context you are missing."
+            } else {
+                ""
+            };
+            messages.push(Message::user(format!(
                 "STOP. You have been retrying the same approach repeatedly without making \
                  progress. You MUST either report to the user what is blocking you (via \
                  input_required with a specific question) or take a completely different \
-                 approach. Do NOT retry the same command or strategy again."
-                    .to_string(),
-            ));
+                 approach. Do NOT retry the same command or strategy again.{escalation}"
+            )));
         } else if exploration_streak >= EXPLORATION_SOFT_LIMIT {
             warn!(
                 streak = exploration_streak,
                 "Anti-loop soft warning — injecting nudge"
             );
+            let has_parent = std::env::var("THAT_PARENT_GATEWAY_URL")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            let escalation = if has_parent {
+                " If you are missing environment context (registry addresses, service \
+                 endpoints, credentials), ask your parent agent for help instead of guessing."
+            } else {
+                ""
+            };
             messages.push(Message::user(format!(
                 "You have been repeating similar actions for {exploration_streak} turns \
                  without meaningful progress. Step back and reconsider your approach \
                  entirely. If you are stuck on a recurring error, analyze the root cause \
                  fully before retrying. Try a fundamentally different strategy rather than \
-                 repeating the same steps."
+                 repeating the same steps.{escalation}"
             )));
         }
 

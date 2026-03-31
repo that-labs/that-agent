@@ -19,6 +19,9 @@ agent:
   model: claude-sonnet-4-6
   maxTurns: 75
   bootstrapPrompt: ""
+  # JSON-encoded GoldBootstrap payload (identity, soul, agents, context)
+  # Set automatically when parent passes bootstrap to spawn_agent in K8s mode.
+  goldBootstrap: ""
   # Identity ConfigMap name — holds config.toml + identity files (Soul.md, Agents.md, etc.)
   # Created by parent agent before spawning; mounted at /etc/agent-identity
   identityConfigMap: ""
@@ -78,12 +81,18 @@ gitServer:
 # -- Container registry for agent-built images
 registry:
   host: "registry.local:5000"
-  pushEndpoint: ""  # override if push address differs from pull
-  insecure: true    # use HTTP instead of HTTPS
+  pushEndpoint: ""        # override if push address differs from pull
+  insecure: true          # use HTTP instead of HTTPS
+  credentialSecret: ""    # kubernetes.io/dockerconfigjson Secret for authenticated push/pull
+
+# -- Image pull secrets (for pulling agent images from private registries)
+imagePullSecrets: []
+# - name: my-registry-creds
 
 # -- BuildKit
 buildkit:
   enabled: true
+  externalHost: ""  # set by parent when sharing its BuildKit with children
   storage:
     size: 20Gi
     storageClassName: ""

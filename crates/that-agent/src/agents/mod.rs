@@ -591,6 +591,7 @@ pub async fn spawn_agent(
     parent: Option<&str>,
     gateway_port: Option<u16>,
     model: Option<&str>,
+    bootstrap: Option<&crate::workspace::GoldBootstrap>,
     agent_registry: &AgentRegistry,
 ) -> Result<AgentEntry> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home dir"))?;
@@ -600,6 +601,12 @@ pub async fn spawn_agent(
     // Write minimal config.toml.
     let config_toml = build_config_toml(role, parent, model, gateway_port);
     std::fs::write(agent_dir.join("config.toml"), &config_toml)?;
+
+    // Write bootstrap identity files before starting the process so the
+    // child agent sees them in its preamble from turn 1.
+    if let Some(bs) = bootstrap {
+        bs.apply_local(name);
+    }
 
     // Start the agent binary.
     let binary = std::env::current_exe()?;
@@ -934,6 +941,8 @@ fn child_helm_sets(
         "secrets.existingSecret=that-agent-secrets".to_string(),
         "accessLevel=namespace-admin".to_string(),
         "gitServer.enabled=false".to_string(),
+        // Children share the parent's BuildKit sidecar via BUILDKIT_HOST env var
+        // (forwarded below) — no need for their own BuildKit deployment.
         "buildkit.enabled=false".to_string(),
         "cacheProxy.enabled=false".to_string(),
         "pdb.enabled=false".to_string(),
@@ -949,6 +958,35 @@ fn child_helm_sets(
             "agent.bootstrapPrompt={}",
             agent_role.replace(',', "\\,")
         ));
+    }
+
+    // Forward registry insecure mode so children match the parent's TLS config.
+    if let Ok(insecure) = std::env::var("THAT_K8S_REGISTRY_INSECURE") {
+        sets.push(format!("registry.insecure={insecure}"));
+    }
+
+    // Forward parent's BuildKit service so children can build/push images
+    // without deploying their own BuildKit sidecar.
+    if let Ok(bk) = std::env::var("BUILDKIT_HOST") {
+        if !bk.is_empty() {
+            sets.push(format!("buildkit.externalHost={bk}"));
+        }
+    }
+
+    // Forward registry push endpoint so children know where to push images.
+    if let Ok(push_ep) = std::env::var("THAT_K8S_REGISTRY_PUSH_ENDPOINT")
+        .or(std::env::var("THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT"))
+    {
+        if !push_ep.is_empty() {
+            sets.push(format!("registry.pushEndpoint={push_ep}"));
+        }
+    }
+
+    // Forward registry credential secret so children can push to authenticated registries.
+    if let Ok(cred_secret) = std::env::var("THAT_K8S_REGISTRY_CREDENTIAL_SECRET") {
+        if !cred_secret.is_empty() {
+            sets.push(format!("registry.credentialSecret={cred_secret}"));
+        }
     }
 
     // Forward the image so children use the same version as parent
@@ -967,6 +1005,7 @@ fn child_helm_sets(
 /// Spawn a persistent agent via Helm (Deployment + Service).
 ///
 /// Uses the same Helm chart as the root agent with `agent.role=child`.
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_persistent_agent_k8s(
     name: &str,
     role: Option<&str>,
@@ -975,6 +1014,7 @@ pub async fn spawn_persistent_agent_k8s(
     _env_overrides: Option<&std::collections::HashMap<String, String>>,
     db_path: &std::path::Path,
     identity_configmap: Option<&str>,
+    bootstrap: Option<&crate::workspace::GoldBootstrap>,
 ) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
     let safe_name = sanitize_name(name);
@@ -985,7 +1025,7 @@ pub async fn spawn_persistent_agent_k8s(
         .or_else(|| std::env::var("THAT_AGENT_MODEL").ok())
         .unwrap_or_default();
 
-    let sets = child_helm_sets(
+    let mut sets = child_helm_sets(
         name,
         "child",
         role.unwrap_or(""),
@@ -993,6 +1033,11 @@ pub async fn spawn_persistent_agent_k8s(
         &model_str,
         identity_configmap,
     );
+    if let Some(bs) = bootstrap {
+        if let Ok(json) = serde_json::to_string(bs) {
+            sets.push(format!("agent.goldBootstrap={}", json.replace(',', "\\,")));
+        }
+    }
     helm_install(&release_name, &ns, &sets).await?;
 
     let gateway_url = format!("http://{release_name}.{ns}.svc.cluster.local:8080");

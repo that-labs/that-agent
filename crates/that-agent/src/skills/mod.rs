@@ -1,28 +1,16 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use tracing::{debug, warn};
-
-thread_local! {
-    static BIN_CACHE: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
-}
 
 /// Metadata declared in a skill's YAML frontmatter under the `metadata:` key.
 #[derive(Debug, Clone, Default)]
 pub struct SkillMetadata {
     /// Marks skills bundled with the binary that should be auto-installed on startup.
     pub bootstrap: bool,
-    /// Binary names required for this skill to function — all must be on PATH.
-    pub binaries: Vec<String>,
-    /// At least one of these binary names must exist on PATH for the skill to be eligible.
-    pub any_bins: Vec<String>,
     /// Environment variable specs required by this skill.
     /// Format per entry: `${VAR_NAME}` or `ALIAS: ${VAR_NAME}`.
     pub envvars: Vec<String>,
-    /// Allowed OS names (e.g. `["darwin", "linux"]`); empty means any OS is accepted.
-    pub os: Vec<String>,
     /// If true, inject the full skill body into the agent preamble without requiring read_skill.
     pub always: bool,
     /// Semver string (informational only, no validation performed).
@@ -153,48 +141,7 @@ pub fn discover_skills_local(dir: &Path) -> Vec<SkillMeta> {
 ///
 /// Returns `Ok(())` if all requirements are satisfied, or `Err(reason)` with a
 /// human-readable explanation of the first unmet requirement.
-///
-/// Checks are applied in order:
-/// 1. `os` — current OS must be in the list (if non-empty)
-/// 2. `binaries` — all must be executable on PATH
-/// 3. `any_bins` — at least one must be executable on PATH
-/// 4. `envvars` — every referenced variable must be set in the environment
 pub fn check_eligibility(metadata: &SkillMetadata) -> Result<(), String> {
-    // 1. OS check
-    if !metadata.os.is_empty() {
-        let current = current_os_name();
-        if !metadata.os.iter().any(|o| o == current) {
-            return Err(format!(
-                "not supported on this OS ({}); requires one of: {}",
-                current,
-                metadata.os.join(", ")
-            ));
-        }
-    }
-
-    // 2. binaries — all must exist
-    let missing_bins: Vec<&str> = metadata
-        .binaries
-        .iter()
-        .filter(|b| !binary_exists(b))
-        .map(|b| b.as_str())
-        .collect();
-    if !missing_bins.is_empty() {
-        return Err(format!("missing binaries: {}", missing_bins.join(", ")));
-    }
-
-    // 3. any_bins — at least one must exist
-    if !metadata.any_bins.is_empty() {
-        let any_found = metadata.any_bins.iter().any(|b| binary_exists(b));
-        if !any_found {
-            return Err(format!(
-                "none of the required binaries found: {}",
-                metadata.any_bins.join(", ")
-            ));
-        }
-    }
-
-    // 4. envvars — each referenced variable must be set
     let missing_vars: Vec<String> = metadata
         .envvars
         .iter()
@@ -207,55 +154,7 @@ pub fn check_eligibility(metadata: &SkillMetadata) -> Result<(), String> {
             missing_vars.join(", ")
         ));
     }
-
     Ok(())
-}
-
-/// Returns `true` if `name` is an executable file in any directory listed in `$PATH`.
-/// Results are cached per-thread for the lifetime of the process.
-fn binary_exists(name: &str) -> bool {
-    BIN_CACHE.with(|cache| {
-        if let Some(&result) = cache.borrow().get(name) {
-            return result;
-        }
-        let found = binary_exists_uncached(name);
-        cache.borrow_mut().insert(name.to_string(), found);
-        found
-    })
-}
-
-#[cfg(unix)]
-fn binary_exists_uncached(name: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::env::var_os("PATH")
-        .map(|p| {
-            std::env::split_paths(&p).any(|dir| {
-                let f = dir.join(name);
-                f.is_file()
-                    && f.metadata()
-                        .map(|m| m.permissions().mode() & 0o111 != 0)
-                        .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(windows)]
-fn binary_exists_uncached(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|p| {
-            std::env::split_paths(&p).any(|dir| {
-                ["", ".exe", ".bat", ".cmd"]
-                    .iter()
-                    .any(|ext| dir.join(format!("{name}{ext}")).is_file())
-            })
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn binary_exists_uncached(_name: &str) -> bool {
-    false
 }
 
 /// Extract the environment variable name from a spec string.
@@ -273,26 +172,10 @@ fn extract_env_var_name(spec: &str) -> String {
     spec.to_string()
 }
 
-/// Return the canonical OS name used in skill `os:` lists.
-fn current_os_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "darwin"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "windows") {
-        "win32"
-    } else {
-        "unknown"
-    }
-}
-
-/// Active list being accumulated during frontmatter parsing.
+/// Whether frontmatter parsing is currently accumulating an `envvars:` list.
 #[derive(Debug, PartialEq)]
 enum ActiveList {
     None,
-    Binaries,
-    AnyBins,
-    Os,
     Envvars,
 }
 
@@ -368,13 +251,7 @@ pub fn parse_frontmatter(content: &str) -> Option<(String, String, SkillMetadata
             // Metadata sub-key — reset active list then check the key.
             active_list = ActiveList::None;
 
-            if trimmed == "binaries:" {
-                active_list = ActiveList::Binaries;
-            } else if trimmed == "any_bins:" {
-                active_list = ActiveList::AnyBins;
-            } else if trimmed == "os:" {
-                active_list = ActiveList::Os;
-            } else if trimmed == "envvars:" {
+            if trimmed == "envvars:" {
                 active_list = ActiveList::Envvars;
             } else if let Some(v) = trimmed.strip_prefix("bootstrap:") {
                 metadata.bootstrap = v.trim() == "true";
@@ -391,9 +268,6 @@ pub fn parse_frontmatter(content: &str) -> Option<(String, String, SkillMetadata
                 let val = item.trim().to_string();
                 if !val.is_empty() {
                     match active_list {
-                        ActiveList::Binaries => metadata.binaries.push(val),
-                        ActiveList::AnyBins => metadata.any_bins.push(val),
-                        ActiveList::Os => metadata.os.push(val),
                         ActiveList::Envvars => metadata.envvars.push(val),
                         ActiveList::None => {}
                     }
@@ -437,12 +311,16 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
     out.push_str("## Skills\n\n");
     out.push_str(&format!(
         "Your skills directory: `{skills_path}`  \n\
-         When creating, editing, or installing skills, write to this path.  \n\
          New or updated skill files are hot-reloaded automatically — no restart needed.  \n\
          Skill naming must be deterministic and kebab-case. If the user does not provide a name, \
          derive it from the core capability phrase and keep role nouns stable \
          (e.g. `JSON formatter` -> `json-formatter`, `task manager` -> `task-manager`).  \n\
-         Do not substitute role nouns with alternates like `formatting` when `formatter` is implied.\n\n"
+         Do not substitute role nouns with alternates like `formatting` when `formatter` is implied.\n\n\
+         ### Installing skills\n\n\
+         When the user provides a repository URL or download link for a skill, \
+         **clone or download it** into the skills directory — never manually recreate the content with `fs_write`. \
+         Use `shell_exec` to run the appropriate command (e.g. clone the repository directly into the skills path). \
+         Only use `fs_write` for skills you are authoring from scratch.\n\n"
     ));
 
     if skills.is_empty() {
@@ -468,7 +346,11 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
     // Catalog skills with progressive-disclosure instructions.
     if !catalog_skills.is_empty() {
         out.push_str(
-            "Use `list_skills()` to discover all available skills at any time. \
+            "### Reading skills\n\n\
+             **Always use `read_skill(name)` to read skill content** — never use `fs_cat` or other file-reading tools \
+             on skill files. `read_skill` returns the skill body along with available reference files for progressive \
+             disclosure, which raw file reads cannot provide.\n\n\
+             Use `list_skills()` to discover all available skills at any time. \
              **Before starting a task, scan this list and `read_skill(name)` any skill \
              whose description matches what you are about to do.** \
              If an installed skill appears relevant to the problem domain, framework, or implementation \
@@ -523,10 +405,7 @@ mod tests {
         assert_eq!(name, "greet");
         assert_eq!(desc, "A greeting skill");
         assert!(!meta.bootstrap);
-        assert!(meta.binaries.is_empty());
         assert!(meta.envvars.is_empty());
-        assert!(meta.any_bins.is_empty());
-        assert!(meta.os.is_empty());
         assert!(!meta.always);
         assert!(meta.version.is_none());
     }
@@ -569,15 +448,6 @@ metadata:
   bootstrap: true
   always: true
   version: 2.1.0
-  os:
-    - darwin
-    - linux
-  binaries:
-    - that-tools
-    - node
-  any_bins:
-    - bun
-    - yarn
   envvars:
     - ${API_KEY}
     - ALIAS: ${OTHER_VAR}
@@ -590,9 +460,6 @@ metadata:
         assert!(meta.bootstrap);
         assert!(meta.always);
         assert_eq!(meta.version.as_deref(), Some("2.1.0"));
-        assert_eq!(meta.os, vec!["darwin", "linux"]);
-        assert_eq!(meta.binaries, vec!["that-tools", "node"]);
-        assert_eq!(meta.any_bins, vec!["bun", "yarn"]);
         assert_eq!(meta.envvars, vec!["${API_KEY}", "ALIAS: ${OTHER_VAR}"]);
     }
 
@@ -636,41 +503,6 @@ metadata:
     }
 
     #[test]
-    fn test_eligibility_missing_binary() {
-        let meta = SkillMetadata {
-            binaries: vec!["__definitely_not_a_real_binary_xyz__".into()],
-            ..Default::default()
-        };
-        let result = check_eligibility(&meta);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("missing binaries"));
-    }
-
-    #[test]
-    fn test_eligibility_missing_any_bin() {
-        let meta = SkillMetadata {
-            any_bins: vec!["__not_real_bin_a__".into(), "__not_real_bin_b__".into()],
-            ..Default::default()
-        };
-        let result = check_eligibility(&meta);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("none of the required binaries"));
-    }
-
-    #[test]
-    fn test_eligibility_os_mismatch() {
-        let meta = SkillMetadata {
-            os: vec!["not-this-os".into()],
-            ..Default::default()
-        };
-        let result = check_eligibility(&meta);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not supported on this OS"));
-    }
-
-    #[test]
     fn test_eligibility_missing_envvar() {
         let meta = SkillMetadata {
             envvars: vec!["${__THAT_AGENT_TEST_VAR_DEFINITELY_UNSET__}".into()],
@@ -681,17 +513,6 @@ metadata:
         assert!(result
             .unwrap_err()
             .contains("missing environment variables"));
-    }
-
-    #[test]
-    fn test_eligibility_os_current_accepted() {
-        // The current OS name should be accepted when included in the list.
-        let current = current_os_name();
-        let meta = SkillMetadata {
-            os: vec![current.to_string()],
-            ..Default::default()
-        };
-        assert!(check_eligibility(&meta).is_ok());
     }
 
     // ── format_skill_preamble ─────────────────────────────────────────────

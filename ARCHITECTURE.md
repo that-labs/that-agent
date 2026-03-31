@@ -34,14 +34,33 @@ Single consolidated crate (`that-agent`) with a standalone `that-git-server`. Al
 
 | Module | Owns |
 |---|---|
-| `tools/` | Tool capabilities, dispatch API (`ToolRequest` → `ToolResponse`), policy model (Allow/Prompt/Deny), memory engine, search engine, code analysis, filesystem execution |
-| `orchestration/` | Agent runtime, preamble building, session transcript lifecycle, sandbox coordination. Run modes: task, chat, TUI, listen, eval, channel |
+| `agent_loop/` | Multi-turn streaming LLM loop with provider backends (Anthropic, OpenAI, OpenRouter), `LoopHook` trait, `ToolContext` struct, retry logic, tracing spans |
+| `agents/` | Agent registry (`agents.json`), task registry (`agent_tasks.json`), spawn/query/resolve helpers, `post_to_agent_inbound` |
+| `audit.rs` | Structured audit logging — JSONL tool-call audit trail and run event log |
+| `auth.rs` | API key resolution — Anthropic OAuth token detection, provider key lookup from environment |
+| `channels/` | `Channel` trait, capability model, `ChannelRouter`, inbound routing, notify tool. Adapters: Telegram, HTTP gateway, TUI |
 | `commands/` + `cli.rs` | Unified binary. Dispatches orchestration commands or low-level tool invocations |
-| `sandbox/` | Kubernetes-native sandbox lifecycle with Docker fallback, `SandboxMode` enum, `BackendClient` dispatch, exec routing |
-| `channels/` | `Channel` trait, capability model, `ChannelRouter`, inbound routing, channel hook, notify tool. Adapters: Telegram, HTTP, TUI |
-| `plugins/` | Agent-scoped plugin discovery/enablement, commands, activations, routines, runtime queue |
+| `config/` | `AgentDef` (self-contained TOML agent definition), channel config, default values |
+| `control/` | Runtime control plane — CLI subcommands for live agent inspection and management |
+| `default_skills.rs` | Bundled skill embedding, version-stamped install/upgrade on startup |
 | `eval/` | Scenario TOML format, step runner, assertion engine, LLM judge, persisted reports |
-| `tool_dispatch/` | Agent-loop dispatch layer — bridges orchestration to the tools module |
+| `heartbeat/` | Periodic self-scheduling — parses `Heartbeat.md`, resolves due entries by schedule/priority/urgency, dispatches autonomous runs |
+| `hooks.rs` | `ChannelHook` — intercepts tool calls in channel mode, routes to `ChannelRouter` |
+| `model_catalog.rs` | Known model/provider pairs, provider normalization, default model selection |
+| `observability.rs` | Tracing init with optional Phoenix/OpenTelemetry export, structured Gen AI semantic conventions |
+| `orchestration/` | Agent runtime, preamble building, session transcript lifecycle, sandbox coordination. Run modes: task, chat, TUI, listen, eval, channel |
+| `plans/` | Lightweight plan file scanner — reads `plan-{n}.md` from agent directory, extracts step progress for preamble injection |
+| `plugins/` | Agent-scoped plugin discovery/enablement, commands, activations, routines, runtime queue, cluster registry |
+| `provider_registry.rs` | Dynamic LLM provider registration — file-backed registry for user-added providers beyond the built-in three |
+| `sandbox/` | Kubernetes-native sandbox lifecycle with Docker fallback, `SandboxMode` enum, `BackendClient` dispatch, exec routing |
+| `session/` | Session ID generation, JSONL transcript persistence, `TranscriptEvent` types, history reconstruction |
+| `skills/` | Skill discovery — YAML frontmatter parsing, eligibility filters (OS, binaries, envvars), metadata extraction |
+| `tasks/` | Folder-based hierarchical task tracking — path helpers, status scanner for autonomous agents |
+| `tool_dispatch/` | Agent-loop dispatch layer — bridges orchestration to the tools module, all tool definitions and routing |
+| `tools/` | Tool implementations, policy model (Allow/Prompt/Deny), memory engine, search engine, code analysis, filesystem execution |
+| `transcription.rs` | Audio transcription via OpenAI Whisper API |
+| `tui/` | TUI adapter — terminal rendering, formatting, `TuiHook`, `TuiChannel`, palette, modal dialogs, stats display |
+| `workspace/` | Workspace file management — loading, saving, and default templates for agent identity markdown files |
 
 Binaries: `that` (CLI), `that-eval` (eval harness), `that-git-server` (standalone)
 
@@ -69,7 +88,7 @@ Every execution path follows the same sequence:
 3. Prepare sandbox container/pod (or set local mode)
 4. Discover skills and collect plugin state
 5. Build preamble: Identity + Harness + Tool discipline + Skills + Plugins + Memory guidance
-6. Build agent with standard toolset via `build_agent_with_standard_tools!` macro
+6. Build agent with standard toolset via `all_tool_defs()`
 7. Execute multi-turn streaming loop with retries
 8. Persist transcript events (user, tool_call, tool_result, assistant, run_end)
 
@@ -79,18 +98,28 @@ Each execution path injects a `LoopHook` implementation that controls how the ag
 
 ### Standard Tool Stack
 
-All modes share a single tool set:
+All modes share a core tool set. Channel mode adds additional tools for message routing and platform interaction.
 
 | Category | Tools |
 |---|---|
-| Filesystem | `fs_ls`, `fs_cat`, `fs_write`, `fs_mkdir`, `fs_rm` |
-| Code | `code_read`, `code_grep`, `code_tree`, `code_symbols`, `code_summary` |
-| Memory | `mem_add`, `mem_recall`, `mem_search`, `mem_compact` |
+| Filesystem | `fs_ls`, `fs_cat`, `fs_write`, `fs_mkdir`, `fs_rm`, `image_read` |
+| Code | `code_read`, `code_grep`, `code_tree`, `code_symbols`, `code_summary`, `code_edit` |
+| Memory | `mem_add`, `mem_recall`, `mem_compact`, `mem_remove`, `mem_unpin` |
 | Search | `search_query`, `search_fetch` |
 | Execution | `shell_exec` |
 | Human | `human_ask` |
-| Skills | `read_skill` |
-| Channel (listen mode only) | `channel_notify` |
+| Skills | `list_skills`, `read_skill` |
+| Plugins | `read_plugin`, `validate_plugin`, `plugin_list`, `plugin_install`, `plugin_uninstall`, `plugin_status`, `plugin_set_policy` |
+| Worktree | `worktree_create`, `worktree_list`, `worktree_diff`, `worktree_log`, `worktree_merge`, `worktree_discard` |
+| Identity | `identity_update` |
+| HTTP | `http_request` |
+| Providers | `provider_admin` |
+| Gateway | `gateway_route_register`, `gateway_route_unregister`, `gateway_route_list` |
+| Channels | `channel_list`, `channel_register`, `channel_unregister` |
+| Agents | `spawn_agent`, `agent_run`, `agent_query`, `agent_task`, `agent_admin`, `workspace_admin` |
+| Channel mode only | `answer`, `channel_notify`, `channel_send_file`, `channel_send_message`, `channel_send_raw`, `channel_settings` |
+
+Agent depth restricts some tools: `spawn_agent` is removed for child agents, `agent_run` is removed at depth > 1.
 
 ### Retry Behavior
 
@@ -106,7 +135,7 @@ Each session produces a JSONL transcript file. Session IDs follow the format `YY
 
 ### Memory
 
-SQLite-backed per-agent memory database. Tools: `mem_add` (store), `mem_recall` (retrieve by key), `mem_search` (semantic search), `mem_compact` (consolidate and prune). Memory persists across sessions and restarts. In sandbox mode, memory storage remains on the host (not inside the container) — memory tools execute in the host runtime process.
+SQLite-backed per-agent memory database. Tools: `mem_add` (store), `mem_recall` (retrieve by key or semantic search), `mem_compact` (consolidate and prune). Memory persists across sessions and restarts. In sandbox mode, memory storage remains on the host (not inside the container) — memory tools execute in the host runtime process.
 
 ### Workspace Files
 
@@ -135,7 +164,7 @@ Each agent maintains a set of named markdown files that define its identity, ins
 | Tool | Host Default | Sandbox Mode |
 |---|---|---|
 | `fs_write` | Deny | Allow |
-| `fs_delete` | Deny | Allow |
+| `fs_rm` | Deny | Allow |
 | `shell_exec` | Deny | Allow |
 | `code_edit` | Deny | Allow |
 | `git_commit` | Deny | Allow |
@@ -187,7 +216,7 @@ description: What this skill does
 | `bootstrap: true` | Auto-installed on every startup |
 | `always: true` | Full body injected into preamble without requiring `read_skill` |
 
-**Bundled default skills (8):** skill-creator, channel-notify, telegram-format, channel-whitelist, task-manager, that-plugins, agent-worktree, agent-orchestrator.
+**Bundled default skills (11):** agent-orchestrator, channel-adapter, channel-notify, channel-whitelist, cluster-management, git-workspace, self-eval, skill-creator, task-manager, telegram-format, that-plugins.
 
 ### Plugins
 
@@ -214,6 +243,15 @@ The `Channel` trait defines the adapter interface. Each adapter declares its cap
 | `ask_human` | Supports blocking bidirectional interactions |
 | `typing_indicator` | Can show typing status |
 | `command_menu` | Supports platform-native slash commands |
+| `max_message_len` | Maximum characters per outbound message before chunking |
+| `message_edit` | Can edit previously sent messages |
+| `attachments` | Can deliver file attachments natively |
+| `inbound_images` | Can receive inbound image attachments |
+| `inbound_audio` | Can receive inbound audio attachments |
+| `rich_messages` | Supports structured messages with rich UI elements (keyboards, reply markups) |
+| `reactions` | Can add emoji reactions to messages |
+| `native_api` | Supports raw platform API passthrough |
+| `deferred_start` | Initialization requires external network calls — started after readiness probe |
 
 **ChannelRouter** manages all active adapters. `ChannelRouter::new()` returns `(router, inbound_rx)` — the receiver is returned separately to avoid `Sync` issues. Outbound events broadcast to all adapters. `human_ask` routes only to the primary channel (the one that originated the current session).
 
@@ -233,7 +271,47 @@ In listen mode, the agent polls `Heartbeat.md` from its agent directory at a con
 
 ---
 
-## 8. Eval Harness
+## 8. Multi-Agent Subsystem
+
+The agent can spawn, query, and coordinate peer agents. All inter-agent communication is async-first — the parent agent's turn is never blocked.
+
+### Agent Registry
+
+`AgentRegistry` (`agents/mod.rs`) is a file-backed registry at `~/.that-agent/cluster/agents.json`. Each entry records name, role, parent, PID, gateway URL, and start time. Liveness is checked via OS signal (`kill -0`). In Kubernetes mode, K8s labels replace the file registry as source of truth.
+
+### Task Registry
+
+`AgentTaskRegistry` tracks work units at `~/.that-agent/cluster/agent_tasks.json`. Tasks are the coordination primitive between agents.
+
+**Lifecycle:** `Submitted` → `Working` → `InputRequired` → `Completed` / `Failed` / `Canceled`
+
+**Limits:** Terminal tasks pruned at 100 to prevent unbounded growth. Messages per task capped at 30 to prevent context bloat. Scratchpad entries capped at 50.
+
+**Scratchpad:** Each task carries a two-tier scratchpad — a stable header (goal, workspace, participant policy) and a live activity tail (steering, blockers, reviews). This gives every participant a shared, persistent communication surface without assuming a single shared volume.
+
+### Endpoints
+
+| Endpoint | Purpose | Blocks? |
+|---|---|---|
+| `POST /v1/chat` | Sync query (called by background task, never by main loop) | Yes |
+| `POST /v1/chat/stream` | SSE streaming (called by background task) | Yes |
+| `POST /v1/inbound` | Async task dispatch — deferred for heartbeat | No |
+| `POST /v1/notify` | Zero-cost notification — immediate channel relay + heartbeat queue | No |
+| `POST /v1/task_update?task_id=X` | Task state callback — updates registry + notification | No |
+
+### Key Helpers
+
+- `resolve_agent_gateway(db_path, name)` → `(cluster_dir, gateway_url)` — canonical resolve pattern
+- `post_to_agent_inbound(gw, message, sender, callback?)` — all POSTs to sub-agent `/v1/inbound`
+- `AgentTaskRegistry::from_db_path(path)` — derive registry from memory DB path
+
+### Restart Behavior
+
+On channel mode boot, the agent sends a restart notification with the last user message and active task count. Session restoration happens lazily on the first inbound message per sender.
+
+---
+
+## 9. Eval Harness
 
 The eval system (`eval/` module) runs scripted scenarios against the agent and scores results with an LLM judge.
 
@@ -266,7 +344,7 @@ After all steps complete, the full transcript and rubric are passed to an LLM ju
 
 ---
 
-## 9. Invariants
+## 10. Invariants
 
 These must remain true as the project evolves:
 
