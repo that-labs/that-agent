@@ -268,6 +268,7 @@ fn exec_to_request(cmd: cli::ExecCommands) -> Result<ToolRequest, String> {
                 cwd: cwd.map(|p| p.to_string_lossy().to_string()),
                 timeout_secs: timeout,
                 signal: Some(signal_mode),
+                truncate: true,
             })
         }
     }

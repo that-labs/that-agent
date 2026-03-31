@@ -64,6 +64,7 @@ pub fn is_retryable_error(err: &anyhow::Error) -> bool {
         || msg.contains(" 502")
         || msg.contains(" 503")
         || msg.contains(" 504")
+        || msg.contains(" 529")
         || msg.contains("rate limit")
         || msg.contains("overloaded")
         || msg.contains("stream ended unexpectedly")

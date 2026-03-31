@@ -7,7 +7,7 @@
 pub mod image;
 
 use crate::tools::impls::path_guard;
-use crate::tools::output::{self, BudgetedOutput, CompactionStrategy};
+use crate::tools::output::{self, BudgetedOutput};
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -113,11 +113,8 @@ pub fn ls(
     Ok(output::emit_json(&result, max_tokens))
 }
 
-/// Reads file content with token budget enforcement.
-///
-/// The content field is budgeted first (text compaction), then the full
-/// result struct is serialized to JSON. Budget applies to the final payload.
-pub fn cat(path: &Path, max_tokens: Option<usize>) -> Result<BudgetedOutput, FsError> {
+/// Reads file content without truncation — full content enters context.
+pub fn cat(path: &Path, _max_tokens: Option<usize>) -> Result<BudgetedOutput, FsError> {
     if !path.exists() {
         return Err(FsError::NotFound(path.to_path_buf()));
     }
@@ -134,22 +131,18 @@ pub fn cat(path: &Path, max_tokens: Option<usize>) -> Result<BudgetedOutput, FsE
     })?;
 
     let lines = content.lines().count();
-
-    // Budget the content text first (reserve ~40% of budget for JSON envelope)
-    let content_budget = max_tokens.map(|b| (b as f64 * 0.7) as usize).unwrap_or(512);
-    let budgeted_content =
-        output::apply_budget_to_text(&content, content_budget, CompactionStrategy::HeadTail);
+    let tokens = output::count_tokens(&content);
 
     let result = CatResult {
         path: path.to_string_lossy().to_string(),
-        content: budgeted_content.content,
+        content,
         lines,
-        tokens: budgeted_content.tokens,
-        truncated: budgeted_content.truncated,
+        tokens,
+        truncated: false,
     };
 
-    // Final budget on the complete JSON output
-    Ok(output::emit_json(&result, max_tokens))
+    // No budget enforcement — full file content enters context like a raw read
+    Ok(output::emit_json(&result, None))
 }
 
 /// Result of an `fs write` command.

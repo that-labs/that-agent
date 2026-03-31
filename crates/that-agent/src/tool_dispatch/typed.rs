@@ -494,6 +494,12 @@ pub struct ShellExecArgs {
     pub cwd: Option<String>,
     #[serde(default = "default_shell_timeout")]
     pub timeout_secs: u64,
+    #[serde(default = "default_true")]
+    pub truncate: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -918,7 +924,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                 Set a higher timeout_secs explicitly for builds, installs, or known slow ops. \
                 For long-running processes, redirect output to a file and manage it separately. \
                 Non-zero exit codes are returned as data — interpret them, do not panic. \
-                For large output, pipe through head/tail/grep to stay within result limits. \
+                Set truncate=false to get the full untruncated output when you need complete data. \
                 {shell_mode_note}"
             ),
             parameters: serde_json::json!({
@@ -926,7 +932,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
                 "properties": {
                     "command": { "type": "string", "description": "Shell command to execute" },
                     "cwd": { "type": "string", "description": "Working directory (local mode only)" },
-                    "timeout_secs": { "type": "integer", "default": 5, "description": "Seconds before kill. Increase for builds/installs." }
+                    "timeout_secs": { "type": "integer", "default": 5, "description": "Seconds before kill. Increase for builds/installs." },
+                    "truncate": { "type": "boolean", "default": true, "description": "Truncate large output to fit token budget. Set false for full output." }
                 },
                 "required": ["command"]
             }),
@@ -3499,6 +3506,7 @@ async fn dispatch_shell_exec(
                 cwd: args.cwd,
                 timeout_secs: args.timeout_secs,
                 signal: None,
+                truncate: args.truncate,
             },
         )
         .await?;

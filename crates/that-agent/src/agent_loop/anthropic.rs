@@ -289,6 +289,19 @@ pub(super) async fn stream_turn(
                         .await;
                 }
 
+                "error" => {
+                    let err_type = val["error"]["type"].as_str().unwrap_or("unknown");
+                    let err_msg = val["error"]["message"].as_str().unwrap_or("Unknown error");
+                    let _ = tx
+                        .send(TurnEvent::Error(anyhow::anyhow!(
+                            "Anthropic stream error ({err_type}): {err_msg}"
+                        )))
+                        .await;
+                    return Err(anyhow::anyhow!(
+                        "Anthropic stream error ({err_type}): {err_msg}"
+                    ));
+                }
+
                 _ => {}
             }
         }

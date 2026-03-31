@@ -230,6 +230,7 @@ async fn run_from_checkpoint(
 
     let mut total_usage = Usage::default();
     let mut pending_edit_verification: HashMap<String, String> = HashMap::new();
+    let mut files_read_this_session: HashSet<String> = HashSet::new();
     let openai_session: Option<Arc<Mutex<openai::OpenAiWsState>>> =
         if config.provider == "openai" && config.openai_websocket {
             Some(openai::new_ws_session())
@@ -565,7 +566,15 @@ async fn run_from_checkpoint(
                     HookAction::Continue => {
                         if tc.name == "code_edit" {
                             if let Some(edit_path) = tool_arg_path(&tc.args_json) {
-                                if let Some(previous_call_id) =
+                                if !files_read_this_session.contains(&edit_path) {
+                                    tool_span.in_scope(|| {
+                                        tracing::Span::current().record(
+                                            "tool.guard_reason",
+                                            "edit_requires_initial_read",
+                                        );
+                                    });
+                                    edit_first_read_guard_result(&edit_path)
+                                } else if let Some(previous_call_id) =
                                     pending_edit_verification.get(&edit_path).cloned()
                                 {
                                     tool_span.in_scope(|| {
@@ -599,9 +608,12 @@ async fn run_from_checkpoint(
                                 .instrument(tool_span.clone())
                                 .await;
                             tool_images = dr.images;
-                            if tc.name == "code_read" && !is_tool_error_result(&dr.text) {
+                            if matches!(tc.name.as_str(), "code_read" | "fs_cat")
+                                && !is_tool_error_result(&dr.text)
+                            {
                                 if let Some(read_path) = tool_arg_path(&tc.args_json) {
                                     pending_edit_verification.remove(&read_path);
+                                    files_read_this_session.insert(read_path);
                                 }
                             }
                             dr.text
@@ -1359,6 +1371,16 @@ fn is_tool_error_result(result_json: &str) -> bool {
         Ok(v) => crate::hooks::is_error_value(&v),
         Err(_) => true,
     }
+}
+
+fn edit_first_read_guard_result(path: &str) -> String {
+    serde_json::json!({
+        "error": format!(
+            "code_edit blocked: you have not read '{}' this session. Call code_read or fs_cat on it first so you know the current content before editing.",
+            path
+        )
+    })
+    .to_string()
 }
 
 fn edit_verification_guard_result(path: &str, previous_call_id: &str) -> String {

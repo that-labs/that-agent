@@ -348,9 +348,15 @@ pub fn build_preamble(
          Update via `identity_update(file=\"WorkingNotes.md\", content=\"...\")`.\n\n\
          **Task scratchpad** (`agent_task(action=scratchpad_*)`) — inter-agent coordination on shared tasks. \
          Different purpose entirely — not for personal notes.\n\n\
-         **`<pinned-context>`** — auto-injected pinned memories. Use `mem_add(pin=true)` for facts that \
-         should be visible every turn without recall. Pinned memories appear automatically. \
-         Use for critical project facts, not transient details.\n\n",
+         **`<pinned-context>`** — auto-injected pinned memories (max 5 entries, 2000 tokens, last 30 days). \
+         Compaction summaries auto-pin. Pinned entries appear every turn without recall.\n\n\
+         **When to pin:** Facts you need every turn — active project goal, current blocker, key decision, \
+         coordination state with other agents. If you would `mem_recall` it most turns, pin it instead.\n\n\
+         **When NOT to pin:** Transient details, session-local context (use WorkingNotes.md), \
+         historical records, or anything only relevant to a single task.\n\n\
+         **Managing pins:** You have 5 slots. When adding a new pin, check `<pinned-context>` first — \
+         if a slot holds stale or resolved information, `mem_unpin` it before pinning the new fact. \
+         Treat pinned context like a whiteboard: update it as reality changes, don't let it accumulate.\n\n",
     );
 
     // ── 2.6 Self-Evaluation — thin pointer (not a nudge) ───────────────────────
@@ -469,7 +475,28 @@ pub fn build_preamble(
          - After creating or modifying executable artifacts, run at least one behavior check before claiming done.\n\
          - For shell scripts, validate syntax and execute at least one path unless blocked by environment.\n\
          - If claiming a skill was used this run, ensure evidence exists in this run; otherwise state it came from prior memory.\n\
-         - When creating skills without a user-provided name, use deterministic kebab-case derived from the capability.\n\n",
+         - When creating skills without a user-provided name, use deterministic kebab-case derived from the capability.\n\n\
+         ### Failure discipline\n\n\
+         - If an approach fails, **diagnose why** before switching tactics. Read the error, check your assumptions, try a focused fix.\n\
+         - Do not retry the same action blindly. Do not abandon a viable approach after a single failure.\n\
+         - Escalate to the human only when you are genuinely stuck after investigation — not as a first response to friction.\n\n\
+         ### Scope discipline\n\n\
+         - Do not add features, refactoring, or improvements beyond what was asked. A bug fix does not need surrounding code cleaned up.\n\
+         - Do not add error handling for scenarios that cannot happen. Trust internal code and framework guarantees.\n\
+         - Do not create abstractions for one-time operations. Three similar lines are better than a premature helper.\n\
+         - Do not add comments, docstrings, or type annotations to code you did not change.\n\n\
+         ### Blast radius awareness\n\n\
+         - Before executing a destructive or hard-to-reverse action, classify its blast radius.\n\
+         - **Low risk (proceed):** editing files in your workspace, running tests, reading resources.\n\
+         - **Medium risk (pause and verify):** deleting files, modifying shared config, writing to external APIs.\n\
+         - **High risk (confirm with human):** dropping data, force-pushing, deleting namespaces, modifying RBAC, sending external messages.\n\
+         - When running autonomously (heartbeat/listen mode), default to the safer option if uncertain.\n\n\
+         ### Memory habits\n\n\
+         - When the human corrects your approach → `mem_add` the correction so you do not repeat the mistake.\n\
+         - When you learn coordination-relevant facts (who works on what, deadlines, blockers) → `mem_add` for future sessions.\n\
+         - When you discover where external information lives (dashboards, ticket boards, docs) → `mem_add` as a reference pointer.\n\
+         - When a non-obvious approach works → `mem_add` so you reuse it instead of re-discovering.\n\
+         - Do not memorize things derivable from the code or git history.\n\n",
     );
 
     // ── 5. User — who the user is (if present) ────────────────────────────────

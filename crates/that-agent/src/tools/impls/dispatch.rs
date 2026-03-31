@@ -135,7 +135,13 @@ pub enum ToolRequest {
         cwd: Option<String>,
         timeout_secs: u64,
         signal: Option<crate::tools::impls::exec::SignalMode>,
+        #[serde(default = "default_truncate")]
+        truncate: bool,
     },
+}
+
+fn default_truncate() -> bool {
+    true
 }
 
 /// A tool execution response.
@@ -655,13 +661,15 @@ pub fn execute_tool(
             cwd,
             timeout_secs,
             signal,
+            truncate,
         } => {
             let signal_mode = signal.unwrap_or_default();
+            let budget = if *truncate { max_tokens } else { None };
             match crate::tools::impls::exec::exec_with_options(
                 command,
                 cwd.as_deref(),
                 *timeout_secs,
-                max_tokens,
+                budget,
                 signal_mode,
                 false, // MCP path never streams to stderr
             ) {
