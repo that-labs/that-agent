@@ -45,6 +45,9 @@ use crate::tool_dispatch::typed::dispatch as dispatch_tool;
 /// the first delta. Anthropic sends keepalive comments during thinking, but transient
 /// API issues may produce genuine 90s silences that trigger retries.
 pub(super) const STREAM_IDLE_TIMEOUT_SECS: u64 = 90;
+/// Hard wall-clock cap on the entire SSE stream. Prevents indefinite hangs
+/// when keep-alive pings reset the idle timeout but no content arrives.
+pub(super) const STREAM_WALL_TIMEOUT_SECS: u64 = 300;
 
 /// Shared HTTP client with connect timeout only. No total-request timeout — SSE
 /// streams can run for minutes. Idle connections expire after 30s to avoid reusing

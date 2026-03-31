@@ -168,12 +168,28 @@ pub(super) async fn stream_turn(
     let mut usage = Usage::default();
 
     let idle_timeout = tokio::time::Duration::from_secs(super::STREAM_IDLE_TIMEOUT_SECS);
+    let wall_deadline =
+        tokio::time::Instant::now() + tokio::time::Duration::from_secs(super::STREAM_WALL_TIMEOUT_SECS);
 
     loop {
-        let chunk = match tokio::time::timeout(idle_timeout, stream.next()).await {
+        let remaining = wall_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow::anyhow!(
+                "Anthropic SSE stream exceeded wall-clock limit of {}s (keep-alives received but no content)",
+                super::STREAM_WALL_TIMEOUT_SECS
+            ));
+        }
+        let effective_timeout = idle_timeout.min(remaining);
+        let chunk = match tokio::time::timeout(effective_timeout, stream.next()).await {
             Ok(Some(chunk)) => chunk?,
             Ok(None) => break, // Stream ended cleanly.
             Err(_elapsed) => {
+                if tokio::time::Instant::now() >= wall_deadline {
+                    return Err(anyhow::anyhow!(
+                        "Anthropic SSE stream exceeded wall-clock limit of {}s",
+                        super::STREAM_WALL_TIMEOUT_SECS
+                    ));
+                }
                 return Err(anyhow::anyhow!(
                     "Anthropic SSE stream timed out: no data for {}s",
                     super::STREAM_IDLE_TIMEOUT_SECS
