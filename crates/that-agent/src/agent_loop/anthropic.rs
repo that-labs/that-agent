@@ -168,8 +168,8 @@ pub(super) async fn stream_turn(
     let mut usage = Usage::default();
 
     let idle_timeout = tokio::time::Duration::from_secs(super::STREAM_IDLE_TIMEOUT_SECS);
-    let wall_deadline =
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(super::STREAM_WALL_TIMEOUT_SECS);
+    let wall_deadline = tokio::time::Instant::now()
+        + tokio::time::Duration::from_secs(super::STREAM_WALL_TIMEOUT_SECS);
 
     loop {
         let remaining = wall_deadline.saturating_duration_since(tokio::time::Instant::now());
