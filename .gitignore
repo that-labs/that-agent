@@ -34,3 +34,4 @@ deploy/k8s/overlays/*/secret.yaml
 
 # Logs
 *.log
+RELEASE-*.md
