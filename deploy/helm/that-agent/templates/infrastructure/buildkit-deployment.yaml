@@ -40,6 +40,10 @@ spec:
       labels:
         {{- include "that-agent.labels" . | nindent 8 }}
         app.kubernetes.io/component: buildkit
+      annotations:
+        # Rootless BuildKit needs unconfined AppArmor to create user/mount namespaces.
+        # k3s/containerd default profile blocks this even with SYS_ADMIN capability.
+        container.apparmor.security.beta.kubernetes.io/buildkit: unconfined
     spec:
       securityContext:
         runAsUser: 1000
