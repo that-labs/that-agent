@@ -90,10 +90,15 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.agent.resources | nindent 12 }}
-          readinessProbe:
+          startupProbe:
             exec:
               command: ["/bin/sh", "-c", "test -f /tmp/that-agent-ready"]
             initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -f /tmp/that-agent-ready"]
             periodSeconds: 5
             failureThreshold: 3
           livenessProbe:
@@ -104,7 +109,6 @@ spec:
                 - |
                   test -f /tmp/that-agent-alive && \
                   [ $(( $(date +%s) - $(stat -c %Y /tmp/that-agent-alive) )) -lt 30 ]
-            initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
