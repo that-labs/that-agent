@@ -21,21 +21,29 @@ AGENT_CONFIG="${AGENT_DIR}/config.toml"
 AGENT_IDENTITY="${AGENT_DIR}/Identity.md"
 
 if [ ! -f "${AGENT_CONFIG}" ]; then
+  echo "[boot] First boot — initializing agent '${AGENT_NAME}'..."
+  # Create config without --prompt so it's instant (no LLM call).
+  # Identity generation happens on the agent's first turn via the Bootstrap
+  # section in the preamble — no need to block the entrypoint.
+  that agent init "${AGENT_NAME}"
+  echo "[boot] Agent config created."
   if [ -n "${THAT_AGENT_BOOTSTRAP_PROMPT:-}" ]; then
-    that agent init "${AGENT_NAME}" --prompt "${THAT_AGENT_BOOTSTRAP_PROMPT}"
-  else
-    that agent init "${AGENT_NAME}"
+    echo "[boot] Bootstrap prompt set — agent will generate identity on first turn."
+    # Write the prompt to Bootstrap.md so the agent sees it in its preamble.
+    mkdir -p "${AGENT_DIR}"
+    printf '%s\n' "${THAT_AGENT_BOOTSTRAP_PROMPT}" > "${AGENT_DIR}/Bootstrap.md"
   fi
 elif [ -n "${THAT_AGENT_BOOTSTRAP_PROMPT:-}" ] && [ ! -f "${AGENT_IDENTITY}" ]; then
-  # config.toml exists but soul generation failed on a previous boot (e.g. no API
-  # credits). Retry generating Soul.md / Identity.md so the agent starts with
-  # an established identity rather than entering self-bootstrap mode.
-  echo "Identity files missing — retrying soul generation for '${AGENT_NAME}'..."
-  that agent init "${AGENT_NAME}" --prompt "${THAT_AGENT_BOOTSTRAP_PROMPT}" --force
+  echo "[boot] Identity files missing — writing bootstrap prompt for first-turn generation."
+  mkdir -p "${AGENT_DIR}"
+  printf '%s\n' "${THAT_AGENT_BOOTSTRAP_PROMPT}" > "${AGENT_DIR}/Bootstrap.md"
+else
+  echo "[boot] Agent '${AGENT_NAME}' config found — resuming."
 fi
 
 # ── Telegram channel bootstrap ──────────────────────────────────────
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+  echo "[boot] Telegram token detected — checking channel config..."
   if ! grep -q '\[\[channels\.adapters\]\]' "${AGENT_CONFIG}"; then
     sed -i '/^adapters = \[\]$/d' "${AGENT_CONFIG}" || true
     printf '\n%s\n' 'channels.primary = "telegram"' >> "${AGENT_CONFIG}"
@@ -185,6 +193,7 @@ probe_rbac() {
   } | tee "${cache}" > "${PROBE_DIR}/rbac"
 }
 
+echo "[boot] Starting infrastructure probes (parallel)..."
 # Launch all probes in parallel
 probe_buildkit &
 pid_bk=$!
@@ -251,6 +260,7 @@ case "${PREFERRED_BACKEND}" in
 esac
 
 BOOT_END="$(date +%s)"
-echo "Bootstrap completed in $((BOOT_END - BOOT_START))s [buildkit=${BUILDKIT_AVAILABLE} docker=${DOCKER_AVAILABLE} backend=${THAT_IMAGE_BUILD_BACKEND}]"
+echo "[boot] Infrastructure probes done in $((BOOT_END - BOOT_START))s [buildkit=${BUILDKIT_AVAILABLE} docker=${DOCKER_AVAILABLE} backend=${THAT_IMAGE_BUILD_BACKEND}]
+echo "[boot] Starting agent listener...""
 
 exec that run listen --agent "${AGENT_NAME}" --no-sandbox
