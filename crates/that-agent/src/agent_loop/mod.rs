@@ -171,6 +171,10 @@ pub struct LoopConfig {
     pub images: Vec<(Vec<u8>, String)>,
     /// Optional steering queue: mid-run hints from the human, drained each turn.
     pub steering: Option<SteeringQueue>,
+    /// Volatile per-turn context (Status.md, WorkingNotes.md, pinned memory, runtime
+    /// metadata). Injected as a separate system block WITHOUT cache_control so the
+    /// preamble cache stays stable. When `None`, no system-reminder is emitted.
+    pub system_reminder: Option<String>,
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -876,7 +880,7 @@ async fn complete_once_inner(
                 let messages = messages.clone();
                 async move {
                     let _ = anthropic::stream_turn(
-                        &api_key, &model, &system, &messages, &tools, max_tokens, false, tx,
+                        &api_key, &model, &system, None, &messages, &tools, max_tokens, false, tx,
                     )
                     .await;
                 }
@@ -1007,6 +1011,7 @@ async fn run_turn(
         let api_key = config.api_key.clone();
         let model = config.model.clone();
         let system = config.system.clone();
+        let system_reminder = config.system_reminder.clone();
         let messages = messages.to_vec();
         let tools = config.tools.clone();
         let max_tokens = config.max_tokens;
@@ -1019,15 +1024,29 @@ async fn run_turn(
             match provider.as_str() {
                 "anthropic" => {
                     anthropic::stream_turn(
-                        &api_key, &model, &system, &messages, &tools, max_tokens, caching, tx,
+                        &api_key,
+                        &model,
+                        &system,
+                        system_reminder.as_deref(),
+                        &messages,
+                        &tools,
+                        max_tokens,
+                        caching,
+                        tx,
                     )
                     .await
                 }
                 "openai" => {
+                    // OpenAI does not support multi-block system prompts; merge reminder
+                    // into the system string for this provider.
+                    let merged = match &system_reminder {
+                        Some(r) if !r.is_empty() => format!("{system}\n\n{r}"),
+                        _ => system.clone(),
+                    };
                     openai::stream_turn(
                         &api_key,
                         &model,
-                        &system,
+                        &merged,
                         &messages,
                         &tools,
                         max_tokens,

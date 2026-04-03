@@ -1,0 +1,148 @@
+name        = "Multi-Session Skill + Compaction Chain"
+description = """
+Tests a realistic multi-session flow: agent learns context in session A, works in
+session B, context compacts, then session C requires knowledge from both prior sessions.
+
+This validates that the agent's memory + compaction + skill system work together
+across a realistic lifecycle without losing critical information.
+"""
+agent_name   = "default"
+provider     = "anthropic"
+model        = "claude-sonnet-4-6"
+judge_provider = "anthropic"
+judge_model  = "claude-sonnet-4-6"
+max_turns    = 20
+sandbox      = false
+allow_memory = true
+tags         = ["memory", "compaction", "multi-session", "skills", "llm-judge"]
+timeout_secs = 240
+
+# ── Pre-cleanup ───────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-chain%' OR lower(content) LIKE '%nexus-api%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Session A: Establish project context ──────────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Starting a new project called nexus-api. Key facts:
+- Go 1.22 with Chi router
+- PostgreSQL 16 with pgx driver (not GORM — we had bad experiences with GORM)
+- Deployed on Railway, us-west region
+- Strict rule: all errors must be wrapped with fmt.Errorf("%w", err), never bare returns
+- Testing: table-driven tests only, no test helpers that hide assertions
+
+Store all of this — we'll need it across multiple sessions.
+"""
+
+# ── Assert: agent stored the context ──────────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool = "mem_add"
+min_count = 1
+
+# ── Session B: Work session — agent should recall and apply context ───────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I need to add a health check endpoint to nexus-api. What would you recommend for
+the implementation approach given our stack? Just describe the plan.
+"""
+
+# ── Assert: agent recalled nexus-api context before answering ─────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool = "mem_recall"
+min_count = 1
+
+# ── Session C: Post-compaction — simulate stale context ───────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+[Conversation context summary: Previously discussed nexus-api project setup and
+adding a health check endpoint. The project uses Go with a specific router and database.]
+
+A colleague suggested we switch to GORM for the database layer since it would be
+faster to develop with. What do you think?
+"""
+
+# ── Assert: agent recalled the anti-GORM preference from memory ──────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool = "mem_recall"
+min_count = 1
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-chain%' OR lower(content) LIKE '%nexus-api%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "context_stored_session_a"
+description = """
+In session A, the agent stored all key project facts (Go 1.22, Chi, pgx, Railway,
+error wrapping rule, table-driven tests, anti-GORM preference) in persistent memory
+without being told which tool to use.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "context_recalled_session_b"
+description = """
+In session B (fresh, no history), the agent recalled nexus-api context from memory
+before proposing the health check implementation. The plan should reference Chi router,
+pgx, and the error wrapping convention — demonstrating recalled knowledge was used.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "anti_gorm_recalled_session_c"
+description = """
+In session C (post-compaction summary), when a colleague suggests GORM, the agent
+recalled the stored anti-GORM preference from memory and pushed back with the
+specific reason (bad past experience). High score: agent explicitly cited the stored
+preference. Low score: agent agreed to switch or gave generic advice without
+checking memory.
+"""
+weight = 35
+
+[[rubric.criteria]]
+name        = "factual_consistency"
+description = """
+Across all three sessions, the agent's claims about nexus-api are consistent and
+traceable to the original facts. No hallucinated frameworks, regions, or conventions.
+"""
+weight = 20

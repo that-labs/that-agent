@@ -44,6 +44,7 @@ max_turns    = 30
 sandbox      = false
 tags         = ["memory", "long-lived", "temporal", "corpus", "incidents", "preferences", "precision"]
 timeout_secs = 300
+allow_memory = true
 
 # ── Pre-cleanup ────────────────────────────────────────────────────────────────
 [[steps]]

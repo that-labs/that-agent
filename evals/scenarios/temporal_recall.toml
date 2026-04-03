@@ -17,6 +17,7 @@ max_turns    = 20
 sandbox      = false
 tags         = ["memory", "temporal", "recall", "long-lived", "compaction"]
 timeout_secs = 180
+allow_memory = true
 
 # ── Pre-cleanup ────────────────────────────────────────────────────────────────
 [[steps]]
@@ -67,14 +68,16 @@ type    = "prompt"
 session = "A"
 content = "Good. Now please consolidate everything you just recalled about prism-proj into a single authoritative memory note that will serve as the canonical reference going forward."
 
-# ── Assert: compaction entry created with prism content ───────────────────────
+# ── Assert: consolidated entry created with prism content ─────────────────────
+# Agent may use mem_compact (source='compaction') or mem_remove + mem_add.
+# Check outcome: a recent prism-related entry exists.
 [[steps]]
 type = "assert"
 [[steps.assertions]]
 kind    = "command_succeeds"
 command = """
 DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
-sqlite3 "$DB" "SELECT count(*) FROM memories WHERE source='compaction' AND lower(content) LIKE '%prism%' AND created_at > datetime('now', '-10 minutes')" | grep -qE '^[1-9]'
+sqlite3 "$DB" "SELECT count(*) FROM memories WHERE lower(content) LIKE '%prism%' AND created_at > datetime('now', '-10 minutes')" | grep -qE '^[1-9]'
 """
 
 # ── Session boundary ───────────────────────────────────────────────────────────
@@ -94,7 +97,7 @@ type    = "run_command"
 command = """
 DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
 if [ -f "$DB" ]; then
-  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-temporal%' OR (source='compaction' AND lower(content) LIKE '%prism-proj%') OR (source='compaction' AND lower(content) LIKE '%prism proj%')" 2>/dev/null
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-temporal%' OR lower(content) LIKE '%prism-proj%' OR lower(content) LIKE '%prism proj%'" 2>/dev/null
 fi
 true
 """
@@ -112,11 +115,12 @@ milestone (7 days ago). Low score if only recent entries appear in the response.
 weight = 35
 
 [[rubric.criteria]]
-name        = "compaction_created"
+name        = "consolidation_created"
 description = """
-Agent called mem_compact to persist a pinned canonical note rather than just reciting
-facts in conversation. The entry must cover founding, architecture choice, and
-current status.
+Agent used memory tools to persist a canonical note rather than just reciting facts
+in conversation. Valid strategies: mem_compact for a pinned summary, OR mem_remove +
+mem_add to replace fragmented entries with a consolidated one. The entry must cover
+founding, architecture choice, and current status.
 """
 weight = 30
 

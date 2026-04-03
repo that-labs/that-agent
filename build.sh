@@ -19,6 +19,8 @@ rsync -a \
     --exclude='/target' \
     --exclude='/.git' \
     --exclude='/.cache' \
+    --exclude='/.claude' \
+    --exclude='/.audit' \
     --exclude='/node_modules' \
     --exclude='/that-agent' \
     --exclude='/agentic-tools' \

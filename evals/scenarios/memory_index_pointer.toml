@@ -18,6 +18,7 @@ max_turns       = 30
 sandbox         = true
 tags            = ["memory", "compaction", "memory-index", "thin-index", "llm-judge"]
 timeout_secs    = 240
+allow_memory = true
 
 # ── Agent config bootstrap ─────────────────────────────────────────────────────
 [[steps]]

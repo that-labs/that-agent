@@ -236,6 +236,7 @@ pub async fn execute_agent_run_streaming(
             },
             images: vec![],
             steering: None,
+            system_reminder: None,
         };
         let hook = AgentHook { debug };
         let result = if let Some(messages) = checkpoint_messages.clone() {
@@ -309,6 +310,7 @@ pub async fn execute_agent_run_eval(
     history: Option<Vec<Message>>,
     session_id_for_trace: Option<&str>,
     skill_roots: Vec<std::path::PathBuf>,
+    allow_memory: bool,
 ) -> Result<(String, Vec<String>)> {
     if let Some(sid) = session_id_for_trace {
         tracing::Span::current().record("session.id", sid);
@@ -357,7 +359,9 @@ pub async fn execute_agent_run_eval(
             max_turns: agent.max_turns as u32,
             tools: {
                 let mut defs = all_tool_defs(&container);
-                defs.retain(|t| !t.name.starts_with("mem_"));
+                if !allow_memory {
+                    defs.retain(|t| !t.name.starts_with("mem_"));
+                }
                 defs
             },
             history: history.clone().unwrap_or_default(),
@@ -374,10 +378,11 @@ pub async fn execute_agent_run_eval(
                 router: None,
                 state_dir: agent_state_dir(agent),
                 agent_name: agent.name.clone(),
-                disable_memory: true,
+                disable_memory: !allow_memory,
             },
             images: vec![],
             steering: None,
+            system_reminder: None,
         };
         let hook = EvalHook::new();
         let result = if let Some(messages) = checkpoint_messages.clone() {
@@ -548,6 +553,7 @@ pub async fn execute_agent_run_channel(
     skill_roots: Vec<std::path::PathBuf>,
     steering: Option<SteeringQueue>,
     effective_config_path: Option<String>,
+    system_reminder: Option<String>,
 ) -> Result<(
     String,
     Vec<crate::channels::ToolLogEvent>,
@@ -764,6 +770,7 @@ pub async fn execute_agent_run_channel(
             },
             images: images.clone(),
             steering: steering.clone(),
+            system_reminder: system_reminder.clone(),
         };
         let task_for_attempt = if empty_response_retries > 0 {
             build_empty_channel_retry_task(&task_for_model)

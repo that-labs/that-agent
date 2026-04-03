@@ -1269,6 +1269,7 @@ pub async fn execute_agent_run_tui(
             },
             images: vec![],
             steering: steering.clone(),
+            system_reminder: None,
         };
         let result = if let Some(messages) = checkpoint_messages.clone() {
             agent_loop::resume_with_checkpoint(&config, messages, &hook).await

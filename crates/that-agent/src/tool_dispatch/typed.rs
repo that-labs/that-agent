@@ -651,10 +651,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "fs_write".into(),
             description: "Write content to a file, creating it if it does not exist. \
-                Prefer code_edit for targeted updates to existing files. \
-                Use fs_write for new files, bootstrapping, or intentional full rewrites. \
-                Set dry_run=true to preview without writing. \
-                Set backup=true to keep a .bak copy of the original.".into(),
+                Prefer code_edit for targeted updates to existing files.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -680,8 +677,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "fs_rm".into(),
-            description: "Remove a file or directory. Set recursive=true for directories. \
-                Set dry_run=true to preview what would be deleted.".into(),
+            description: "Remove a file or directory.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -694,9 +690,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "image_read".into(),
-            description: "Read an image file and return it for visual analysis. \
-                Supports PNG, JPEG, GIF, WebP. Max 5 MB. \
-                Auto-resizes large images to fit within vision model limits.".into(),
+            description: "Read an image file for visual analysis. Supports PNG, JPEG, GIF, WebP (max 5 MB).".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -708,9 +702,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "code_read".into(),
             description: "Read source code with line numbers and optional symbol annotations. \
-                Prefer this over fs_cat for source files — it understands structure. \
-                For large files, always use line/end_line to read a specific range — \
-                reading the full file may exceed result limits.".into(),
+                Prefer over fs_cat for source files.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -744,9 +736,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "code_tree".into(),
-            description: "Show repository structure as a tree. .gitignore-aware. \
-                Use depth to control how deep to recurse. \
-                Use ranked=true to sort by PageRank importance.".into(),
+            description: "Show repository structure as a tree. .gitignore-aware.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -774,8 +764,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "code_summary".into(),
-            description: "Summarise a source file's structure: top-level symbols, imports, and doc comments. \
-                Token-efficient — use before code_read when you need orientation, not full content.".into(),
+            description: "Summarise a source file's structure: top-level symbols, imports, and doc comments.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": { "path": { "type": "string" } },
@@ -784,11 +773,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "code_edit".into(),
-            description: "Edit an existing file with surgical precision. \
-                Prefer this over fs_write when updating any file type in-place. \
-                Two mutually exclusive modes: (1) search+replace — works on any file type, \
-                (2) target_fn+new_body — AST-aware body replacement for supported languages. \
-                Provide exactly one mode per call.".into(),
+            description: "Edit a file in-place. Two modes: search+replace (any file) or \
+                target_fn+new_body (AST-aware, supported languages). Provide one mode per call.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -836,8 +822,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "mem_compact".into(),
-            description: "Compact memory for a session: persist a summary and prune short-term entries. \
-                Call this at the end of a long session to preserve key findings.".into(),
+            description: "Compact memory: persist a summary and prune short-term entries.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -916,16 +901,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
             name: "shell_exec".into(),
             description: format!(
                 "Execute a shell command and return stdout, stderr, and exit code. \
-                IMPORTANT: Do NOT use shell_exec for operations that have dedicated tools — \
-                use code_read/fs_cat instead of cat, code_grep instead of grep, fs_ls instead of ls, \
-                code_edit instead of sed/awk, fs_write instead of echo/tee, list_skills instead of ls on skills dir. \
-                Reserve shell_exec for git, build commands, package managers, and runtime operations with no dedicated tool. \
-                Default timeout: 5s — most commands finish instantly. \
-                Set a higher timeout_secs explicitly for builds, installs, or known slow ops. \
-                For long-running processes, redirect output to a file and manage it separately. \
-                Non-zero exit codes are returned as data — interpret them, do not panic. \
-                Set truncate=false to get the full untruncated output when you need complete data. \
-                {shell_mode_note}"
+                Default timeout: 5s. Prefer dedicated tools (code_read, code_grep, fs_write, code_edit) \
+                over shell equivalents. {shell_mode_note}"
             ),
             parameters: serde_json::json!({
                 "type": "object",
@@ -940,9 +917,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_skills".into(),
-            description: "List all available skills with their names, descriptions, and reference files. \
-                Use this to discover what skills are available before loading one with read_skill. \
-                Do NOT use shell_exec to list the skills directory.".into(),
+            description: "List all available skills with their names, descriptions, and reference files.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {}
@@ -950,10 +925,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "read_skill".into(),
-            description: "Read a skill's documentation from the host skills directory. \
-                Call this when a skill listed in the preamble or from list_skills is relevant to the current task — \
-                it returns the full instructions and lists any reference files available for deeper detail. \
-                This is the correct way to load skill content; do NOT use the bash tool to read skill files.".into(),
+            description: "Read a skill's documentation. Returns full instructions and lists available reference files.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1176,10 +1148,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         // ── Dynamic gateway route tools ──────────────────────────────────────
         ToolDef {
             name: "gateway_route_register".into(),
-            description: "Register a custom HTTP route on the agent's gateway at runtime. \
-                Use handler_type=\"static\" with a JSON body to return a fixed response. \
-                Use handler_type=\"shell\" with a shell command whose stdout becomes the response body. \
-                The request body (if any) is available as the REQUEST_BODY env var for shell handlers.".into(),
+            description: "Register a custom HTTP route on the agent's gateway at runtime.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1217,8 +1186,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "identity_update".into(),
             description: "Overwrite a permitted workspace file (Agents.md, User.md, Tools.md, Heartbeat.md, \
-                Tasks.md, Soul.md, etc.). Use to update operating instructions, user profile, \
-                heartbeat schedule, or task list. Read the file first if you need to preserve existing content.".into(),
+                Tasks.md, Soul.md, Status.md, WorkingNotes.md, etc.).".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1231,9 +1199,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         // ── HTTP request tool ─────────────────────────────────────────────────
         ToolDef {
             name: "http_request".into(),
-            description: "Make an HTTP request to an external URL. Returns status code and response body. \
-                Default timeout: 30s. Follows redirects (max 10). HTTPS only validates certificates. \
-                Response body is capped — for large payloads, use shell_exec with curl and pipe through head.".into(),
+            description: "Make an HTTP request to an external URL. Returns status code and response body.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1280,11 +1246,8 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         },
         ToolDef {
             name: "agent_run".into(),
-            description: "Run an ephemeral task agent. Blocks until the task completes and returns \
-                the result. Call multiple agent_run in parallel for fan-out work. In K8s mode runs \
-                as a Job; locally runs as a foreground process. \
-                Pass bootstrap to warm-start the agent with a task-specific identity and domain \
-                context (links, citations, background research) so it can work without broad search access.".into(),
+            description: "Run an ephemeral task agent that blocks until complete. \
+                Call multiple agent_run in parallel for fan-out.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1312,8 +1275,7 @@ pub fn all_tool_defs(container: &Option<String>) -> Vec<ToolDef> {
         ToolDef {
             name: "agent_query".into(),
             description: "Send a synchronous message to a persistent agent and block until response. \
-                Best for quick one-shot questions (<30s). For longer work, prefer agent_task with action=send. \
-                Set stream=true to relay the sub-agent's tool calls to the channel in real-time.".into(),
+                Best for quick questions (<30s).".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

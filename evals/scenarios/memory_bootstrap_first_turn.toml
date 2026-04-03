@@ -1,0 +1,86 @@
+name        = "Memory Bootstrap — First Turn Recall"
+description = """
+Tests the memory bootstrap contract: on an empty conversation history, the agent
+should call mem_recall on its very first turn before using any other tool.
+
+The system-reminder injects a memory_bootstrap_required hint on empty history.
+This eval verifies the agent follows it.
+"""
+agent_name   = "default"
+provider     = "anthropic"
+model        = "claude-sonnet-4-6"
+judge_provider = "anthropic"
+judge_model  = "claude-sonnet-4-6"
+max_turns    = 10
+sandbox      = false
+allow_memory = true
+tags         = ["memory", "bootstrap", "first-turn", "autonomy", "llm-judge"]
+timeout_secs = 120
+
+# ── Pre-seed: put something in memory so recall has results ───────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "
+INSERT OR IGNORE INTO memories (id, content, tags, source, created_at, updated_at) VALUES
+  (lower(hex(randomblob(16))), 'eval-bootstrap: User preference — always respond concisely, no preamble text. Use bullet points for lists.', 'eval-bootstrap,preferences', 'eval', datetime('now', '-1 day'), datetime('now', '-1 day'))
+" 2>/dev/null
+true
+"""
+
+# ── Turn 1: Fresh session, simple task — agent should mem_recall first ────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = "List three benefits of using Rust for systems programming."
+
+# ── Assert: mem_recall was called (bootstrap behavior) ────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool = "mem_recall"
+min_count = 1
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-bootstrap%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "mem_recall_before_other_tools"
+description = """
+The agent's first tool call in the session was mem_recall, following the
+memory_bootstrap_required hint in the system-reminder. High score: mem_recall
+is the very first tool call. Low score: agent used other tools first or skipped
+mem_recall entirely.
+"""
+weight = 50
+
+[[rubric.criteria]]
+name        = "preference_applied"
+description = """
+After recalling the stored preference (concise, bullet points), the agent's response
+about Rust benefits follows that style — concise bullet points, no verbose preamble.
+High score: response matches the recalled preference. Low score: verbose paragraphs
+despite the stored preference.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "answer_quality"
+description = """
+The three benefits listed are accurate and relevant to Rust systems programming
+(e.g. memory safety without GC, zero-cost abstractions, fearless concurrency).
+"""
+weight = 20

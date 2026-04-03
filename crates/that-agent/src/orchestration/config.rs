@@ -554,16 +554,15 @@ pub fn runtime_reminder_lines(sandbox: bool, agent_name: &str) -> Vec<String> {
     lines
 }
 
-pub fn append_system_reminder(
-    task: &str,
+/// Build the volatile system-reminder content (Status.md, WorkingNotes.md,
+/// pinned memory, runtime metadata). This is intended to be passed as a
+/// separate system block in the API request so the preamble cache stays stable.
+pub fn build_system_reminder(
     session_id: &str,
     sandbox: bool,
     agent_name: &str,
     memory_config: &crate::tools::config::MemoryConfig,
 ) -> String {
-    if task.contains("<system-reminder>") {
-        return task.to_string();
-    }
     let today_utc = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let mut reminder = vec![
         format!("current_date_utc: {today_utc}"),
@@ -580,9 +579,25 @@ pub fn append_system_reminder(
         reminder.push(format!("<pinned-context>\n{pinned}</pinned-context>"));
     }
     format!(
-        "{task}\n\n<system-reminder>\n{}\n</system-reminder>",
+        "<system-reminder>\n{}\n</system-reminder>",
         reminder.join("\n")
     )
+}
+
+/// Legacy wrapper: appends the system-reminder into the task string.
+/// Prefer `build_system_reminder()` + `LoopConfig.system_reminder` for new code.
+pub fn append_system_reminder(
+    task: &str,
+    session_id: &str,
+    sandbox: bool,
+    agent_name: &str,
+    memory_config: &crate::tools::config::MemoryConfig,
+) -> String {
+    if task.contains("<system-reminder>") {
+        return task.to_string();
+    }
+    let reminder = build_system_reminder(session_id, sandbox, agent_name, memory_config);
+    format!("{task}\n\n{reminder}")
 }
 
 /// Compute cache hit rate as a percentage.

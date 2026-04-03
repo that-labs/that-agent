@@ -1,0 +1,116 @@
+name        = "Sandbox Backend — Skill Loading for Build/Deploy"
+description = """
+Tests whether a sandbox agent loads the cluster-management skill (specifically the
+sandbox-backends reference) when asked to build and deploy an application.
+
+After preamble slimming, the sandbox backend section only contains a thin pointer:
+"Load read_skill cluster-management sandbox-backends for build/deploy patterns."
+This eval verifies the agent follows that pointer when given a deploy task.
+
+Requires Docker sandbox mode.
+"""
+agent_name   = "eval"
+provider     = "anthropic"
+model        = "claude-sonnet-4-6"
+judge_provider = "anthropic"
+judge_model  = "claude-sonnet-4-6"
+max_turns    = 25
+sandbox      = true
+allow_memory = true
+tags         = ["sandbox", "backend", "skills", "deploy", "docker", "llm-judge"]
+timeout_secs = 300
+
+# ── Setup: create a minimal app to deploy ─────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME bash -c '
+mkdir -p /workspace/hello-app
+cat > /workspace/hello-app/main.py <<PYEOF
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Hello from hello-app!")
+
+if __name__ == "__main__":
+    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+PYEOF
+cat > /workspace/hello-app/Dockerfile <<DEOF
+FROM python:3.12-slim
+COPY main.py /app/main.py
+CMD ["python", "/app/main.py"]
+DEOF
+' 2>/dev/null
+true
+"""
+
+# ── Turn 1: Ask agent to deploy — should trigger skill loading ────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+There is a small Python app at /workspace/hello-app with a Dockerfile. I want to
+build the Docker image and run it. Walk me through the build and deploy steps for
+this specific environment, then execute them.
+"""
+
+# ── Assert: agent loaded the cluster-management skill or sandbox-backends ref ─
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool = "read_skill"
+min_count = 1
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+docker exec $THAT_EVAL_CONTAINER_NAME rm -rf /workspace/hello-app 2>/dev/null
+docker exec $THAT_EVAL_CONTAINER_NAME docker rm -f hello-app 2>/dev/null
+true
+"""
+
+# ── Rubric ────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "skill_loaded_before_build"
+description = """
+The agent loaded the cluster-management skill (or sandbox-backends reference)
+BEFORE attempting to build the Docker image. This demonstrates the agent recognizes
+it needs backend-specific knowledge that was moved from the preamble to a skill.
+High score: read_skill call precedes docker build. Low score: agent attempted to
+build without loading the skill.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "correct_build_method"
+description = """
+The agent used the correct build method for the current sandbox backend. In Docker
+mode: docker build. It should NOT guess or use methods inappropriate for the runtime.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "dockerfile_read_first"
+description = """
+The agent read the Dockerfile before building, as guided by the preamble:
+"If the workspace contains a Dockerfile, read it before describing or changing
+the runtime image."
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "successful_execution"
+description = """
+The agent successfully built and ran the container, or clearly explained why it
+couldn't (e.g. Docker socket unavailable). If successful, it verified the container
+was running.
+"""
+weight = 25

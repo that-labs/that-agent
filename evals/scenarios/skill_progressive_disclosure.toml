@@ -1,0 +1,133 @@
+name        = "Skill Progressive Disclosure — Natural Language Triggers"
+description = """
+Tests whether the agent uses skills appropriately when a user describes a task
+in plain language — without naming tools, skills, or internal workflows.
+
+Three scenarios with increasing knowledge-gap depth:
+1. Orchestration plan (agent may answer from preamble — no skill required)
+2. Context layer details (agent needs specifics beyond preamble summary)
+3. Gateway integration (agent needs protocol details not in preamble)
+
+The judge scores answer quality. The assertion checks that read_skill was called
+at least once across all three turns — the agent should recognize at least one
+task requires deeper knowledge than the preamble provides.
+"""
+agent_name   = "default"
+provider     = "anthropic"
+model        = "claude-sonnet-4-6"
+judge_provider = "anthropic"
+judge_model  = "claude-sonnet-4-6"
+max_turns    = 20
+sandbox      = false
+allow_memory = true
+tags         = ["skills", "progressive-disclosure", "autonomy", "llm-judge"]
+timeout_secs = 180
+
+# ── Pre-cleanup ───────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-skill-pd%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Turn 1: Orchestration — agent may answer from preamble alone ──────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I have a large codebase refactor to do — about 6 independent modules that each need
+the same kind of transformation applied. I'd like to get this done fast by having
+multiple workers handle different modules in parallel. How should I organize this?
+Just give me the plan, don't execute anything yet.
+"""
+
+# ── Turn 2: Context layers — needs specifics on pin management, limits ────────
+[[steps]]
+type    = "prompt"
+session = "B"
+content = """
+I'm getting confused about where I should be tracking things. Sometimes I need facts
+to survive between our conversations, sometimes I just need scratch notes for right now,
+and sometimes I need something visible every single turn without me having to ask.
+What are my exact options, how many pinned slots do I have, and what are the size limits?
+"""
+
+# ── Turn 3: Gateway integration — needs protocol details not in preamble ──────
+[[steps]]
+type    = "prompt"
+session = "C"
+content = """
+I have a monitoring service that detects anomalies and I want it to automatically
+notify you when something goes wrong so you can investigate. The service can send
+HTTP POST requests. What is the exact request format it should use, what fields are
+required, and what happens if you're busy processing something else when the POST arrives?
+"""
+
+# ── Assert: agent loaded at least one skill across all three turns ────────────
+# The agent should recognize that at least one task (likely turn 3) requires
+# deeper knowledge than the preamble provides.
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind       = "tool_call_seen"
+tool  = "read_skill"
+min_count  = 1
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-skill-pd%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "orchestration_plan_quality"
+description = """
+When asked about parallelizing work across modules, the agent produced a concrete,
+actionable plan covering: workspace sharing, parallel dispatch, progress monitoring,
+sequential merge, and conflict handling. High score: plan is specific enough to execute.
+Low score: vague advice without concrete steps.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "context_layers_accuracy"
+description = """
+When asked about tracking information across time horizons, the agent accurately
+described all four layers: persistent memory (mem_add), pinned context (always visible,
+5 slots, 2000 token limit), WorkingNotes.md (session-scoped), and Status.md (durable
+operational state). High score: correct details on limits and use cases for each layer.
+Low score: missing layers or wrong limits.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "gateway_integration_accuracy"
+description = """
+When asked about wiring up an external service, the agent provided the correct endpoint
+(/v1/inbound), accurate request format (message, sender_id, optional callback_url),
+and correctly explained async behavior (returns 202, batched for next heartbeat, non-blocking).
+High score: specific protocol details from skill knowledge. Low score: generic HTTP advice.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "skill_awareness"
+description = """
+Across all three turns, the agent demonstrated awareness of available skills by loading
+at least one relevant reference when it needed details beyond what the preamble provides.
+High score: proactive read_skill calls for tasks requiring deeper knowledge.
+Low score: never loaded any skill despite knowledge gaps visible in the answer.
+"""
+weight = 15
