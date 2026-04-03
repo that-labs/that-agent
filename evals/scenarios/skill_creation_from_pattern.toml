@@ -1,0 +1,110 @@
+name        = "Skill Creation From Repeated Pattern"
+description = """
+Tests whether the agent recognizes a repeated workflow pattern and offers to save
+it as a reusable skill — then creates a valid SKILL.md with proper frontmatter.
+
+The user performs the same kind of task twice, then hints that it keeps recurring.
+The agent should propose creating a skill and produce a well-formed SKILL.md.
+"""
+agent_name   = "default"
+provider     = "anthropic"
+model        = "claude-sonnet-4-6"
+judge_provider = "anthropic"
+judge_model  = "claude-sonnet-4-6"
+max_turns    = 20
+sandbox      = true
+allow_memory = true
+tags         = ["skills", "creation", "pattern-recognition", "autonomy", "llm-judge"]
+timeout_secs = 180
+
+# ── Pre-cleanup ───────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+SKILLS_DIR="$HOME/.that-agent/agents/{{agent_name}}/skills"
+rm -rf "$SKILLS_DIR/eval-log-analyzer" "$SKILLS_DIR/log-analyzer" 2>/dev/null
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-skill-create%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Turn 1: User describes a workflow pattern ─────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I keep doing this same thing over and over: I need to analyze application logs,
+find error patterns, group them by root cause, and produce a summary with counts
+and example stack traces. Every time I describe it from scratch.
+
+Can you save this as a reusable template I can just load next time? Include
+guidance on how to structure the analysis, what to look for, and how to format
+the output.
+"""
+
+# ── Assert: agent created a SKILL.md with valid frontmatter ───────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+SKILLS_DIR="$HOME/.that-agent/agents/{{agent_name}}/skills"
+# Find any skill directory that was created (name may vary)
+FOUND=$(find "$SKILLS_DIR" -name "SKILL.md" -newer "$SKILLS_DIR" -mmin -5 2>/dev/null | head -1)
+[ -n "$FOUND" ] && grep -q '^name:' "$FOUND" && grep -q '^description:' "$FOUND"
+"""
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+SKILLS_DIR="$HOME/.that-agent/agents/{{agent_name}}/skills"
+rm -rf "$SKILLS_DIR/eval-log-analyzer" "$SKILLS_DIR/log-analyzer" 2>/dev/null
+# Also clean any skill the agent might have named differently
+find "$SKILLS_DIR" -name "SKILL.md" -newer "$SKILLS_DIR" -mmin -5 2>/dev/null | while read f; do rm -rf "$(dirname "$f")"; done
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-skill-create%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "skill_file_created"
+description = """
+The agent created a SKILL.md file in the skills directory with valid YAML frontmatter
+containing at minimum: name (kebab-case), description (clear trigger sentence).
+High score: well-formed frontmatter with descriptive name and clear description.
+Low score: missing frontmatter, root-level fields missing, or name not kebab-case.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "skill_body_quality"
+description = """
+The skill body contains actionable workflow guidance for log analysis: what patterns
+to look for, how to group errors, what the output format should be. It should read
+like reusable instructions, not a one-time answer.
+"""
+weight = 30
+
+[[rubric.criteria]]
+name        = "deterministic_naming"
+description = """
+The skill name is deterministic kebab-case derived from the capability (e.g.
+log-analyzer, error-pattern-analyzer). Not a random or overly creative name.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "autonomous_creation"
+description = """
+The agent created the skill without excessive clarification — it recognized the
+user's intent ("save this as a reusable template") and acted on it directly.
+"""
+weight = 20

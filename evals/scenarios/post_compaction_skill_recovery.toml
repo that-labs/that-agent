@@ -1,0 +1,133 @@
+name        = "Post-Compaction Skill Recovery"
+description = """
+Tests whether the agent correctly reloads skill references after context compaction.
+
+Sequence:
+1. Agent loads a skill reference via natural language task
+2. Agent uses the skill knowledge to answer correctly
+3. Context is compacted (simulated via session reset + compaction anchor)
+4. Agent is asked a follow-up question requiring the same skill knowledge
+5. Agent should reload the skill (since compaction wiped the tool result)
+
+This validates the post-compaction reminder: "Context was compacted — previously
+loaded skill references are no longer in context. I will reload any skills needed."
+"""
+agent_name   = "default"
+provider     = "anthropic"
+model        = "claude-sonnet-4-6"
+judge_provider = "anthropic"
+judge_model  = "claude-sonnet-4-6"
+max_turns    = 20
+sandbox      = false
+allow_memory = true
+tags         = ["skills", "compaction", "recovery", "progressive-disclosure", "llm-judge"]
+timeout_secs = 180
+
+# ── Pre-cleanup ───────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-compact-skill%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Turn 1: Task that requires loading a skill ────────────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I want to set up a background service that sends me a summary every morning.
+The service will POST results to my agent. Walk me through the integration
+pattern — what endpoints does my agent expose and how should the service format
+its requests?
+"""
+
+# ── Assert: agent loaded a skill reference ────────────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind       = "tool_call_seen"
+tool  = "read_skill"
+min_count  = 1
+
+# ── Simulate compaction: reset session with a summary anchor ──────────────────
+# This mimics what happens after auto-compaction: the agent's conversation
+# history is replaced with a summary + the compaction reminder.
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Inject compaction anchor (what the agent sees after real compaction) ───────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+[Conversation context summary: The user asked about integrating an external service
+that POSTs results to the agent. We discussed the agent's HTTP gateway endpoints
+and how to format inbound requests. The user wanted a morning summary service pattern.]
+
+Quick follow-up on what we discussed: I want to make sure the service doesn't block
+while waiting for my agent to process. Which endpoint should it use and what happens
+if the agent is busy with something else?
+"""
+
+# ── Assert: agent reloaded the skill after compaction ─────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind       = "tool_call_seen"
+tool  = "read_skill"
+min_count  = 2
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-compact-skill%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "initial_skill_load"
+description = """
+In the first turn, the agent recognized the integration question maps to gateway
+endpoint knowledge and loaded a relevant skill reference BEFORE answering.
+High score: read_skill call with relevant skill name precedes the answer.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "initial_answer_quality"
+description = """
+The first answer correctly describes the agent's HTTP endpoints (especially
+/v1/inbound for async processing) with accurate details from the skill reference.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "post_compaction_reload"
+description = """
+After the simulated compaction (session reset + summary anchor), the agent
+recognized it lost the skill content and reloaded it before answering the
+follow-up question. High score: explicit read_skill call in the post-compaction
+turn. Low score: agent answered from the summary context alone without reloading.
+"""
+weight = 35
+
+[[rubric.criteria]]
+name        = "follow_up_accuracy"
+description = """
+The follow-up answer correctly explains async processing (/v1/inbound returns 202,
+doesn't block, batches for next heartbeat) — demonstrating the reloaded skill
+knowledge was used, not just the compaction summary.
+"""
+weight = 20

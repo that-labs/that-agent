@@ -1793,7 +1793,9 @@ pub async fn run_listen(
                                                 "[Conversation context summary: {summary}]"
                                             )),
                                             Message::assistant(
-                                                "Understood, I have the context from our previous conversation.".to_string(),
+                                                "Understood, I have the context from our previous conversation. \
+                                                 Context was compacted — previously loaded skill references are no longer \
+                                                 in context. I will reload any skills needed for my current task.".to_string(),
                                             ),
                                         ];
                                         {
@@ -2339,13 +2341,9 @@ async fn run_agent_for_sender(
         },
     );
     let mem_cfg = agent_memory_config(&agent.name);
-    let task_for_model = append_system_reminder(
-        &enriched_task,
-        &session_id,
-        container.is_some(),
-        &agent.name,
-        &mem_cfg,
-    );
+    let sandbox = container.is_some();
+    let system_reminder = build_system_reminder(&session_id, sandbox, &agent.name, &mem_cfg);
+    let task_for_model = append_memory_bootstrap_reminder(&enriched_task, history.len());
 
     let route_channel_id = if channel_id == "heartbeat" {
         None
@@ -2357,7 +2355,6 @@ async fn run_agent_for_sender(
     } else {
         Some(route_target.clone())
     };
-    let sandbox = container.is_some();
     let steering_for_run = steering.filter(|_| agent.steering);
     let run_result = execute_agent_run_channel(
         &agent,
@@ -2379,6 +2376,7 @@ async fn run_agent_for_sender(
         skill_roots,
         steering_for_run,
         effective_config_path,
+        Some(system_reminder),
     )
     .await;
 
@@ -2405,7 +2403,9 @@ async fn run_agent_for_sender(
                 history = vec![
                     Message::user(format!("[Conversation context summary: {summary}]")),
                     Message::assistant(
-                        "Understood, I have the context from our previous conversation."
+                        "Understood, I have the context from our previous conversation. \
+                         Context was compacted — previously loaded skill references are no longer \
+                         in context. I will reload any skills needed for my current task."
                             .to_string(),
                     ),
                 ];
@@ -2537,7 +2537,9 @@ async fn run_agent_for_sender(
                     let compacted = vec![
                         Message::user(format!("[Conversation context summary: {summary}]")),
                         Message::assistant(
-                            "Understood, I have the context from our previous conversation."
+                            "Understood, I have the context from our previous conversation. \
+                             Context was compacted — previously loaded skill references are no longer \
+                             in context. I will reload any skills needed for my current task."
                                 .to_string(),
                         ),
                     ];

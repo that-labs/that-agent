@@ -56,6 +56,12 @@ pub struct Scenario {
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
 
+    /// Allow memory tools (mem_add, mem_recall, etc.) in this eval.
+    /// Default: false — eval runs must not pollute the agent's persistent memory.
+    /// Set to true for memory-specific eval scenarios that need to test memory behavior.
+    #[serde(default)]
+    pub allow_memory: bool,
+
     /// Ordered list of steps the runner executes.
     #[serde(default)]
     pub steps: Vec<Step>,

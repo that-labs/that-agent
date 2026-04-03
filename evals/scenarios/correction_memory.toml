@@ -1,0 +1,141 @@
+name        = "Correction Memory — User Feedback Stored and Applied"
+description = """
+Tests whether the agent autonomously stores user corrections in persistent memory
+and applies them in a fresh session without being reminded.
+
+Sequence:
+1. Agent does something one way
+2. User corrects the approach
+3. Assert: agent stored the correction via mem_add
+4. Session reset (simulating a new day)
+5. Agent faces the same situation — should apply the correction from memory
+"""
+agent_name   = "default"
+provider     = "anthropic"
+model        = "claude-sonnet-4-6"
+judge_provider = "anthropic"
+judge_model  = "claude-sonnet-4-6"
+max_turns    = 15
+sandbox      = false
+allow_memory = true
+tags         = ["memory", "correction", "feedback", "autonomy", "llm-judge"]
+timeout_secs = 180
+
+# ── Pre-cleanup ───────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-correction%' OR lower(content) LIKE '%yaml over json%' OR lower(content) LIKE '%yaml instead of json%' OR lower(content) LIKE '%prefer yaml%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Turn 1: Agent creates a config file (will likely choose JSON) ─────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Create a simple configuration file at /tmp/eval-app-config with these settings:
+- database_host: localhost
+- database_port: 5432
+- log_level: info
+- max_connections: 20
+
+Pick whatever format you think works best.
+"""
+
+# ── Turn 2: User corrects — must use YAML, not JSON ──────────────────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+No — we always use YAML for config files in this project, never JSON. Please redo
+that in YAML format. And remember this for next time.
+"""
+
+# ── Assert: agent stored the correction in memory ─────────────────────────────
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool = "mem_add"
+min_count = 1
+[[steps.assertions]]
+kind    = "command_succeeds"
+command = """
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+sqlite3 "$DB" "SELECT count(*) FROM memories WHERE lower(content) LIKE '%yaml%' AND created_at > datetime('now', '-5 minutes')" | grep -qE '^[1-9]'
+"""
+
+# ── Session boundary ─────────────────────────────────────────────────────────
+[[steps]]
+type    = "reset_session"
+session = "A"
+
+# ── Turn 3: Same kind of task in a fresh session — should use YAML ────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+I need a config snippet for a new service with these settings:
+- replica_count: 3
+- health_check_interval: 30
+- shutdown_timeout: 15
+
+Pick whatever format works best and show me the content.
+"""
+
+# No filesystem assertion — the agent may not have write access in no-sandbox mode.
+# The judge evaluates whether the response contains YAML (not JSON) format.
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+rm -f /tmp/eval-app-config* /tmp/eval-deploy-config* 2>/dev/null
+DB="$HOME/.that-agent/agents/{{agent_name}}/memory.db"
+if [ -f "$DB" ]; then
+  sqlite3 "$DB" "DELETE FROM memories WHERE tags LIKE '%eval-correction%' OR lower(content) LIKE '%yaml over json%' OR lower(content) LIKE '%yaml instead of json%' OR lower(content) LIKE '%prefer yaml%'" 2>/dev/null
+fi
+true
+"""
+
+# ── Rubric ────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "correction_stored"
+description = """
+After the user said "we always use YAML, never JSON — remember this", the agent
+called mem_add to store the preference. High score: stored immediately with clear
+content (e.g. "user prefers YAML for config files"). Low score: agent acknowledged
+verbally but made no mem_add call.
+"""
+weight = 35
+
+[[rubric.criteria]]
+name        = "correction_applied"
+description = """
+In the fresh session (no conversation history), when given the same kind of task
+(create a config file, pick the format), the agent chose YAML without being reminded.
+High score: YAML output with no hesitation. Low score: defaulted to JSON again or
+asked which format to use.
+"""
+weight = 35
+
+[[rubric.criteria]]
+name        = "memory_recall_before_action"
+description = """
+In the fresh session, the agent called mem_recall before creating the config file,
+demonstrating it checks for prior preferences before making format decisions.
+"""
+weight = 20
+
+[[rubric.criteria]]
+name        = "yaml_file_validity"
+description = """
+The YAML files created are valid and contain the correct key-value pairs as specified.
+"""
+weight = 10

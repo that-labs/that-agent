@@ -12,6 +12,7 @@ max_turns    = 20
 sandbox      = false
 tags         = ["memory", "persistence", "autonomy", "long-lived"]
 timeout_secs = 150
+allow_memory = true
 
 # ── Pre-cleanup: remove any eval-tagged memories from a prior run ──────────────
 [[steps]]

@@ -1,0 +1,168 @@
+name        = "Tool Selection Accuracy — Slim Descriptions"
+description = """
+Tests whether the agent selects the correct specialized tool when given natural
+language tasks, after tool descriptions were slimmed to one-sentence summaries.
+
+The agent should prefer dedicated tools over shell equivalents:
+- code_read over fs_cat/shell_exec for source files
+- code_edit over fs_write for targeted file modifications
+- code_grep over shell_exec grep for content search
+- code_tree over shell_exec find/ls for directory structure
+
+Each turn presents a natural task; assertions verify the right tool was called.
+"""
+agent_name   = "default"
+provider     = "anthropic"
+model        = "claude-sonnet-4-6"
+judge_provider = "anthropic"
+judge_model  = "claude-sonnet-4-6"
+max_turns    = 10
+sandbox      = false
+allow_memory = true
+tags         = ["tools", "selection", "slim-descriptions", "llm-judge"]
+timeout_secs = 120
+
+# ── Setup: create test files the agent can operate on ─────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+WORK="$HOME/.that-agent/agents/{{agent_name}}/eval-tool-sel"
+mkdir -p "$WORK/src"
+cat > "$WORK/src/main.rs" <<'RS'
+fn main() {
+    let timeout = 30;
+    let retries = 3;
+    println!("Starting server with timeout={timeout}s, retries={retries}");
+    authenticate("admin", "secret123");
+    start_server(timeout, retries);
+}
+
+fn authenticate(user: &str, pass: &str) -> bool {
+    println!("Authenticating {user}");
+    user == "admin" && pass == "secret123"
+}
+
+fn start_server(timeout: u32, retries: u32) {
+    println!("Server running (timeout={timeout}, retries={retries})");
+}
+RS
+cat > "$WORK/src/config.rs" <<'RS'
+pub const TIMEOUT: u32 = 30;
+pub const MAX_RETRIES: u32 = 3;
+pub const BASE_URL: &str = "https://api.example.com";
+RS
+true
+"""
+
+# ── Turn 1: Read a source file — should use code_read, not fs_cat ─────────────
+[[steps]]
+type    = "prompt"
+session = "A"
+content = """
+Show me what's in the file at ~/. that-agent/agents/default/eval-tool-sel/src/main.rs —
+I want to see the code with line numbers.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool = "code_read"
+min_count = 1
+
+# ── Turn 2: Edit a value in a file — should use code_edit, not fs_write ───────
+[[steps]]
+type    = "prompt"
+session = "B"
+content = """
+In the file ~/.that-agent/agents/default/eval-tool-sel/src/config.rs, change the
+TIMEOUT constant from 30 to 60. Don't rewrite the whole file, just change that one value.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool = "code_edit"
+min_count = 1
+
+# ── Turn 3: Search for a pattern — should use code_grep, not shell_exec ───────
+[[steps]]
+type    = "prompt"
+session = "C"
+content = """
+Find all the places in ~/.that-agent/agents/default/eval-tool-sel/src/ where the
+authenticate function is called or defined.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool = "code_grep"
+min_count = 1
+
+# ── Turn 4: Show directory structure — should use code_tree, not shell_exec ───
+[[steps]]
+type    = "prompt"
+session = "D"
+content = """
+Show me the file structure of ~/.that-agent/agents/default/eval-tool-sel/ so I can
+see how the project is organized.
+"""
+
+[[steps]]
+type = "assert"
+[[steps.assertions]]
+kind      = "tool_call_seen"
+tool = "code_tree"
+min_count = 1
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+[[steps]]
+type    = "run_command"
+command = """
+rm -rf "$HOME/.that-agent/agents/{{agent_name}}/eval-tool-sel" 2>/dev/null
+true
+"""
+
+# ── Rubric ────────────────────────────────────────────────────────────────────
+[rubric]
+
+[[rubric.criteria]]
+name        = "code_read_over_fs_cat"
+description = """
+When asked to show a source file with line numbers, the agent used code_read
+(which provides line numbers and symbol annotations) rather than fs_cat or
+shell_exec cat. High score: code_read was the first tool attempted.
+Low score: agent used fs_cat, shell_exec cat, or read the file without line numbers.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "code_edit_over_fs_write"
+description = """
+When asked to change a single value in a file, the agent used code_edit with
+a targeted search+replace rather than fs_write to overwrite the entire file.
+High score: surgical code_edit with correct search/replace strings.
+Low score: fs_write that rewrites the whole file, or shell_exec sed.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "code_grep_over_shell"
+description = """
+When asked to find function references, the agent used code_grep (gitignore-aware,
+structured output) rather than shell_exec grep or shell_exec rg.
+High score: code_grep with appropriate pattern. Low score: shell_exec with grep/rg.
+"""
+weight = 25
+
+[[rubric.criteria]]
+name        = "code_tree_over_shell"
+description = """
+When asked to show project structure, the agent used code_tree (gitignore-aware,
+supports ranked mode) rather than shell_exec find, shell_exec ls, or fs_ls.
+High score: code_tree as the primary tool. Low score: shell_exec ls -R or find.
+"""
+weight = 25

@@ -28,6 +28,8 @@ pub struct SkillMeta {
     pub metadata: SkillMetadata,
     /// Pre-stripped body for `always: true` skills — avoids a file re-read in preamble building.
     pub body: Option<String>,
+    /// Reference file names (without extension) discovered under `references/`.
+    pub references: Vec<String>,
 }
 
 /// Return the skills directory path inside the sandbox container for the given agent.
@@ -119,12 +121,14 @@ pub fn discover_skills_local(dir: &Path) -> Vec<SkillMeta> {
                     let body = metadata
                         .always
                         .then(|| strip_frontmatter(&content).to_string());
+                    let references = scan_references(&path);
                     skills.push(SkillMeta {
                         name,
                         description,
                         path: skill_file.display().to_string(),
                         metadata,
                         body,
+                        references,
                     });
                 }
             }
@@ -135,6 +139,30 @@ pub fn discover_skills_local(dir: &Path) -> Vec<SkillMeta> {
 
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
+}
+
+/// Scan the `references/` subdirectory of a skill and return sorted file stems.
+fn scan_references(skill_dir: &Path) -> Vec<String> {
+    let refs_dir = skill_dir.join("references");
+    let entries = match std::fs::read_dir(&refs_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.is_file() {
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort();
+    names
 }
 
 /// Check whether a skill is eligible to run in the current environment.
@@ -363,7 +391,18 @@ pub fn format_skill_preamble(skills: &[SkillMeta], skills_path: &str) -> String 
         );
         out.push_str("### Available Skills\n\n");
         for skill in &catalog_skills {
-            out.push_str(&format!("- **{}**: {}\n", skill.name, skill.description));
+            let refs_hint = match skill.references.len() {
+                0 => String::new(),
+                1..=5 => {
+                    let names = skill.references.join(", ");
+                    format!(" (refs: {names})")
+                }
+                n => format!(" ({n} refs)"),
+            };
+            out.push_str(&format!(
+                "- **{}**: {}{}\n",
+                skill.name, skill.description, refs_hint
+            ));
         }
         out.push('\n');
     }
@@ -531,6 +570,7 @@ metadata:
             path: "/skills/greet/SKILL.md".into(),
             metadata: SkillMetadata::default(),
             body: None,
+            references: vec![],
         }];
         let out = format_skill_preamble(&skills, "/skills");
         assert!(out.contains("**greet**"));
@@ -560,6 +600,7 @@ metadata:
                 ..Default::default()
             },
             body: Some("This body should appear.\n".into()),
+            references: vec![],
         }];
 
         let out = format_skill_preamble(&skills, dir.to_str().unwrap());
@@ -597,6 +638,7 @@ metadata:
                     ..Default::default()
                 },
                 body: Some("Inline body.\n".into()),
+                references: vec![],
             },
             SkillMeta {
                 name: "catalog-skill".into(),
@@ -604,6 +646,7 @@ metadata:
                 path: "/nonexistent/catalog-skill/SKILL.md".into(),
                 metadata: SkillMetadata::default(),
                 body: None,
+                references: vec!["example-ref".into()],
             },
         ];
 

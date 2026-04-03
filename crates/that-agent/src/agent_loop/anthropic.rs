@@ -37,6 +37,7 @@ pub(super) async fn stream_turn(
     api_key: &str,
     model: &str,
     system: &str,
+    system_reminder: Option<&str>,
     messages: &[Message],
     tools: &[ToolDef],
     max_tokens: u32,
@@ -52,6 +53,7 @@ pub(super) async fn stream_turn(
     let effective_caching = prompt_caching;
     let body = build_request(
         system,
+        system_reminder,
         messages,
         tools,
         model,
@@ -413,6 +415,7 @@ async fn parse_json_payload_value(
 #[allow(clippy::too_many_arguments)]
 fn build_request(
     system: &str,
+    system_reminder: Option<&str>,
     messages: &[Message],
     tools: &[ToolDef],
     model: &str,
@@ -437,6 +440,17 @@ fn build_request(
             block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
         }
         system_blocks.push(block);
+    }
+    // Volatile per-turn context (Status.md, WorkingNotes.md, pinned memory).
+    // Emitted as a separate system block WITHOUT cache_control so the preamble
+    // prefix cache stays stable across turns.
+    if let Some(reminder) = system_reminder {
+        if !reminder.is_empty() {
+            system_blocks.push(serde_json::json!({
+                "type": "text",
+                "text": reminder,
+            }));
+        }
     }
 
     // Convert tools to Anthropic format (input_schema instead of parameters).
@@ -813,6 +827,7 @@ mod tests {
         }];
         let body = build_request(
             "system prompt",
+            None,
             &messages,
             &tools,
             "claude-opus-4-6",
@@ -838,6 +853,7 @@ mod tests {
         let messages = vec![Message::user("hello")];
         let body = build_request(
             "system",
+            None,
             &messages,
             &[],
             "claude-sonnet-4-6",
@@ -855,6 +871,7 @@ mod tests {
         let messages = vec![Message::user("hello")];
         let body = build_request(
             "system",
+            None,
             &messages,
             &[],
             "claude-opus-4-6",
@@ -890,6 +907,7 @@ mod tests {
         }];
         let body = build_request(
             "system",
+            None,
             &messages,
             &tools,
             "claude-opus-4-6",
@@ -918,6 +936,7 @@ mod tests {
         let messages = vec![Message::user("hello")];
         let body = build_request(
             "system",
+            None,
             &messages,
             &[],
             "claude-3-5-sonnet-20241022",

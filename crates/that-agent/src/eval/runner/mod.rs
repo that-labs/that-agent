@@ -303,6 +303,7 @@ impl ScenarioRunner {
                         history,
                         Some(&session_id),
                         skill_roots,
+                        scenario.allow_memory,
                     ),
                 )
                 .await
