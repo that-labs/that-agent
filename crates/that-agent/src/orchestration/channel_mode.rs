@@ -881,6 +881,28 @@ pub async fn run_listen(
         }
 
         router.notify_all(&summary).await;
+
+        // Queue an inbound message so the agent gets an LLM turn to reason about
+        // the restart — check its state, review active tasks, and compose a proper
+        // "I'm back" message instead of relying on the static notification alone.
+        {
+            let mut q = inbound_queue.lock().await;
+            q.push(crate::channels::InboundMessage {
+                channel_id: "system".into(),
+                sender_id: "system:restart".into(),
+                text: "You just restarted. Review your current state (Status.md, active tasks, \
+                       pending work) and briefly confirm what you were working on and what's next. \
+                       If nothing was in progress, just acknowledge the restart."
+                    .into(),
+                message_id: None,
+                conversation_id: None,
+                session_hint: None,
+                callback_url: None,
+                deferred: true,
+                attachments: vec![],
+                metadata: None,
+            });
+        }
     }
 
     // ── Boot-time registry hydration ──────────────────────────────────────
