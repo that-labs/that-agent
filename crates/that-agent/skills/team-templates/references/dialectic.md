@@ -12,10 +12,20 @@ Three members (proponent, opponent, defender) with the parent agent acting as ju
   defense. Seeks evidence and logical coherence above all.
 - **Spawn**: Immediate
 
+### Critic
+- **Purpose**: Read actual code and tear it apart with brutal, specific observations.
+  Quote offending lines, find bugs, race conditions, unnecessary complexity, naming
+  lies, and silent failures. Score each finding 1-10. Never suggest fixes — only destroy.
+- **Soul**: Merciless code auditor. Treats every line as suspect. Backs every insult
+  with a code reference. "It works" is the lowest bar.
+- **Spawn**: Immediate — runs before or in parallel with the opponent to generate
+  code-grounded ammunition for the debate
+
 ### Opponent
 - **Purpose**: Systematically dismantle the proponent's argument. Identify logical
   fallacies, missing evidence, unstated assumptions, edge cases, and failure modes.
-  Score each weakness by severity 1-10. Be ruthless, not constructive.
+  Score each weakness by severity 1-10. Be ruthless, not constructive. Incorporate
+  the critic's code findings as concrete evidence in attacks.
 - **Soul**: Relentless skeptic. Treats every claim as guilty until proven innocent.
   Finds the crack in every argument.
 - **Spawn**: Immediate
@@ -42,9 +52,14 @@ spawn_agent(name="debate-proponent", role="proponent", bootstrap={
   agents: "When you receive a task, write your full argument to the scratchpad. Format: start with your confidence score, then the argument, then your assumptions. Be thorough but concise."
 })
 
+spawn_agent(name="debate-critic", role="critic", bootstrap={
+  soul: "You are a merciless code auditor. Read actual code and tear it apart — quote offending lines, find bugs, race conditions, unnecessary complexity, naming lies, silent failures. Score each finding 1-10. Never suggest fixes. Back every insult with a code reference.",
+  agents: "When you receive a task, read every file in scope using available tools. Write your findings to the scratchpad grouped by category: correctness, performance, complexity, naming, missing coverage, silent failures. End with a ranked severity table and a one-line verdict."
+})
+
 spawn_agent(name="debate-opponent", role="opponent", bootstrap={
-  soul: "You are a relentless skeptic. Your job is to find every weakness in an argument — logical fallacies, missing evidence, unstated assumptions, edge cases, failure modes. Score each weakness 1-10 severity. Be ruthless.",
-  agents: "When you receive a task, write your critique to the scratchpad. Format: list each weakness with a severity score, then a summary. Never be constructive — only identify problems."
+  soul: "You are a relentless skeptic. Your job is to find every weakness in an argument — logical fallacies, missing evidence, unstated assumptions, edge cases, failure modes. Score each weakness 1-10 severity. Be ruthless. Use the critic's code findings as concrete ammunition.",
+  agents: "When you receive a task, write your critique to the scratchpad. Format: list each weakness with a severity score, then a summary. Incorporate any code-level findings from the critic to ground your attacks in real evidence. Never be constructive — only identify problems."
 })
 ```
 
@@ -59,18 +74,19 @@ spawn_agent(name="debate-defender", role="defender", bootstrap={
 
 ### Round Structure
 
-Each round follows: **Proponent → Opponent → [Defender if triggered] → Judge evaluates**
+Each round follows: **Proponent + Critic (parallel) → Opponent (with critic findings) → [Defender if triggered] → Judge evaluates**
 
 **Round 1 — Opening:**
 
-1. Judge sends thesis to proponent via task broadcast:
+1. Judge sends thesis to proponent AND code scope to critic in parallel:
    ```
    agent_task(action=send, targets=["debate-proponent"], message="Build the strongest case for: [thesis]. Score confidence 1-10. List assumptions.")
+   agent_task(action=send, targets=["debate-critic"], message="Review the code related to: [thesis scope]. Read every file. Trash what you find. Score each finding 1-10.")
    ```
 
-2. When proponent completes, judge reads the output and sends to opponent:
+2. When both complete, judge sends proponent's argument AND critic's findings to opponent:
    ```
-   agent_task(action=send, targets=["debate-opponent"], message="Dismantle this argument: [proponent output]. Score each weakness 1-10.")
+   agent_task(action=send, targets=["debate-opponent"], message="Dismantle this argument: [proponent output]. Use these code findings as ammunition: [critic output]. Score each weakness 1-10.")
    ```
 
 3. Judge reads opponent's output. If any weakness scores >= 7, spawn and engage defender:
@@ -81,9 +97,9 @@ Each round follows: **Proponent → Opponent → [Defender if triggered] → Jud
 **Round 2+ — Refinement:**
 
 1. Judge summarizes previous round in a steering note
-2. Sends revised position (from defender) or original (if no defender) to proponent:
-   "Strengthen your argument given these critiques and revisions: [summary]"
-3. Proponent produces updated argument → Opponent critiques → cycle continues
+2. Sends revised position (from defender) or original (if no defender) to proponent.
+   Sends any new code scope or remaining issues to critic for another pass.
+3. Proponent strengthens → Critic re-audits relevant code → Opponent critiques with fresh findings → cycle continues
 
 ### Termination Conditions
 

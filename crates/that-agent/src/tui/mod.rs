@@ -123,7 +123,6 @@ pub enum TuiEvent {
     /// A text token from the assistant's streaming response.
     Token(String),
     /// A thinking/reasoning delta from the assistant.
-    #[allow(dead_code)]
     ThinkingDelta(String),
     /// The agent is calling a tool.
     ToolCall {
@@ -241,8 +240,6 @@ pub struct ChatApp<'a> {
     current_streaming: String,
     current_thinking: String,
     debug: bool,
-    #[allow(dead_code)]
-    sandbox: bool,
     human_ask_tx: Option<oneshot::Sender<String>>,
     human_ask_message: String,
     spinner_frame: usize,
@@ -325,7 +322,6 @@ impl<'a> ChatApp<'a> {
             current_streaming: String::new(),
             current_thinking: String::new(),
             debug,
-            sandbox,
             human_ask_tx: None,
             human_ask_message: String::new(),
             spinner_frame: 0,

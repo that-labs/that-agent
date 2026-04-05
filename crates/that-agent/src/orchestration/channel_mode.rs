@@ -732,16 +732,12 @@ pub async fn run_listen(
     let plugin_commands = plugin_registry.enabled_commands();
     let plugin_activations = plugin_registry.enabled_activations();
     let bot_commands = build_bot_commands_list(&found_skills, &plugin_commands);
-    let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
     let preamble = build_preamble(
         &agent_workspace,
         agent,
         sandbox,
         &found_skills,
         &ws_files,
-        0,
-        "listen",
-        &session_summaries,
         Some(&plugin_registry),
         None,
     );
@@ -923,8 +919,6 @@ pub async fn run_listen(
         let mut agent_hot = agent.clone();
         let agent_workspace = agent_workspace.clone();
         let agent_config_path_hot = agent_config_path.clone();
-        let session_mgr = Arc::clone(&session_mgr);
-
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -956,7 +950,6 @@ pub async fn run_listen(
                     let new_plugin_commands = reload_registry.enabled_commands();
                     let new_plugin_activations = reload_registry.enabled_activations();
                     let new_commands = build_bot_commands_list(&new_skills, &new_plugin_commands);
-                    let summaries = session_mgr.session_summaries(5).unwrap_or_default();
                     // Re-read workspace files on hot-reload — agent may have edited them.
                     let new_ws = load_workspace_files(&agent_hot, sandbox);
                     let new_preamble = build_preamble(
@@ -965,9 +958,6 @@ pub async fn run_listen(
                         sandbox,
                         &new_skills,
                         &new_ws,
-                        0,
-                        "listen",
-                        &summaries,
                         Some(&reload_registry),
                         None,
                     );

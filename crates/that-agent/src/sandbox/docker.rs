@@ -32,14 +32,7 @@ pub struct DockerSocketStatus {
     pub gid: Option<u32>,
 }
 
-fn parse_env_bool(name: &str) -> Option<bool> {
-    std::env::var(name).ok().map(|raw| {
-        matches!(
-            raw.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
+use crate::orchestration::config::parse_env_bool;
 
 pub fn docker_socket_status() -> DockerSocketStatus {
     let path = std::env::var(DOCKER_SOCKET_PATH_ENV)

@@ -93,6 +93,12 @@ imagePullSecrets: []
 buildkit:
   enabled: true
   externalHost: ""  # set by parent when sharing its BuildKit with children
+  # Build infrastructure state — forwarded from parent to children so they
+  # skip re-probing. Root agents set these via entrypoint.sh probes.
+  available: ""           # "true"/"false" — whether BuildKit endpoint is reachable
+  dockerAvailable: ""     # "true"/"false" — whether Docker daemon is reachable
+  selectedBackend: ""     # "buildkit"/"docker"/"none" — resolved build backend
+  source: ""              # "buildkit_sidecar"/"buildkit_service" — how BuildKit was found
   storage:
     size: 20Gi
     storageClassName: ""

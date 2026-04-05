@@ -110,7 +110,6 @@ pub async fn run_task(
     }
     let ws = load_workspace_files(agent, sandbox);
     config::set_working_notes(&session_id, ws.working_notes.clone());
-    let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
 
     let skill_roots = skill_roots_for_agent(agent, &plugin_registry);
 
@@ -120,9 +119,6 @@ pub async fn run_task(
         sandbox,
         &found_skills,
         &ws,
-        0,
-        &session_id,
-        &session_summaries,
         Some(&plugin_registry),
         None,
     );
@@ -247,7 +243,6 @@ pub async fn run_chat(
     }
     let ws = load_workspace_files(agent, sandbox);
     config::set_working_notes(&session_id, ws.working_notes.clone());
-    let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
 
     let skill_roots = skill_roots_for_agent(agent, &plugin_registry);
 
@@ -257,9 +252,6 @@ pub async fn run_chat(
         sandbox,
         &found_skills,
         &ws,
-        0,
-        &session_id,
-        &session_summaries,
         Some(&plugin_registry),
         None,
     );

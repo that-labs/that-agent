@@ -75,7 +75,7 @@ fn harden_child_env(cmd: &mut std::process::Command) {
 }
 
 /// Backward-compatible wrapper — delegates to `exec_with_options` with defaults.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn exec(
     command: &str,
     cwd: Option<&str>,

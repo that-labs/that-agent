@@ -69,16 +69,12 @@ pub async fn run_chat_tui(
     let mut ws = load_workspace_files(agent, sandbox);
     set_working_notes(&session_id, ws.working_notes.clone());
     let needs_onboarding = ws.needs_bootstrap();
-    let session_summaries = session_mgr.session_summaries(5).unwrap_or_default();
     let mut preamble = build_preamble(
         &agent_workspace,
         agent,
         sandbox,
         &found_skills,
         &ws,
-        0,
-        &session_id,
-        &session_summaries,
         Some(&plugin_registry),
         None,
     );
@@ -1027,9 +1023,6 @@ pub async fn run_chat_tui(
                                 sandbox,
                                 &found_skills,
                                 &ws,
-                                history.len(),
-                                &session_id,
-                                &session_mgr.session_summaries(5).unwrap_or_default(),
                                 None,
                                 None,
                             );

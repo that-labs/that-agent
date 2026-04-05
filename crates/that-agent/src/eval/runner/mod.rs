@@ -274,7 +274,6 @@ impl ScenarioRunner {
                 // workspace file edits the agent may have made in prior steps).
                 let found_skills = discover_skills(agent, scenario.sandbox);
                 let ws = load_workspace_files(agent, scenario.sandbox);
-                let session_summaries = self.session_mgr.session_summaries(5).unwrap_or_default();
                 let plugin_registry = crate::plugins::PluginRegistry::load(&agent.name);
                 let skill_roots = skill_roots_for_agent(agent, &plugin_registry);
                 let preamble = build_preamble(
@@ -283,9 +282,6 @@ impl ScenarioRunner {
                     scenario.sandbox,
                     &found_skills,
                     &ws,
-                    self.histories.get(&p.session).map(|h| h.len()).unwrap_or(0),
-                    &session_id,
-                    &session_summaries,
                     None,
                     None,
                 );

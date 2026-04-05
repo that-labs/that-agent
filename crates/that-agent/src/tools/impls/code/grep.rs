@@ -108,8 +108,8 @@ pub fn code_grep(
 /// `include` globs restrict matches to files whose relative path matches any pattern.
 /// `exclude` globs reject files whose relative path matches any pattern.
 /// Exclude takes precedence over include.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 pub fn code_grep_filtered(
     root: &Path,
     pattern: &str,

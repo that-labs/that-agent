@@ -38,7 +38,12 @@ Always verify compilation locally in the workspace first (e.g. `cargo check`, `n
 Use the exact endpoints from `<system-reminder>`. Do not guess IPs or scan the network. If the endpoint does not work, report the error to the user or parent agent.
 
 ### Workspace is Source of Truth
-Always write or edit manifest files in your workspace, then apply with `kubectl apply`. Never mutate cluster state directly with `kubectl patch`, `kubectl edit`, `kubectl set`, or `kubectl delete` followed by imperative recreation. This ensures your workspace always reflects the live state and you can re-deploy from disk at any time.
+Always write or edit code and manifest files in your workspace, then apply with `kubectl apply`. Never mutate cluster state directly with `kubectl patch`, `kubectl edit`, `kubectl set`, or `kubectl delete` followed by imperative recreation. This ensures your workspace always reflects the live state and you can re-deploy from disk at any time.
+
+### Anti-patterns — Never Do These
+- **Never write code to /tmp.** Code belongs in your workspace where it is versioned and persistent.
+- **Never store source code or build artifacts in ConfigMaps.** ConfigMaps are for configuration data (env vars, config files). Application code goes: workspace → container image → registry → deployed pod.
+- **Never skip the image build step.** If your service needs code to run, that code must be in a container image, not mounted from a ConfigMap or copied at runtime.
 
 ### Deploy Workflow
 1. Build image and deliver it (push to registry or import to engine)

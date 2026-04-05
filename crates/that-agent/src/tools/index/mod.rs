@@ -69,7 +69,7 @@ impl SymbolIndex {
     }
 
     /// Open an in-memory index (for testing).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self, IndexError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;

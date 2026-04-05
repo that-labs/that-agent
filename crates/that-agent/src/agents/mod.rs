@@ -973,6 +973,26 @@ fn child_helm_sets(
         }
     }
 
+    // Forward build infrastructure availability flags so children know what's
+    // usable without re-probing. Children skip entrypoint.sh and never run the
+    // parallel infrastructure probes — they need these from the parent.
+    if let Ok(val) = std::env::var("THAT_BUILDKIT_AVAILABLE") {
+        sets.push(format!("buildkit.available={val}"));
+    }
+    if let Ok(val) = std::env::var("THAT_DOCKER_DAEMON_AVAILABLE") {
+        sets.push(format!("buildkit.dockerAvailable={val}"));
+    }
+    if let Ok(val) = std::env::var("THAT_IMAGE_BUILD_BACKEND") {
+        if !val.is_empty() {
+            sets.push(format!("buildkit.selectedBackend={val}"));
+        }
+    }
+    if let Ok(val) = std::env::var("THAT_BUILDKIT_SOURCE") {
+        if !val.is_empty() {
+            sets.push(format!("buildkit.source={val}"));
+        }
+    }
+
     // Forward registry push endpoint so children know where to push images.
     if let Ok(push_ep) = std::env::var("THAT_K8S_REGISTRY_PUSH_ENDPOINT")
         .or(std::env::var("THAT_SANDBOX_K8S_REGISTRY_PUSH_ENDPOINT"))
