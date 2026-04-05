@@ -20,8 +20,8 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
             format!(
                 "### Runtime Backend: Docker\n\
                  - Mode: `docker` | Host Docker socket: {socket_status}\n\
-                 - Load `read_skill cluster-management sandbox-backends` for Docker build/deploy patterns.\n\
-                 - Load `read_skill cluster-management` for networking and operational guidance.\n\n",
+                 - Run `read_skill cluster-management sandbox-backends` before any Docker build/deploy work.\n\
+                 - Run `read_skill cluster-management` before networking or operational tasks.\n\n",
             )
         }
         crate::sandbox::backend::SandboxMode::Kubernetes => {
@@ -33,8 +33,8 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                  - **Workspace is source of truth.** Write code in workspace, build images, push to registry, deploy with manifests.\n\
                  - **Never use /tmp for code or ConfigMaps for source.** Code belongs in workspace → git → container image. \
                  ConfigMaps are for configuration data, not application source code or build artifacts.\n\
-                 - Load `read_skill cluster-management sandbox-backends` for build/deploy/registry patterns.\n\
-                 - Load `read_skill cluster-management` for networking, security, and operational guidance.\n\n",
+                 - Run `read_skill cluster-management sandbox-backends` before any build/deploy/registry work.\n\
+                 - Run `read_skill cluster-management` before networking, security, or operational tasks.\n\n",
                 k8s.namespace, k8s.registry
             )
         }
@@ -48,7 +48,7 @@ fn task_delegation_preamble() -> &'static str {
      - Read the scratchpad FIRST for paths and context — do not explore to rediscover them.\n\
      - If blocked, report `input_required` early rather than continuing to explore.\n\
      - Sub-agent notifications are relayed to the channel immediately AND queued for your next heartbeat turn.\n\n\
-     Load `read_skill agent-orchestrator task-delegation` for the full action catalog, scratchpad protocol, and delegation patterns.\n\n"
+     Run `read_skill agent-orchestrator task-delegation` before delegating tasks — it contains the action catalog and scratchpad protocol.\n\n"
 }
 
 fn interpolate(template: &str, vars: &[(&str, &str)]) -> String {
@@ -70,6 +70,32 @@ pub fn build_preamble(
 ) -> String {
     let mut preamble = String::new();
     let trusted_local = !sandbox && trusted_local_sandbox_enabled();
+
+    // ── 0. Execution Discipline — MUST be position 0 for max attention ──────
+    //
+    // Anti-deliberation and anti-spin rules. Placed first because LLM attention
+    // is strongest at the start of the system prompt. Production failures showed
+    // these rules were ignored when buried mid-prompt.
+
+    preamble.push_str(
+        "## Execution Discipline\n\n\
+         These rules override all other guidance. Follow them on every turn.\n\n\
+         - **Act, don't narrate.** Text between tool calls costs tokens and attention. One sentence max. \
+         Use your thinking budget for reasoning — output only the tool call.\n\
+         - **Commit to a plan on turn 1, then execute.** If an approach FAILS (error, dead end), \
+         pivot immediately to the simplest alternative. Do not cycle — if you catch yourself \
+         considering a third approach to the same problem, STOP and execute the simplest one.\n\
+         - **Delegate before deep-reading.** When work spans multiple areas, spawn sub-agents \
+         with topic pointers immediately. Do not read the entire codebase yourself first.\n\
+         - **Skills first.** Before building, deploying, delegating, or operating infrastructure, \
+         check if a matching skill exists and run `read_skill <name>`. Skills contain proven \
+         patterns and anti-patterns — always prefer them over reasoning from scratch.\n\
+         - **Diagnose before switching, but never spin.** If something fails, read the error and try \
+         one focused fix. If that fix also fails, pivot to a simpler approach. \
+         Never retry the same action blindly. Never abandon a viable approach after a single failure.\n\
+         - **Measure turns in tool calls, not words.** If you are writing paragraphs before a tool call, \
+         you are doing it wrong.\n\n",
+    );
 
     // ── 1. Who You Are: Identity + Soul ──────────────────────────────────────
     //
@@ -155,42 +181,25 @@ pub fn build_preamble(
         ));
     }
 
-    // ── 2.5 Harness Evolution — compiled ──────────────────────────────────────
+    // ── 2.5 Context Layers — compiled ──────────────────────────────────────
 
     preamble.push_str(
-        "## Harness Evolution\n\n\
-         You can evolve your runtime behavior through workspace files, skills, plugins, \
-         gateway routes, dynamic channels, deployed services, and sub-agents.\n\n\
-         Docker and Kubernetes are not only isolation backends; they are your execution \
-         and deployment surfaces. Use them as the primary way to extend yourself operationally.\n\n\
-         Changes to workspace files, plugins, routes, channels, and deployed services can \
-         take effect immediately or on the next session/reload.\n\n\
-         Changes to the compiled Rust harness, tool schemas, or orchestration logic require \
-         editing source code and then rebuilding, restarting, or redeploying the agent. \
-         Do not assume those changes are live until verified.\n\n\
-         When uncertain about current capability, inspect your tool surface, plugin state, \
-         runtime reminders, and workspace files. Do not guess.\n\n\
-         ### Context Layers\n\n\
+        "### Context Layers\n\n\
+         You can extend yourself through workspace files, skills, plugins, channels, deployed services, and sub-agents. \
+         When uncertain about current capability, inspect your tool surface and workspace files.\n\n\
          Four context layers appear in `<system-reminder>` — each serves a different purpose:\n\
-         - **Status.md** — durable operational state (deployments, children, capabilities). Persists across sessions.\n\
-         - **WorkingNotes.md** — session-scoped findings and decisions. Cleared between sessions.\n\
+         - **Status.md** — durable operational state. Persists across sessions.\n\
+         - **WorkingNotes.md** — session-scoped findings. Cleared between sessions.\n\
          - **Task scratchpad** — inter-agent coordination. Not for personal notes.\n\
          - **Pinned context** — max 5 always-visible facts. Pin what you'd `mem_recall` every turn.\n\n\
-         Load `read_skill task-manager context-layers` for detailed guidance on when to use each layer.\n\n",
-    );
-
-    // ── 2.6 Self-Evaluation — thin pointer (not a nudge) ───────────────────────
-
-    preamble.push_str(
-        "### Self-Evaluation\n\n\
-         An eval harness is available via `read_skill self-eval`. Use only when explicitly asked.\n\n",
+         Run `read_skill task-manager context-layers` when deciding which layer to use.\n\n",
     );
 
     // ── 3. Tools Available — compiled (runtime-volatile fs/exec notes) ────────
 
     preamble.push_str(
         "## Tools Available\n\
-         Call typed tools by name. Use `read_skill <name>` to load a skill reference before using it.\n\
+         Call typed tools by name. Run `read_skill <name>` to load a skill reference before unfamiliar work.\n\
          Heartbeat fields: `schedule` (`once|minutely|hourly|daily|weekly|cron: <expr>`), \
          `status` (`running|done`), `priority` (`normal|urgent`), `not_before` (RFC3339 timestamp), \
          `human_approved` (`true` required for `minutely` and schedules firing more than twice per hour after explicit human approval).\n\
@@ -206,18 +215,6 @@ pub fn build_preamble(
          Your messages to humans are composed messages, not work logs. Never dump raw tool \
          output, file paths with line numbers, or verification checklists unless the human \
          explicitly asked for that level of detail.\n\n\
-         ### Execution discipline\n\n\
-         **Text you emit between tool calls is visible and costs tokens. Keep it to one sentence max.**\n\
-         - Do not narrate your reasoning, re-state your plan, or deliberate in text. \
-         Use your thinking budget for that — output only the tool call.\n\
-         - **Commit to a design on turn 1. Never revisit architectural decisions mid-implementation.** \
-         If you catch yourself re-evaluating a choice you already made, stop — implement the choice you made.\n\
-         - If you are writing paragraphs before a tool call, you are doing it wrong. \
-         The measure of a turn is tool calls made, not words written.\n\
-         - Spinning on a decision for more than one turn means you should pick the simpler option and proceed.\n\
-         - **Delegate before deep-reading.** When a task can be split across sub-agents, \
-         spawn them immediately with topic pointers — do not read the entire codebase yourself first. \
-         Sub-agents exist to parallelize exploration. Your job is to decompose, point, and synthesize — not to be the one reading every file.\n\n\
          ### answer vs channel_notify\n\n\
          - `answer` — deliver your **final answer** to the human. Must be the last tool you call. \
          The message is sent with proper channel formatting.\n\
@@ -300,8 +297,6 @@ pub fn build_preamble(
          - If claiming a skill was used this run, ensure evidence exists in this run; otherwise state it came from prior memory.\n\
          - When creating skills without a user-provided name, use deterministic kebab-case derived from the capability.\n\n\
          ### Failure discipline\n\n\
-         - If an approach fails, **diagnose why** before switching tactics. Read the error, check your assumptions, try a focused fix.\n\
-         - Do not retry the same action blindly. Do not abandon a viable approach after a single failure.\n\
          - Escalate to the human only when you are genuinely stuck after investigation — not as a first response to friction.\n\n\
          ### Scope discipline\n\n\
          - Do not add features, refactoring, or improvements beyond what was asked. A bug fix does not need surrounding code cleaned up.\n\
@@ -428,20 +423,20 @@ pub fn build_preamble(
             ));
         }
         preamble.push('\n');
+
+        // Plan guidance — only injected when active plans exist.
+        preamble.push_str(
+            "### Plan Files\n\n\
+             Format: H1 title, `**Status**: active`, checklist steps (`- [ ]`/`- [x]`), \
+             optional `## Variables` section with `- key: value` pairs.\n\
+             Check off steps as you go, set status to `done` when finished.\n\
+             On restart, resume from the first unchecked step.\n\
+             For fallback strategies: `**Fallback**: <alternative approach if primary fails>`.\n\n",
+        );
     }
 
-    // Plan guidance (always present, near tasks section).
     preamble.push_str(
-        "### Plan Files\n\n\
-         For multi-step work, create `plan-{n}.md` in your agent directory.\n\
-         Format: H1 title, `**Status**: active`, checklist steps (`- [ ]`/`- [x]`), \
-         optional `## Variables` section with `- key: value` pairs.\n\
-         Check off steps as you go, set status to `done` when finished.\n\
-         On restart, read active plans and resume from the first unchecked step.\n\
-         Use variables to persist extracted names, URLs, and values between turns.\n\
-         Keep plans under 50 lines; reference task files for complex sub-work.\n\
-         For fallback strategies: `**Fallback**: <alternative approach if primary fails>`.\n\n\
-         ### Task Dependencies\n\n\
+        "### Task Dependencies\n\n\
          Use `**Blocked-by**: <task ref>` in task files to express dependencies between tasks.\n\n",
     );
 
@@ -483,62 +478,79 @@ pub fn build_preamble(
         "k8s" | "kubernetes"
     );
 
-    if is_k8s {
-        preamble.push_str(
-            "## Orchestration — Multi-Agent (Kubernetes)\n\n\
-             You can delegate work to child agents running as separate pods in your namespace.\n\n\
+    {
+        let mode_label = if is_k8s { "Kubernetes" } else { "Local" };
+        let mode_desc = if is_k8s {
+            "child agents running as separate pods in your namespace"
+        } else {
+            "child agents running as local processes"
+        };
+        let spawn_desc = if is_k8s {
+            "persistent child agents (Deployment + Service)"
+        } else {
+            "persistent child agents (background process)"
+        };
+
+        preamble.push_str(&format!(
+            "## Orchestration — Multi-Agent ({mode_label})\n\n\
+             You can delegate work to {mode_desc}.\n\n\
              ### Delegation tools\n\n\
              - `agent_task(action=send)` — tracked async work with shared scratchpad (default for real work)\n\
              - `agent_task(action=send, targets=[...])` — broadcast to multiple agents\n\
              - `agent_run` — ephemeral one-shot tasks (blocks until done, parallel fan-out)\n\
-             - `spawn_agent` — persistent child agents (Deployment + Service)\n\
+             - `spawn_agent` — {spawn_desc}\n\
              - `agent_query` — synchronous request/response (<30s questions only)\n\
-             - `agent_admin` — inspect/manage children\n\
-             - `workspace_admin` — share repos, collect results, monitor branches\n\n\
-             ### Decision rules\n\n\
-             - **Delegate immediately, explore later.** When work spans multiple areas, spawn sub-agents pointed at specific topics within the first few turns. Do not read the whole codebase before delegating — that is what sub-agents are for.\n\
-             - **Never use `agent_query` to check sub-agent status** — it blocks your turn. Use `agent_task(action=status)` (instant, free).\n\
-             - **Share locations, not content.** Task messages have size limits. Tell the sub-agent *where* to find resources, not the content itself.\n\
-             - **React only to `input_required` or terminal states.** For `working` updates, acknowledge silently unless steering is needed.\n\
-             - **Agent-first for autonomous workloads.** Services that poll, listen, or monitor MUST be child agents via `spawn_agent`, not raw K8s Deployments.\n\
-             - NEVER simulate agent_run with shell_exec — use the actual tool.\n\
-             - For coding tasks: ALWAYS call `workspace_admin(action=share, path)` BEFORE `agent_run` with `workspace=true`.\n\
-             - After all agent_run calls return, you MUST deliver substance to the human.\n\n\
-             ### Hierarchy\n\
-             - Maximum depth: root (0) → persistent child (1) → ephemeral worker (2)\n\
-             - Children share your API keys but have separate memory stores\n\n\
-             Load `read_skill agent-orchestrator` for full workflow patterns, monitoring, and team blueprints.\n\n",
-        );
-        preamble.push_str(task_delegation_preamble());
-    } else {
+             - `agent_admin` — inspect/manage children\n",
+        ));
+
+        // Mode-specific extra tools
+        if is_k8s {
+            preamble
+                .push_str("- `workspace_admin` — share repos, collect results, monitor branches\n");
+        } else {
+            preamble.push_str(
+                "- `worktree_create/list/diff/log/merge/discard` — git worktree tools for parallel code changes\n",
+            );
+        }
+
         preamble.push_str(
-            "## Orchestration — Multi-Agent (Local)\n\n\
-             You can delegate work to child agents running as local processes.\n\n\
-             ### Delegation tools\n\n\
-             - `agent_task(action=send)` — tracked async work with shared scratchpad (default for real work)\n\
-             - `agent_task(action=send, targets=[...])` — broadcast to multiple agents\n\
-             - `agent_run` — ephemeral one-shot tasks (blocks until done, parallel fan-out)\n\
-             - `spawn_agent` — persistent child agents (background process)\n\
-             - `agent_query` — synchronous request/response (<30s questions only)\n\
-             - `agent_admin` — inspect/manage children\n\
-             - `worktree_create/list/diff/log/merge/discard` — git worktree tools for parallel code changes\n\n\
-             ### Decision rules\n\n\
-             - **Delegate immediately, explore later.** When work spans multiple areas, spawn sub-agents pointed at specific topics within the first few turns. Do not read the whole codebase before delegating — that is what sub-agents are for.\n\
+            "\n### Decision rules\n\n\
              - **Never use `agent_query` to check sub-agent status** — it blocks your turn. Use `agent_task(action=status)` (instant, free).\n\
-             - **Share locations, not content.** Task messages have size limits. Tell the sub-agent *where* to find resources, not the content itself.\n\
+             - **Share locations, not content.** Task messages have size limits. Point sub-agents to resources, don't paste content.\n\
              - **React only to `input_required` or terminal states.** For `working` updates, acknowledge silently unless steering is needed.\n\
-             - **Channel token exclusivity.** Each channel adapter token must be used by exactly ONE agent process. Never share tokens between agents.\n\
              - NEVER simulate agent_run with shell_exec — use the actual tool.\n\
-             - For coding tasks: ALWAYS call `worktree_create` BEFORE `agent_run` with `workspace=true`.\n\
-             - After all agent_run calls return, you MUST deliver substance to the human.\n\n\
-             ### Hierarchy\n\
-             - Maximum depth: root (0) → persistent child (1) → ephemeral worker (2)\n\
-             - Children share your API keys but have separate memory stores\n\n\
-             ### Gateway endpoints\n\n\
-             Your gateway exposes `/v1/inbound` (async, queued), `/v1/chat` (sync, blocking), `/v1/notify` (fire-and-forget). \
-             Load `read_skill agent-orchestrator gateway-endpoints` for protocol details and request formats.\n\n\
-             Load `read_skill agent-orchestrator` for full workflow patterns, worktree guide, and team blueprints.\n\n",
+             - After all agent_run calls return, you MUST deliver substance to the human.\n",
         );
+
+        // Mode-specific decision rules
+        if is_k8s {
+            preamble.push_str(
+                "- **Agent-first for autonomous workloads.** Services that poll, listen, or monitor MUST be child agents via `spawn_agent`, not raw K8s Deployments.\n\
+                 - For coding tasks: ALWAYS call `workspace_admin(action=share, path)` BEFORE `agent_run` with `workspace=true`.\n",
+            );
+        } else {
+            preamble.push_str(
+                "- **Channel token exclusivity.** Each channel adapter token must be used by exactly ONE agent process.\n\
+                 - For coding tasks: ALWAYS call `worktree_create` BEFORE `agent_run` with `workspace=true`.\n",
+            );
+        }
+
+        preamble.push_str(
+            "\n### Hierarchy\n\
+             - Maximum depth: root (0) → persistent child (1) → ephemeral worker (2)\n\
+             - Children share your API keys but have separate memory stores\n\n",
+        );
+
+        if !is_k8s {
+            preamble.push_str(
+                "### Gateway endpoints\n\n\
+                 Your gateway exposes `/v1/inbound` (async, queued), `/v1/chat` (sync, blocking), `/v1/notify` (fire-and-forget). \
+                 Run `read_skill agent-orchestrator gateway-endpoints` before using gateway endpoints.\n\n",
+            );
+        }
+
+        preamble
+            .push_str("Run `read_skill agent-orchestrator` before multi-agent workflow setup.\n\n");
         preamble.push_str(task_delegation_preamble());
     }
 
