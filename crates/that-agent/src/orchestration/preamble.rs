@@ -214,7 +214,10 @@ pub fn build_preamble(
          If you catch yourself re-evaluating a choice you already made, stop — implement the choice you made.\n\
          - If you are writing paragraphs before a tool call, you are doing it wrong. \
          The measure of a turn is tool calls made, not words written.\n\
-         - Spinning on a decision for more than one turn means you should pick the simpler option and proceed.\n\n\
+         - Spinning on a decision for more than one turn means you should pick the simpler option and proceed.\n\
+         - **Delegate before deep-reading.** When a task can be split across sub-agents, \
+         spawn them immediately with topic pointers — do not read the entire codebase yourself first. \
+         Sub-agents exist to parallelize exploration. Your job is to decompose, point, and synthesize — not to be the one reading every file.\n\n\
          ### answer vs channel_notify\n\n\
          - `answer` — deliver your **final answer** to the human. Must be the last tool you call. \
          The message is sent with proper channel formatting.\n\
@@ -493,6 +496,7 @@ pub fn build_preamble(
              - `agent_admin` — inspect/manage children\n\
              - `workspace_admin` — share repos, collect results, monitor branches\n\n\
              ### Decision rules\n\n\
+             - **Delegate immediately, explore later.** When work spans multiple areas, spawn sub-agents pointed at specific topics within the first few turns. Do not read the whole codebase before delegating — that is what sub-agents are for.\n\
              - **Never use `agent_query` to check sub-agent status** — it blocks your turn. Use `agent_task(action=status)` (instant, free).\n\
              - **Share locations, not content.** Task messages have size limits. Tell the sub-agent *where* to find resources, not the content itself.\n\
              - **React only to `input_required` or terminal states.** For `working` updates, acknowledge silently unless steering is needed.\n\
@@ -519,6 +523,7 @@ pub fn build_preamble(
              - `agent_admin` — inspect/manage children\n\
              - `worktree_create/list/diff/log/merge/discard` — git worktree tools for parallel code changes\n\n\
              ### Decision rules\n\n\
+             - **Delegate immediately, explore later.** When work spans multiple areas, spawn sub-agents pointed at specific topics within the first few turns. Do not read the whole codebase before delegating — that is what sub-agents are for.\n\
              - **Never use `agent_query` to check sub-agent status** — it blocks your turn. Use `agent_task(action=status)` (instant, free).\n\
              - **Share locations, not content.** Task messages have size limits. Tell the sub-agent *where* to find resources, not the content itself.\n\
              - **React only to `input_required` or terminal states.** For `working` updates, acknowledge silently unless steering is needed.\n\
