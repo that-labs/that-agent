@@ -1,35 +1,12 @@
 use std::path::Path;
 
+use super::config::trusted_local_sandbox_enabled;
 use super::discovery::{format_plugin_preamble, format_plugin_preamble_full};
 use crate::config::AgentDef;
 use crate::plans;
-use crate::session::SessionSummary;
 use crate::skills;
 use crate::tasks;
 use crate::workspace::{self, WorkspaceFiles};
-
-fn parse_env_bool(name: &str) -> Option<bool> {
-    std::env::var(name).ok().map(|raw| {
-        matches!(
-            raw.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
-fn trusted_local_sandbox_enabled() -> bool {
-    if let Some(explicit) = parse_env_bool("THAT_TRUSTED_LOCAL_SANDBOX") {
-        return explicit;
-    }
-    matches!(
-        std::env::var("THAT_SANDBOX_MODE")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "k8s" | "kubernetes"
-    )
-}
 
 fn sandbox_backend_preamble(agent: &AgentDef) -> String {
     match crate::sandbox::backend::SandboxMode::from_env() {
@@ -53,7 +30,9 @@ fn sandbox_backend_preamble(agent: &AgentDef) -> String {
                 "### Runtime Backend: Kubernetes\n\
                  - Mode: `kubernetes` | Namespace: `{}` | Registry: `{}`\n\
                  - Image delivery and build backend are in `<system-reminder>` — check before building.\n\
-                 - **Workspace is source of truth.** Edit manifests in workspace, apply with `kubectl apply`.\n\
+                 - **Workspace is source of truth.** Write code in workspace, build images, push to registry, deploy with manifests.\n\
+                 - **Never use /tmp for code or ConfigMaps for source.** Code belongs in workspace → git → container image. \
+                 ConfigMaps are for configuration data, not application source code or build artifacts.\n\
                  - Load `read_skill cluster-management sandbox-backends` for build/deploy/registry patterns.\n\
                  - Load `read_skill cluster-management` for networking, security, and operational guidance.\n\n",
                 k8s.namespace, k8s.registry
@@ -80,16 +59,12 @@ fn interpolate(template: &str, vars: &[(&str, &str)]) -> String {
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn build_preamble(
     workspace_path: &Path,
     agent: &AgentDef,
     sandbox: bool,
     skills: &[skills::SkillMeta],
     ws: &WorkspaceFiles,
-    _history_len: usize,
-    _session_id: &str,
-    _session_summaries: &[SessionSummary],
     plugin_registry: Option<&crate::plugins::PluginRegistry>,
     cluster_registry: Option<&crate::plugins::cluster::ClusterRegistry>,
 ) -> String {
@@ -660,9 +635,6 @@ mod tests {
             true,
             &[],
             &WorkspaceFiles::default(),
-            0,
-            "session",
-            &[],
             None,
             None,
         );

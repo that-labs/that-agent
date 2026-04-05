@@ -130,7 +130,7 @@ pub fn restore_checkpoint(checkpoint: &GitCheckpoint) -> Result<(), GitError> {
 }
 
 /// Check if a path is inside a git repository.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn is_git_repo(path: &Path) -> bool {
     git(path, &["rev-parse", "--show-toplevel"]).is_ok()
 }

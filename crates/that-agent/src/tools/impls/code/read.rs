@@ -204,8 +204,7 @@ fn build_range_content(lines: &[&str], start: usize, end: usize) -> String {
 }
 
 /// Get all symbols from a file without full read.
-#[cfg(feature = "code-analysis")]
-#[allow(dead_code)]
+#[cfg(all(feature = "code-analysis", test))]
 pub fn get_symbols(path: &Path) -> Result<Vec<parse::Symbol>, ReadError> {
     let parsed = parse::parse_file(path)?;
     Ok(parsed.symbols)

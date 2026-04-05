@@ -23,7 +23,6 @@ pub struct SkillMeta {
     pub name: String,
     pub description: String,
     /// Absolute path to the SKILL.md file (for display and TUI skill view).
-    #[allow(dead_code)]
     pub path: String,
     pub metadata: SkillMetadata,
     /// Pre-stripped body for `always: true` skills — avoids a file re-read in preamble building.

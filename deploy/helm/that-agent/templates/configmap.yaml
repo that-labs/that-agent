@@ -26,12 +26,21 @@ data:
   THAT_GATEWAY_ADDR: {{ .Values.gateway.addr | quote }}
   THAT_PROMPT_CACHE_ALERTS: "1"
   THAT_SANDBOX_REMOVE_ON_EXIT: "0"
-  THAT_BUILDKIT_SOURCE: "buildkit_service"
+  THAT_BUILDKIT_SOURCE: {{ .Values.buildkit.source | default "buildkit_service" | quote }}
   THAT_BUILDKIT_GC_KEEPSTORAGE_MB: "15360"
   THAT_BUILDKIT_WAIT_SECONDS: "3"
   THAT_IMAGE_BUILD_BACKEND_PREFERRED: "buildkit"
   THAT_DOCKER_DAEMON_WAIT_SECONDS: "3"
   THAT_DOCKER_DAEMON_SOURCE: ""
+  {{- if .Values.buildkit.available }}
+  THAT_BUILDKIT_AVAILABLE: {{ .Values.buildkit.available | quote }}
+  {{- end }}
+  {{- if .Values.buildkit.dockerAvailable }}
+  THAT_DOCKER_DAEMON_AVAILABLE: {{ .Values.buildkit.dockerAvailable | quote }}
+  {{- end }}
+  {{- if .Values.buildkit.selectedBackend }}
+  THAT_IMAGE_BUILD_BACKEND: {{ .Values.buildkit.selectedBackend | quote }}
+  {{- end }}
   THAT_SHELL_EXEC_ALLOW_OTEL: "0"
   THAT_AGENT_CHILD_CPU_LIMIT: {{ .Values.childAgents.cpuLimit | quote }}
   THAT_AGENT_CHILD_MEMORY_LIMIT: {{ .Values.childAgents.memoryLimit | quote }}

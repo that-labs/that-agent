@@ -24,9 +24,7 @@ use tokio::process::Command;
 use crate::agent_loop::types::ToolDef;
 use crate::agent_loop::ToolContext;
 use crate::config::AgentDef;
-
-const TRUSTED_LOCAL_SANDBOX_ENV: &str = "THAT_TRUSTED_LOCAL_SANDBOX";
-const SANDBOX_MODE_ENV: &str = "THAT_SANDBOX_MODE";
+use crate::orchestration::config::{parse_env_bool, trusted_local_sandbox_enabled};
 
 // ─── Error type ───────────────────────────────────────────────────────────────
 
@@ -60,15 +58,6 @@ fn sandbox_required() -> ToolError {
         THAT_TRUSTED_LOCAL_SANDBOX=1 in a trusted Kubernetes pod."
             .to_string(),
     )
-}
-
-fn parse_env_bool(name: &str) -> Option<bool> {
-    std::env::var(name).ok().map(|raw| {
-        matches!(
-            raw.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
 }
 
 fn parse_first_command_tokens(command: &str) -> Vec<String> {
@@ -138,20 +127,6 @@ Use a prebuilt image or a Kubernetes-native build job."
         ),
         _ => None,
     }
-}
-
-pub fn trusted_local_sandbox_enabled() -> bool {
-    if let Some(explicit) = parse_env_bool(TRUSTED_LOCAL_SANDBOX_ENV) {
-        return explicit;
-    }
-    matches!(
-        std::env::var(SANDBOX_MODE_ENV)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "k8s" | "kubernetes"
-    )
 }
 
 fn container_path(path: &str) -> String {
@@ -3574,6 +3549,9 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::Mutex;
+
+    const TRUSTED_LOCAL_SANDBOX_ENV: &str = "THAT_TRUSTED_LOCAL_SANDBOX";
+    const SANDBOX_MODE_ENV: &str = "THAT_SANDBOX_MODE";
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 

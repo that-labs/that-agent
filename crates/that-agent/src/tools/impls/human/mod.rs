@@ -82,16 +82,6 @@ pub fn ask(
     }
 }
 
-/// Submit an approval request (used by tools that need approval).
-#[allow(dead_code)]
-pub fn request_approval(
-    _contract: ContractType,
-    message: &str,
-    timeout_secs: Option<u64>,
-) -> Result<AskResult, Box<dyn std::error::Error>> {
-    ask(message, timeout_secs)
-}
-
 /// Approve a pending request by ID.
 pub fn approve(
     request_id: &str,

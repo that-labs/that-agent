@@ -21,7 +21,6 @@ fn is_stop_word(word: &str) -> bool {
 /// - Filtering out stop words
 /// - Appending `*` for prefix matching (e.g. "argo" → "argo*" matches "ArgoCD")
 /// - Joining remaining terms with OR
-#[allow(dead_code)]
 pub fn preprocess_query(query: &str) -> String {
     let cleaned: String = query
         .chars()
@@ -114,7 +113,7 @@ pub fn jaccard_similarity(a: &[String], b: &[String]) -> f64 {
 }
 
 /// Build an FTS5 query that matches any of the given tags.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn tags_query(tags: &[String]) -> String {
     tags.iter()
         .map(|t| format!("tags:\"{}\"", t.trim()))
