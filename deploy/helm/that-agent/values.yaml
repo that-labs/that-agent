@@ -27,6 +27,8 @@ agent:
   identityConfigMap: ""
   # Parent agent name (set automatically for children)
   parent: ""
+  # Agent depth (0=root, 1=child, 2=ephemeral worker). Set automatically.
+  depth: ""
   # Agent role label (explorer, developer, reviewer, etc.)
   agentRole: ""
   # Parent gateway (set automatically for children)

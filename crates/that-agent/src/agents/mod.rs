@@ -924,6 +924,8 @@ fn child_helm_sets(
     let provider = std::env::var("THAT_AGENT_PROVIDER").unwrap_or_default();
     let cpu_limit = std::env::var("THAT_AGENT_CHILD_CPU_LIMIT").unwrap_or_else(|_| "1".into());
     let mem_limit = std::env::var("THAT_AGENT_CHILD_MEMORY_LIMIT").unwrap_or_else(|_| "2Gi".into());
+    let parent_depth = crate::orchestration::config::parse_env_u8("THAT_AGENT_DEPTH", 0);
+    let child_depth = parent_depth + 1;
 
     let mut sets = vec![
         format!("agent.name={name}"),
@@ -938,6 +940,7 @@ fn child_helm_sets(
         format!("agent.resources.limits.memory={mem_limit}"),
         "agent.resources.requests.cpu=200m".to_string(),
         "agent.resources.requests.memory=256Mi".to_string(),
+        format!("agent.depth={child_depth}"),
         "secrets.existingSecret=that-agent-secrets".to_string(),
         "accessLevel=namespace-admin".to_string(),
         "gitServer.enabled=false".to_string(),
@@ -1096,7 +1099,7 @@ pub async fn run_ephemeral_agent_k8s(
     model: Option<&str>,
     workspace: bool,
     timeout_secs: u64,
-    _bootstrap: Option<&crate::workspace::GoldBootstrap>,
+    bootstrap: Option<&crate::workspace::GoldBootstrap>,
     identity_configmap: Option<&str>,
 ) -> Result<serde_json::Value> {
     let ns = k8s_namespace();
@@ -1135,6 +1138,13 @@ pub async fn run_ephemeral_agent_k8s(
         identity_configmap,
     );
 
+    // Pass bootstrap context so ephemeral workers get identity, soul, and domain context
+    if let Some(bs) = bootstrap {
+        if let Ok(json) = serde_json::to_string(bs) {
+            sets.push(format!("agent.goldBootstrap={}", json.replace(',', "\\,")));
+        }
+    }
+
     // Ephemeral-specific settings
     // Escape commas/special chars in task text by using a file-based approach
     // For now, truncate task to avoid shell escaping issues with --set
@@ -1146,7 +1156,9 @@ pub async fn run_ephemeral_agent_k8s(
         .replace('\\', "\\\\")
         .replace(',', "\\,");
     sets.push(format!("agent.job.task={safe_task}"));
-    sets.push("agent.job.ttlSeconds=300".to_string());
+    // TTL must exceed the agent_run timeout so K8s doesn't kill the pod
+    // while the parent still thinks it's working. Add 60s buffer for cleanup.
+    sets.push(format!("agent.job.ttlSeconds={}", timeout_secs + 60));
     sets.push("networkPolicy.enabled=false".to_string());
 
     if workspace {
