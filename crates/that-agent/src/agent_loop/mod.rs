@@ -99,14 +99,11 @@ const CONTEXT_WARN_FRACTION: f64 = 0.70;
 const CONTEXT_CRITICAL_FRACTION: f64 = 0.85;
 
 /// Tools classified as exploration — consecutive turns using only these trigger anti-loop.
-const EXPLORATION_TOOLS: &[&str] = &[
-    "shell_exec",
-    "fs_ls",
-    "fs_cat",
-    "code_grep",
-    "code_search",
-    "code_read",
-];
+/// NOTE: shell_exec is intentionally excluded. It is a general-purpose execution tool
+/// used for building, deploying, and operating — not just exploration. Including it
+/// caused the anti-loop to block legitimate build/deploy work (e.g., kubectl apply,
+/// buildctl build, curl health checks) for 10+ consecutive turns.
+const EXPLORATION_TOOLS: &[&str] = &["fs_ls", "fs_cat", "code_grep", "code_search", "code_read"];
 /// Soft warning threshold — inject a nudge after this many exploration-only turns.
 const EXPLORATION_SOFT_LIMIT: u32 = 8;
 /// Hard limit — force the agent to stop exploring and report.

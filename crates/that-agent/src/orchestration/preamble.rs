@@ -516,10 +516,17 @@ pub fn build_preamble(
         preamble.push_str(
             "\n### Decision rules\n\n\
              - **Never use `agent_query` to check sub-agent status** — it blocks your turn. Use `agent_task(action=status)` (instant, free).\n\
-             - **Share locations, not content.** Task messages have size limits. Point sub-agents to resources, don't paste content.\n\
              - **React only to `input_required` or terminal states.** For `working` updates, acknowledge silently unless steering is needed.\n\
              - NEVER simulate agent_run with shell_exec — use the actual tool.\n\
-             - After all agent_run calls return, you MUST deliver substance to the human.\n",
+             - After all agent_run calls return, you MUST deliver substance to the human.\n\n\
+             ### How to write task messages\n\n\
+             Sub-agents start fresh — they have no memory of your conversation. Every task message must be self-contained:\n\
+             - **State the goal in one sentence.** What is done when this task is done?\n\
+             - **Give paths, not content.** Tell the agent WHERE things are (namespace, pod, file path, git repo), \
+             never paste file contents into the task message.\n\
+             - **Name the deliverable.** What should the agent produce? A deployed service, a file, a report?\n\
+             - **Set boundaries.** What should the agent NOT touch or change?\n\
+             - Keep it under 500 words — longer tasks get ignored at the tail.\n",
         );
 
         // Mode-specific decision rules
@@ -568,7 +575,8 @@ pub fn build_preamble(
             "### Agent Hierarchy\n\
              - **Parent agent**: {parent}\n\
              - You are a depth-{agent_depth} agent. Maximum: root (0) → persistent child (1) → ephemeral worker (2).\n\
-             - Focus on your assigned scope. Read the task scratchpad before exploring.\n\
+             - **Your task message IS your mission.** Execute it directly — do not re-interpret, expand scope, or explore beyond what was asked.\n\
+             - Read the task scratchpad before exploring — it has paths and context the parent already gathered.\n\
              - **Scratchpad protocol**: `agent_task(action=scratchpad_read, task_id)` to read; \
              `agent_task(action=scratchpad_write, task_id, note, section, kind)` to write. \
              `section=\"header\"` for stable context, `section=\"activity\"` for progress.\n\
