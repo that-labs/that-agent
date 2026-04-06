@@ -55,12 +55,16 @@ data:
   {{- else if .Values.buildkit.externalHost }}
   BUILDKIT_HOST: {{ .Values.buildkit.externalHost | quote }}
   {{- end }}
+  THAT_AGENT_IMAGE: "{{ .Values.agent.image.repository }}:{{ include "that-agent.imageTag" . }}"
   THAT_HELM_CHART: {{ .Values.helmChart | default "oci://ghcr.io/that-labs/helm/that-agent" | quote }}
   THAT_HELM_CHART_VERSION: {{ .Chart.Version | quote }}
   THAT_GIT_WEBHOOK_URL: ""
   THAT_GIT_AUTO_MERGE: "false"
   THAT_AGENT_PARENT: {{ .Values.agent.parent | quote }}
   THAT_AGENT_ROLE: {{ .Values.agent.agentRole | quote }}
+  {{- if .Values.agent.depth }}
+  THAT_AGENT_DEPTH: {{ .Values.agent.depth | toString | quote }}
+  {{- end }}
   {{- if ne .Values.agent.role "root" }}
   THAT_PARENT_GATEWAY_URL: {{ .Values.agent.parentGatewayUrl | default "" | quote }}
   THAT_PARENT_GATEWAY_TOKEN: {{ .Values.agent.parentGatewayToken | default "" | quote }}
